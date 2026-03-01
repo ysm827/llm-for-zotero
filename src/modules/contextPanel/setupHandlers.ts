@@ -119,6 +119,7 @@ import {
   getActiveContextAttachmentFromTabs,
   addSelectedTextContext,
   applySelectedTextPreview,
+  formatSelectedTextContextPageLabel,
   getSelectedTextContextEntries,
   getSelectedTextContexts,
   getSelectedTextExpandedIndex,
@@ -129,6 +130,7 @@ import {
   setSelectedTextExpandedIndex,
 } from "./contextResolution";
 import {
+  flashPageInLivePdfReader,
   locateCurrentSelectionInLivePdfReader,
   locateQuoteInLivePdfReader,
   type LivePdfSelectionLocateResult,
@@ -179,6 +181,7 @@ import type {
   ReasoningOption,
   AdvancedModelParams,
   PaperContextRef,
+  SelectedTextContext,
 } from "./types";
 import type { ReasoningLevel as LLMReasoningLevel } from "../../utils/llmClient";
 import type { ReasoningConfig as LLMReasoningConfig } from "../../utils/llmClient";
@@ -7900,6 +7903,125 @@ export function setupHandlers(body: Element, initialItem?: Zotero.Item | null) {
     });
   }
 
+  const resolveSelectedContextTargetItemId = (
+    selectedContext: SelectedTextContext,
+  ): number | null => {
+    const explicitContextItemId = Number(selectedContext.contextItemId);
+    if (Number.isFinite(explicitContextItemId) && explicitContextItemId > 0) {
+      return Math.floor(explicitContextItemId);
+    }
+
+    const paperContextItemId = Number(selectedContext.paperContext?.contextItemId);
+    if (Number.isFinite(paperContextItemId) && paperContextItemId > 0) {
+      return Math.floor(paperContextItemId);
+    }
+
+    const activeContextItem = getActiveContextAttachmentFromTabs();
+    const activeContextItemId = Number(activeContextItem?.id || 0);
+    if (Number.isFinite(activeContextItemId) && activeContextItemId > 0) {
+      return Math.floor(activeContextItemId);
+    }
+
+    const currentPanelItemId = Number(
+      item?.isAttachment?.() && item.attachmentContentType === "application/pdf"
+        ? item.id
+        : 0,
+    );
+    if (Number.isFinite(currentPanelItemId) && currentPanelItemId > 0) {
+      return Math.floor(currentPanelItemId);
+    }
+
+    const basePaper = resolveCurrentPaperBaseItem();
+    if (!basePaper) return null;
+    const attachments = basePaper.getAttachments?.() || [];
+    for (const attachmentId of attachments) {
+      const attachment = Zotero.Items.get(attachmentId) || null;
+      if (attachment?.attachmentContentType === "application/pdf") {
+        return attachment.id;
+      }
+    }
+    return null;
+  };
+
+  const navigateSelectedTextContextToPage = async (
+    selectedContext: SelectedTextContext,
+  ): Promise<boolean> => {
+    const rawPageIndex = Number(selectedContext.pageIndex);
+    if (!Number.isFinite(rawPageIndex) || rawPageIndex < 0) return false;
+    const pageIndex = Math.floor(rawPageIndex);
+    const pageLabel = selectedContext.pageLabel || `${pageIndex + 1}`;
+    const targetItemId = resolveSelectedContextTargetItemId(selectedContext);
+    if (!targetItemId) return false;
+
+    const location = {
+      pageIndex,
+      pageLabel,
+    };
+    const activeReader = getActiveReaderForSelectedTab();
+    const activeReaderItemId = Number(activeReader?._item?.id || activeReader?.itemID || 0);
+    if (
+      Number.isFinite(activeReaderItemId) &&
+      activeReaderItemId === targetItemId &&
+      typeof activeReader?.navigate === "function"
+    ) {
+      await activeReader.navigate(location);
+      await flashPageInLivePdfReader(activeReader, pageIndex);
+      return true;
+    }
+
+    const readerApi = Zotero.Reader as
+      | {
+          open?: (
+            itemID: number,
+            location?: _ZoteroTypes.Reader.Location,
+          ) => Promise<void | _ZoteroTypes.ReaderInstance>;
+        }
+      | undefined;
+    if (typeof readerApi?.open === "function") {
+      const openedReader = await readerApi.open(targetItemId, location);
+      const nextReader =
+        openedReader ||
+        ((Zotero.Reader as
+          | {
+              getByTabID?: (tabID: string | number) => _ZoteroTypes.ReaderInstance;
+            }
+          | undefined)?.getByTabID &&
+          (() => {
+            const tabs = (Zotero as unknown as {
+              Tabs?: { selectedID?: string | number | null };
+            }).Tabs;
+            const selectedTabId = tabs?.selectedID;
+            return selectedTabId !== undefined && selectedTabId !== null
+              ? Zotero.Reader.getByTabID?.(`${selectedTabId}`) || null
+              : null;
+          })()) ||
+        getActiveReaderForSelectedTab();
+      if (nextReader) {
+        await flashPageInLivePdfReader(nextReader, pageIndex);
+      }
+      return true;
+    }
+
+    const pane = Zotero.getActiveZoteroPane?.() as
+      | {
+          viewPDF?: (
+            itemID: number,
+            location: _ZoteroTypes.Reader.Location,
+          ) => Promise<void>;
+        }
+      | undefined;
+    if (typeof pane?.viewPDF === "function") {
+      await pane.viewPDF(targetItemId, location);
+      const nextReader = getActiveReaderForSelectedTab();
+      if (nextReader) {
+        await flashPageInLivePdfReader(nextReader, pageIndex);
+      }
+      return true;
+    }
+
+    return false;
+  };
+
   if (selectedContextList) {
     selectedContextList.addEventListener("click", (e: Event) => {
       if (!item) return;
@@ -7952,6 +8074,33 @@ export function setupHandlers(body: Element, initialItem?: Zotero.Item | null) {
         index >= selectedContexts.length
       )
         return;
+      const targetContext = selectedContexts[index];
+      const isJumpablePdfContext =
+        targetContext?.source === "pdf" &&
+        Number.isFinite(targetContext.pageIndex) &&
+        (targetContext.pageIndex as number) >= 0;
+      if (isJumpablePdfContext) {
+        void navigateSelectedTextContextToPage(targetContext)
+          .then((navigated) => {
+            if (!status) return;
+            if (navigated) {
+              setStatus(
+                status,
+                `Jumped to ${formatSelectedTextContextPageLabel(targetContext) || "page"}`,
+                "ready",
+              );
+              return;
+            }
+            setStatus(status, "Could not open the page for this text context", "error");
+          })
+          .catch((error) => {
+            ztoolkit.log("LLM: Failed to navigate selected text context", error);
+            if (status) {
+              setStatus(status, "Could not open the page for this text context", "error");
+            }
+          });
+        return;
+      }
       const expandedIndex = getSelectedTextExpandedIndex(
         textContextKey,
         selectedContexts.length,

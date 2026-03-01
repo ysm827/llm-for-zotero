@@ -58,6 +58,7 @@ import {
   applySelectedTextPreview,
 } from "./contextResolution";
 import { ensurePDFTextCached } from "./pdfContext";
+import { getCurrentSelectionPageLocationFromReader } from "./livePdfSelectionLocator";
 import {
   getFirstSelectionFromReader,
   getSelectionFromDocument,
@@ -460,11 +461,16 @@ export function registerReaderSelectionTracking() {
           const selectedPaperContext = isGlobalConversation
             ? readerPaperContext
             : null;
+          const selectedTextLocation = getCurrentSelectionPageLocationFromReader(
+            event.reader as any,
+            effectiveSelectedText,
+          );
           const added = appendSelectedTextContextForItem(
             conversationKey,
             effectiveSelectedText,
             "pdf",
             selectedPaperContext,
+            selectedTextLocation,
           );
           let refreshedPanels = 0;
           for (const [

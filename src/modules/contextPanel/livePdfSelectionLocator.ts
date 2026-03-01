@@ -7,6 +7,13 @@ export type LivePdfPageText = {
   text: string;
 };
 
+export type LivePdfSelectionPageLocation = {
+  contextItemId?: number;
+  pageIndex: number;
+  pageLabel?: string;
+  pagesScanned: number;
+};
+
 export type LivePdfSelectionLocateStatus =
   | "resolved"
   | "ambiguous"
@@ -63,6 +70,8 @@ const PAGE_CONTAINER_SELECTOR = [
   "[data-page-number]",
   "[data-page-index]",
 ].join(", ");
+const PAGE_FLASH_STYLE_ID = "llmforzotero-page-flash-style";
+const PAGE_FLASH_CLASS = "llmforzotero-page-flash";
 
 const SEARCH_WORD_PATTERN = /[a-z0-9]+/g;
 const COMMON_SEARCH_STOP_WORDS = new Set([
@@ -388,6 +397,59 @@ function getPageLabelFromElement(element: Element | null | undefined): string | 
 
 function countRenderedPages(doc: Document): number {
   return doc.querySelectorAll(PAGE_CONTAINER_SELECTOR).length;
+}
+
+function getPageElementByIndex(doc: Document, pageIndex: number): Element | null {
+  const pageElements = Array.from(doc.querySelectorAll(PAGE_CONTAINER_SELECTOR)).filter(
+    isElementNode,
+  );
+  for (const pageElement of pageElements) {
+    if (parsePageIndexFromElement(pageElement) === pageIndex) {
+      return pageElement;
+    }
+  }
+  return null;
+}
+
+function ensurePageFlashStyle(doc: Document): void {
+  if (doc.getElementById(PAGE_FLASH_STYLE_ID)) return;
+  const style = doc.createElement("style");
+  style.id = PAGE_FLASH_STYLE_ID;
+  style.textContent = `
+    @keyframes llmforzoteroPageFlashPulse {
+      0%, 100% {
+        box-shadow: 0 0 0 0 rgba(37, 99, 235, 0);
+        background-color: rgba(37, 99, 235, 0);
+      }
+      25%, 75% {
+        box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.95);
+        background-color: rgba(59, 130, 246, 0.10);
+      }
+      50% {
+        box-shadow: 0 0 0 6px rgba(96, 165, 250, 0.35);
+        background-color: rgba(96, 165, 250, 0.16);
+      }
+    }
+
+    .${PAGE_FLASH_CLASS} {
+      animation: llmforzoteroPageFlashPulse 0.75s ease-in-out 2;
+      border-radius: 6px;
+    }
+  `;
+  (doc.head || doc.documentElement || doc).appendChild(style);
+}
+
+function flashPageElement(pageElement: Element): void {
+  const doc = pageElement.ownerDocument;
+  if (!doc) return;
+  ensurePageFlashStyle(doc);
+  pageElement.classList.remove(PAGE_FLASH_CLASS);
+  void (pageElement as HTMLElement).getBoundingClientRect();
+  pageElement.classList.add(PAGE_FLASH_CLASS);
+  const win = doc.defaultView;
+  win?.setTimeout(() => {
+    pageElement.classList.remove(PAGE_FLASH_CLASS);
+  }, 1700);
 }
 
 function getSelectionPageElement(doc: Document): Element | null {
@@ -953,6 +1015,67 @@ function locateCurrentSelectionFromDom(
     );
   }
   return null;
+}
+
+export function getCurrentSelectionPageLocationFromReader(
+  reader: any,
+  selectionText: string,
+): LivePdfSelectionPageLocation | null {
+  const normalizedSelection = normalizeLocatorText(selectionText);
+  if (!normalizedSelection) return null;
+
+  const docs = collectReaderSelectionDocuments(reader);
+  const contextItemId = (() => {
+    const raw = Number(reader?._item?.id || reader?.itemID || 0);
+    return Number.isFinite(raw) && raw > 0 ? Math.floor(raw) : undefined;
+  })();
+
+  for (const doc of docs) {
+    const selectedText = sanitizeText(
+      doc.defaultView?.getSelection?.()?.toString() || "",
+    ).trim();
+    if (!selectedText) continue;
+    if (normalizeLocatorText(selectedText) !== normalizedSelection) continue;
+    const selectionPageElement = getSelectionPageElement(doc);
+    const pageIndex = parsePageIndexFromElement(selectionPageElement);
+    if (pageIndex === null) continue;
+    return {
+      contextItemId,
+      pageIndex,
+      pageLabel: getPageLabelFromElement(selectionPageElement),
+      pagesScanned: countRenderedPages(doc),
+    };
+  }
+
+  return null;
+}
+
+export async function flashPageInLivePdfReader(
+  reader: any,
+  pageIndex: number,
+): Promise<boolean> {
+  if (!Number.isFinite(pageIndex) || pageIndex < 0) return false;
+  const normalizedPageIndex = Math.floor(pageIndex);
+  const startedAt = Date.now();
+  while (Date.now() - startedAt < 1800) {
+    const app = getPdfViewerApplication(reader);
+    const pageView = app?.pdfViewer?.getPageView?.(normalizedPageIndex);
+    const directPageElement = isElementNode(pageView?.div) ? pageView.div : null;
+    if (directPageElement) {
+      flashPageElement(directPageElement);
+      return true;
+    }
+
+    const docs = collectReaderSelectionDocuments(reader);
+    for (const doc of docs) {
+      const pageElement = getPageElementByIndex(doc, normalizedPageIndex);
+      if (!pageElement) continue;
+      flashPageElement(pageElement);
+      return true;
+    }
+    await delay(40);
+  }
+  return false;
 }
 
 function extractPageTextFromElement(pageElement: Element): string {

@@ -61,7 +61,13 @@ export function buildPinnedSelectedTextKey(
   const paperKey = paperContext
     ? `${Math.floor(paperContext.itemId)}:${Math.floor(paperContext.contextItemId)}`
     : "-";
-  return `${source}\u241f${paperKey}\u241f${text}`;
+  const contextItemId = Number.isFinite(context.contextItemId)
+    ? Math.max(0, Math.floor(context.contextItemId!))
+    : 0;
+  const pageIndex = Number.isFinite(context.pageIndex)
+    ? Math.max(0, Math.floor(context.pageIndex!))
+    : -1;
+  return `${source}\u241f${paperKey}\u241f${contextItemId}\u241f${pageIndex}\u241f${text}`;
 }
 
 export function buildPinnedImageKey(imageUrl: string): string {

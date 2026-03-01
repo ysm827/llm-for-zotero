@@ -56,6 +56,36 @@ describe("pinnedContextController", function () {
     assert.isTrue(isPinnedSelectedText(pinned, ownerId, contextC));
   });
 
+  it("treats identical selected text on different pages as distinct keys", function () {
+    const pinned = new Map<number, Set<string>>();
+    const ownerId = 12;
+    const pageOne: SelectedTextContext = {
+      text: "same snippet",
+      source: "pdf",
+      contextItemId: 200,
+      pageIndex: 0,
+      pageLabel: "1",
+    };
+    const pageTwo: SelectedTextContext = {
+      text: "same snippet",
+      source: "pdf",
+      contextItemId: 200,
+      pageIndex: 1,
+      pageLabel: "2",
+    };
+
+    assert.isTrue(togglePinnedSelectedText(pinned, ownerId, pageOne));
+    assert.isTrue(togglePinnedSelectedText(pinned, ownerId, pageTwo));
+    assert.isTrue(isPinnedSelectedText(pinned, ownerId, pageOne));
+    assert.isTrue(isPinnedSelectedText(pinned, ownerId, pageTwo));
+
+    const retained = retainPinnedSelectedTextContexts(pinned, ownerId, [
+      pageOne,
+      pageTwo,
+    ]);
+    assert.deepEqual(retained, [pageOne, pageTwo]);
+  });
+
   it("retains pinned images by deterministic key", function () {
     const pinned = new Map<number, Set<string>>();
     const ownerId = 13;

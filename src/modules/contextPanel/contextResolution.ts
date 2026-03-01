@@ -6,6 +6,7 @@ import {
 } from "./textUtils";
 import {
   normalizePaperContextRefs,
+  normalizePositiveInt,
   normalizeSelectedTextSource,
 } from "./normalizers";
 import { MAX_SELECTED_TEXT_CONTEXTS } from "./constants";
@@ -28,11 +29,18 @@ import {
   getFirstSelectionFromReader,
   getSelectionFromDocument,
 } from "./readerSelection";
+import { getCurrentSelectionPageLocationFromReader } from "./livePdfSelectionLocator";
 import {
   buildPinnedSelectedTextKey,
   isPinnedSelectedText,
   prunePinnedSelectedTextKeys,
 } from "./setupHandlers/controllers/pinnedContextController";
+
+type SelectedTextPageLocation = {
+  contextItemId?: number;
+  pageIndex?: number;
+  pageLabel?: string;
+};
 
 export function getActiveReaderForSelectedTab(): any | null {
   const tabs = getZoteroTabsState();
@@ -404,6 +412,9 @@ function normalizeSelectedTextContexts(value: unknown): SelectedTextContext[] {
         text?: unknown;
         source?: unknown;
         paperContext?: unknown;
+        contextItemId?: unknown;
+        pageIndex?: unknown;
+        pageLabel?: unknown;
       };
       const normalizedText = normalizeSelectedText(
         typeof typed.text === "string" ? typed.text : "",
@@ -412,10 +423,25 @@ function normalizeSelectedTextContexts(value: unknown): SelectedTextContext[] {
       const normalizedPaperContext = normalizePaperContextRefs([
         typed.paperContext,
       ])[0];
+      const contextItemId = normalizePositiveInt(typed.contextItemId) || undefined;
+      const rawPageIndex = Number(typed.pageIndex);
+      const pageIndex =
+        Number.isFinite(rawPageIndex) && rawPageIndex >= 0
+          ? Math.floor(rawPageIndex)
+          : undefined;
+      const pageLabel =
+        typeof typed.pageLabel === "string" && typed.pageLabel.trim()
+          ? typed.pageLabel.trim()
+          : pageIndex !== undefined
+            ? `${pageIndex + 1}`
+            : undefined;
       out.push({
         text: normalizedText,
         source: normalizeSelectedTextSource(typed.source),
         paperContext: normalizedPaperContext,
+        contextItemId,
+        pageIndex,
+        pageLabel,
       });
     }
     return out;
@@ -446,6 +472,67 @@ export function setSelectedTextContexts(itemId: number, texts: string[]): void {
   setSelectedTextContextEntries(itemId, normalized);
 }
 
+function normalizeSelectedTextPageLocation(
+  location?: SelectedTextPageLocation | null,
+): SelectedTextPageLocation | undefined {
+  if (!location || typeof location !== "object") return undefined;
+  const contextItemId = normalizePositiveInt(location.contextItemId) || undefined;
+  const rawPageIndex = Number(location.pageIndex);
+  const pageIndex =
+    Number.isFinite(rawPageIndex) && rawPageIndex >= 0
+      ? Math.floor(rawPageIndex)
+      : undefined;
+  const pageLabel =
+    typeof location.pageLabel === "string" && location.pageLabel.trim()
+      ? location.pageLabel.trim()
+      : pageIndex !== undefined
+        ? `${pageIndex + 1}`
+        : undefined;
+  if (
+    contextItemId === undefined &&
+    pageIndex === undefined &&
+    pageLabel === undefined
+  ) {
+    return undefined;
+  }
+  return {
+    contextItemId,
+    pageIndex,
+    pageLabel,
+  };
+}
+
+function buildSelectedTextContext(
+  text: string,
+  source: SelectedTextSource,
+  paperContext?: PaperContextRef | null,
+  location?: SelectedTextPageLocation | null,
+): SelectedTextContext {
+  const normalizedPaperContext = normalizePaperContextRefs([paperContext])[0];
+  const normalizedLocation = normalizeSelectedTextPageLocation(location);
+  return {
+    text,
+    source: normalizeSelectedTextSource(source),
+    paperContext: normalizedPaperContext,
+    contextItemId: normalizedLocation?.contextItemId,
+    pageIndex: normalizedLocation?.pageIndex,
+    pageLabel: normalizedLocation?.pageLabel,
+  };
+}
+
+export function formatSelectedTextContextPageLabel(
+  context: SelectedTextContext,
+): string | null {
+  if (!Number.isFinite(context.pageIndex) || (context.pageIndex as number) < 0) {
+    return null;
+  }
+  const label =
+    typeof context.pageLabel === "string" && context.pageLabel.trim()
+      ? context.pageLabel.trim()
+      : `${Math.floor(context.pageIndex as number) + 1}`;
+  return `page ${label}`;
+}
+
 export function setSelectedTextContextEntries(
   itemId: number,
   contexts: SelectedTextContext[],
@@ -464,34 +551,35 @@ export function appendSelectedTextContextForItem(
   text: string,
   source: SelectedTextSource = "pdf",
   paperContext?: PaperContextRef | null,
+  location?: SelectedTextPageLocation | null,
 ): boolean {
   const normalizedText = normalizeSelectedText(text || "");
   if (!normalizedText) return false;
   const existingContexts = getSelectedTextContextEntries(itemId);
-  const normalizedPaperContext = normalizePaperContextRefs([paperContext])[0];
   const dedupeKey = (entry: SelectedTextContext): string => {
     const paperKey = entry.paperContext
       ? `${entry.paperContext.itemId}:${entry.paperContext.contextItemId}`
       : "-";
-    return `${entry.text}\u241f${paperKey}`;
+    const contextItemId = Number.isFinite(entry.contextItemId)
+      ? Math.floor(entry.contextItemId as number)
+      : 0;
+    const pageIndex = Number.isFinite(entry.pageIndex)
+      ? Math.floor(entry.pageIndex as number)
+      : -1;
+    return `${entry.text}\u241f${paperKey}\u241f${contextItemId}\u241f${pageIndex}`;
   };
-  const incomingKey = dedupeKey({
-    text: normalizedText,
-    source: normalizeSelectedTextSource(source),
-    paperContext: normalizedPaperContext,
-  });
+  const incomingEntry = buildSelectedTextContext(
+    normalizedText,
+    source,
+    paperContext,
+    location,
+  );
+  const incomingKey = dedupeKey(incomingEntry);
   if (existingContexts.some((entry) => dedupeKey(entry) === incomingKey)) {
     return false;
   }
   if (existingContexts.length >= MAX_SELECTED_TEXT_CONTEXTS) return false;
-  setSelectedTextContextEntries(itemId, [
-    ...existingContexts,
-    {
-      text: normalizedText,
-      source: normalizeSelectedTextSource(source),
-      paperContext: normalizedPaperContext,
-    },
-  ]);
+  setSelectedTextContextEntries(itemId, [...existingContexts, incomingEntry]);
   selectedTextPreviewExpandedCache.delete(itemId);
   return true;
 }
@@ -532,6 +620,7 @@ type AddSelectedTextContextOptions = {
   focusInput?: boolean;
   source?: SelectedTextSource;
   paperContext?: PaperContextRef | null;
+  location?: SelectedTextPageLocation | null;
 };
 
 export function addSelectedTextContext(
@@ -554,6 +643,7 @@ export function addSelectedTextContext(
     normalizedText,
     options.source || "pdf",
     options.paperContext,
+    options.location,
   );
   if (!appended) {
     if (status) setStatus(status, "Text Context up to 5", "error");
@@ -615,11 +705,23 @@ export function applySelectedTextPreview(body: Element, itemId: number) {
       selectedContext,
     );
     const contextLabel =
-      isGlobalConversation && selectedSource === "pdf"
-        ? formatOpenChatTextContextLabel(selectedContext.paperContext)
-        : selectedContexts.length > 1 && index > 0
-          ? `Text Context (${index + 1})`
-          : "Text Context";
+      (() => {
+        const pageLabel = formatSelectedTextContextPageLabel(selectedContext);
+        if (selectedSource === "pdf" && pageLabel) {
+          if (isGlobalConversation) {
+            const paperLabel = formatOpenChatTextContextLabel(
+              selectedContext.paperContext,
+            );
+            return paperLabel ? `${paperLabel} - ${pageLabel}` : pageLabel;
+          }
+          return pageLabel;
+        }
+        return isGlobalConversation && selectedSource === "pdf"
+          ? formatOpenChatTextContextLabel(selectedContext.paperContext)
+          : selectedContexts.length > 1 && index > 0
+            ? `Text Context (${index + 1})`
+            : "Text Context";
+      })();
 
     const previewBox = ownerDoc.createElement("div");
     previewBox.className = "llm-selected-context";
@@ -663,10 +765,29 @@ export function applySelectedTextPreview(body: Element, itemId: number) {
       "llm-selected-context-meta-corrupted",
       isCorrupted,
     );
-    previewMeta.title = isExpanded
-      ? "Collapse text context"
-      : "Expand text context";
-    previewMeta.setAttribute("aria-expanded", isExpanded ? "true" : "false");
+    const pageLabel = formatSelectedTextContextPageLabel(selectedContext);
+    const isJumpablePdfContext =
+      selectedSource === "pdf" &&
+      Number.isFinite(selectedContext.pageIndex) &&
+      (selectedContext.pageIndex as number) >= 0;
+    previewMeta.title = isJumpablePdfContext
+      ? `Jump to ${pageLabel || "page"}`
+      : isExpanded
+        ? "Collapse text context"
+        : "Expand text context";
+    previewMeta.setAttribute(
+      "aria-expanded",
+      isJumpablePdfContext ? "false" : isExpanded ? "true" : "false",
+    );
+    previewMeta.dataset.contextPageIndex =
+      Number.isFinite(selectedContext.pageIndex)
+        ? `${Math.floor(selectedContext.pageIndex as number)}`
+        : "";
+    previewMeta.dataset.contextPageLabel = selectedContext.pageLabel || "";
+    previewMeta.dataset.contextItemId =
+      Number.isFinite(selectedContext.contextItemId)
+        ? `${Math.floor(selectedContext.contextItemId as number)}`
+        : "";
 
     const previewClear = ownerDoc.createElement("button");
     previewClear.type = "button";
@@ -720,11 +841,14 @@ export function includeSelectedTextFromReader(
     typeof options?.targetItemId === "number" && options.targetItemId > 0
       ? Math.floor(options.targetItemId)
       : item.id;
+  const reader = getActiveReaderForSelectedTab();
+  const location = getCurrentSelectionPageLocationFromReader(reader, selectedText);
   return addSelectedTextContext(body, targetItemId, selectedText, {
     noSelectionStatusText: "No text selected in reader",
     successStatusText: "Selected text included",
     focusInput: true,
     source: "pdf",
     paperContext: options?.paperContext,
+    location,
   });
 }

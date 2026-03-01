@@ -5,6 +5,9 @@ export type SelectedTextContext = {
   text: string;
   source: SelectedTextSource;
   paperContext?: PaperContextRef;
+  contextItemId?: number;
+  pageIndex?: number;
+  pageLabel?: string;
 };
 
 export interface Message {
