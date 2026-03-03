@@ -761,7 +761,36 @@ async function resolvePageForCitationButton(params: {
     );
     if (!orderedCandidates.length) return;
 
+    // Fast path: if the citation carried an explicit page number and we can
+    // match it to a high-confidence candidate, trust the number directly.
+    // This MUST run before the cache check so stale rank-0 entries (e.g.
+    // whatever PDF is currently open in the reader) cannot shadow the result.
+    const eagerExplicitPage = sanitizeText(
+      params.button.dataset.citationPageLabel || "",
+    ).trim();
+    if (eagerExplicitPage) {
+      const bestRanked = orderedCandidates.find(
+        (c) => rankCandidateForCitation(params.extractedCitation, c) > 0,
+      );
+      if (bestRanked) {
+        const pageIndex = Math.max(0, parseInt(eagerExplicitPage, 10) - 1);
+        citationPageCache.set(
+          buildCitationCacheKey(bestRanked.contextItemId, params.quoteText),
+          { pageIndex, pageLabel: eagerExplicitPage },
+        );
+        updateCitationButtonPage(
+          params.button,
+          params.displayCitationLabel,
+          eagerExplicitPage,
+        );
+        return;
+      }
+    }
+
+    // Cache check — skip rank-0 candidates to avoid stale entries from
+    // whatever PDF happens to be open winning over the actual cited paper.
     for (const candidate of orderedCandidates) {
+      if (rankCandidateForCitation(params.extractedCitation, candidate) === 0) continue;
       const cacheKey = buildCitationCacheKey(candidate.contextItemId, params.quoteText);
       const cached = citationPageCache.get(cacheKey);
       if (cached?.pageLabel) {
@@ -774,11 +803,17 @@ async function resolvePageForCitationButton(params: {
       }
     }
 
+    // Live-reader text search — only run if the active reader IS a rank > 0
+    // candidate for this citation.  If the wrong paper is open (rank 0) we
+    // must not search it: a false-positive match would cache that paper and
+    // hijack subsequent click navigation.
     const activeReader = getActiveReaderForSelectedTab();
     const activeReaderItemId = getReaderItemId(activeReader);
     if (activeReader && activeReaderItemId) {
       const matchingCandidate = orderedCandidates.find(
-        (candidate) => candidate.contextItemId === activeReaderItemId,
+        (candidate) =>
+          candidate.contextItemId === activeReaderItemId &&
+          rankCandidateForCitation(params.extractedCitation, candidate) > 0,
       );
       if (matchingCandidate) {
         const result = await locateQuoteInLivePdfReader(activeReader, params.quoteText);
@@ -798,8 +833,12 @@ async function resolvePageForCitationButton(params: {
         }
       }
     }
-
+    // Only run PDF-worker text search for rank > 0 candidates.  Running it on
+    // rank-0 fallbacks (e.g. whatever PDF happens to be open in the reader)
+    // can produce false-positive cache entries that redirect clicks to the
+    // wrong paper.
     for (const candidate of orderedCandidates) {
+      if (rankCandidateForCitation(params.extractedCitation, candidate) === 0) continue;
       const resolved = await locateCitationPageWithPdfWorker(
         candidate.contextItemId,
         params.quoteText,
@@ -1046,6 +1085,39 @@ async function resolveAndNavigateAssistantCitation(params: {
       extractedCitation,
       staticCandidates,
     );
+
+    // Fast path: if the citation carried an explicit page number (e.g.
+    // "(Carrasco et al., 2026, page 41)") AND we have a high-confidence label
+    // match (rank > 0), navigate directly to that page without any PDF text
+    // search.  This is the most reliable path and prevents false-positive
+    // matches from an unrelated PDF that happens to be open (rank-0 fallback).
+    const explicitPageLabel = sanitizeText(
+      params.button.dataset.citationPageLabel || "",
+    ).trim();
+    if (explicitPageLabel) {
+      const bestRanked = orderedCandidates.find(
+        (c) => rankCandidateForCitation(extractedCitation, c) > 0,
+      );
+      if (bestRanked) {
+        const pageIndex = Math.max(0, parseInt(explicitPageLabel, 10) - 1);
+        const target = await openReaderForItem(bestRanked.contextItemId, {
+          pageIndex,
+          pageLabel: explicitPageLabel,
+        });
+        if (target) {
+          await flashPageInLivePdfReader(target, pageIndex);
+          updateCitationButtonPage(
+            params.button,
+            params.displayCitationLabel,
+            explicitPageLabel,
+          );
+          if (status)
+            setStatus(status, `Jumped to page ${explicitPageLabel}`, "ready");
+          return;
+        }
+      }
+    }
+
     for (const candidate of orderedCandidates) {
       const cached = await navigateToCachedCitationPage(
         candidate.contextItemId,
@@ -1258,6 +1330,11 @@ export function decorateAssistantCitationLinks(params: {
     citationButton.dataset.citationSyncKey =
       `${normalizeCitationLabel(baseSourceLabel)}\u241f${normalizeQuoteKey(quoteText)}`;
     setCitationButtonLabel(citationButton, displayCitationLabel, extractedCitation.pageLabel);
+    // Persist the explicit page label (if any) so the click handler can navigate
+    // directly without a PDF text-match search — prevents wrong-paper navigation.
+    if (extractedCitation.pageLabel) {
+      citationButton.dataset.citationPageLabel = extractedCitation.pageLabel;
+    }
 
     const handleCitationClick = () => {
       void resolveAndNavigateAssistantCitation({

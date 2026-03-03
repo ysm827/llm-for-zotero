@@ -121,7 +121,7 @@ export async function executeWriteNoteCall(
     "- Note content generated, awaiting user review",
     topicFocus ? `- Topic focus: ${topicFocus}` : "",
     "",
-    `A note review panel has appeared for ${target.targetLabel}. Tell the user a note has been drafted and they can review and edit it in the panel below, then click \"Save to Zotero\" to save it. Do NOT quote the full note content in your reply — the user can already see it in the panel.`,
+    `A note draft has been prepared for ${target.targetLabel} and is ready in the review panel. The task is complete — tell the user a note has been drafted and they can review and edit it in the panel below, then click "Save to Zotero" to save it. Do NOT quote the full note content in your reply — the user can already see it in the panel.`,
   ].filter((line) => line !== "");
 
   const groundingText = groundingLines.join("\n");

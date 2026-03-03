@@ -337,6 +337,14 @@ export function createAgentLoopRunner(
 
       if (result.ok) {
         applyToolResult(state, result, decision.call);
+        // write_note and fix_metadata are terminal — they complete the user's
+        // request in full.  Stop immediately so the planner never re-issues them.
+        if (
+          decision.call.name === "write_note" ||
+          decision.call.name === "fix_metadata"
+        ) {
+          break;
+        }
       } else {
         // Record the failed step so subsequent iterations avoid repeating it.
         state.executedSteps.push(summarizeToolResult(result));
