@@ -5989,9 +5989,13 @@ export function setupHandlers(body: Element, initialItem?: Zotero.Item | null) {
           "div",
           "llm-paper-picker-group-title-line",
         );
-        const chevron = createElement(ownerDoc, "span", "llm-paper-picker-group-chevron", {
-          textContent: isPaperPickerCollectionExpanded(row.collectionId) ? "▾" : "▸",
-        });
+        const chevron = createElement(
+          ownerDoc,
+          "span",
+          isPaperPickerCollectionExpanded(row.collectionId)
+            ? "llm-paper-picker-group-chevron llm-folder-open"
+            : "llm-paper-picker-group-chevron llm-folder-closed",
+        );
         const title = createElement(
           ownerDoc,
           "span",
