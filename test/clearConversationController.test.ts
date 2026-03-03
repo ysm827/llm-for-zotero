@@ -6,7 +6,6 @@ describe("clearConversationController", function () {
     const calls: string[] = [];
     let resetHistoryKey = 0;
     let markedLoadedKey = 0;
-    let clearedAgentStatusKey = 0;
     let clearedComposeItemID = 0;
     let statusMessage = "";
     let statusLevel = "";
@@ -31,10 +30,6 @@ describe("clearConversationController", function () {
       markConversationLoaded: (conversationKey) => {
         markedLoadedKey = conversationKey;
         calls.push(`loaded:${conversationKey}`);
-      },
-      clearTransientAgentStatus: (conversationKey) => {
-        clearedAgentStatusKey = conversationKey;
-        calls.push(`agent:${conversationKey}`);
       },
       clearStoredConversation: async (conversationKey) => {
         calls.push(`stored:${conversationKey}`);
@@ -66,7 +61,6 @@ describe("clearConversationController", function () {
     await clearCurrentConversation();
 
     assert.equal(clearedComposeItemID, 7001);
-    assert.equal(clearedAgentStatusKey, 7001);
     assert.equal(resetHistoryKey, 7001);
     assert.equal(markedLoadedKey, 7001);
     assert.equal(statusMessage, "Cleared");
@@ -74,7 +68,6 @@ describe("clearConversationController", function () {
     assert.deepEqual(calls, [
       "pending:7001",
       "compose:7001",
-      "agent:7001",
       "preview",
       "history:7001",
       "loaded:7001",

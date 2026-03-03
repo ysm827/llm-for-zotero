@@ -134,7 +134,8 @@ function buildUI(body: Element, item?: Zotero.Item | null) {
     id: "llm-mode-chip",
     type: "button",
     textContent: hasItem && isGlobalMode ? "Open chat" : "Paper chat",
-    title: hasItem && isGlobalMode ? "Switch to paper chat" : "Switch to open chat",
+    title:
+      hasItem && isGlobalMode ? "Switch to paper chat" : "Switch to open chat",
   });
   modeChipBtn.setAttribute(
     "aria-label",
@@ -232,14 +233,6 @@ function buildUI(body: Element, item?: Zotero.Item | null) {
     id: "llm-shortcuts",
   });
   container.appendChild(shortcutsRow);
-
-  // Review card slot – receives tool-generated review panels (e.g. fix_metadata).
-  // Lives OUTSIDE the height-constrained chat shell so the card is always
-  // fully visible without any scrolling or panel resizing.
-  const reviewCardSlot = createElement(doc, "div", "llm-review-card-slot", {
-    id: "llm-review-card-slot",
-  });
-  container.appendChild(reviewCardSlot);
 
   // Shortcut context menu
   const shortcutMenu = createElement(doc, "div", "llm-shortcut-menu", {

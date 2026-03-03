@@ -35,8 +35,6 @@ describe("sendFlowController", function () {
     let retainTextCalled = 0;
     let persistDraftInputCalls = 0;
     let setActiveEditSessionCalls = 0;
-    let lastSendAgentEnabled: boolean | undefined;
-    let lastEditAgentEnabled: boolean | undefined;
 
     const deps = {
       body: {} as Element,
@@ -67,7 +65,6 @@ describe("sendFlowController", function () {
       getSelectedProfile: () => null,
       getCurrentModelName: () => "",
       isScreenshotUnsupportedModel: () => false,
-      getAgentEnabled: () => true,
       getSelectedReasoning: () => undefined,
       getAdvancedModelParams: () => undefined,
       getActiveEditSession: () => null,
@@ -92,10 +89,8 @@ describe("sendFlowController", function () {
         _apiKey?: string,
         _reasoning?: unknown,
         _advanced?: unknown,
-        agentEnabled?: boolean,
       ) => {
         editCalled += 1;
-        lastEditAgentEnabled = agentEnabled;
         return "ok" as const;
       },
       sendQuestion: async (
@@ -115,10 +110,8 @@ describe("sendFlowController", function () {
         _paperContexts?: PaperContextRef[],
         _pinnedPaperContexts?: PaperContextRef[],
         _attachments?: ChatAttachment[],
-        agentEnabled?: boolean,
       ) => {
         sendCalled += 1;
-        lastSendAgentEnabled = agentEnabled;
       },
       retainPinnedImageState: () => {
         retainImageCalled += 1;
@@ -160,8 +153,6 @@ describe("sendFlowController", function () {
         retainTextCalled,
         persistDraftInputCalls,
         setActiveEditSessionCalls,
-        lastSendAgentEnabled,
-        lastEditAgentEnabled,
       }),
       getDraftValue: () => draftValue,
     };
@@ -179,7 +170,6 @@ describe("sendFlowController", function () {
     assert.equal(counts.retainPaperCalled, 1);
     assert.equal(counts.retainFileCalled, 1);
     assert.equal(counts.retainTextCalled, 1);
-    assert.strictEqual(counts.lastSendAgentEnabled, true);
   });
 
   it("uses retain-pinned callbacks for edit-latest flow", async function () {
@@ -208,7 +198,6 @@ describe("sendFlowController", function () {
     assert.equal(counts.retainFileCalled, 1);
     assert.equal(counts.retainTextCalled, 1);
     assert.isAtLeast(counts.setActiveEditSessionCalls, 1);
-    assert.strictEqual(counts.lastEditAgentEnabled, true);
   });
 
   it("persists the cleared draft before preview sync in normal send flow", async function () {

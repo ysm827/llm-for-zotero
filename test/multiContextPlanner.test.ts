@@ -5,7 +5,10 @@ import {
   resolveMultiContextPlan,
   selectContextAssemblyMode,
 } from "../src/modules/contextPanel/multiContextPlanner";
-import { buildChunkMetadata, buildPaperKey } from "../src/modules/contextPanel/pdfContext";
+import {
+  buildChunkMetadata,
+  buildPaperKey,
+} from "../src/modules/contextPanel/pdfContext";
 import type {
   ChunkStat,
   PaperContextRef,
@@ -158,7 +161,8 @@ describe("multiContextPlanner", function () {
       conversationMode: "open",
       activeContextItem: null,
       question: "summarize this",
-      contextPrefix: "Agent Tool Result\n- Tool: read_paper_text\n" + "detail ".repeat(400),
+      contextPrefix:
+        "Context Result\n- Source: extracted text\n" + "detail ".repeat(400),
       paperContexts: [],
       pinnedPaperContexts: [],
       historyPaperContexts: [],

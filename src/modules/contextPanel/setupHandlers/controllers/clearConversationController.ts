@@ -8,16 +8,13 @@ type ClearConversationControllerDeps = {
   resetComposePreviewUI: () => void;
   resetConversationHistory: (conversationKey: number) => void;
   markConversationLoaded: (conversationKey: number) => void;
-  clearTransientAgentStatus?: (conversationKey: number) => void;
   clearStoredConversation: (conversationKey: number) => Promise<void>;
   resetConversationTitle: (conversationKey: number) => Promise<void>;
   clearOwnerAttachmentRefs: (
     ownerType: "conversation",
     ownerKey: number,
   ) => Promise<void>;
-  removeConversationAttachmentFiles: (
-    conversationKey: number,
-  ) => Promise<void>;
+  removeConversationAttachmentFiles: (conversationKey: number) => Promise<void>;
   refreshChatPreservingScroll: () => void;
   refreshGlobalHistoryHeader: () => void | Promise<void>;
   scheduleAttachmentGc: () => void;
@@ -47,7 +44,6 @@ export function createClearConversationController(
 
     deps.clearPendingTurnDeletion?.(normalizedConversationKey);
     deps.clearTransientComposeStateForItem(normalizedItemID);
-    deps.clearTransientAgentStatus?.(normalizedConversationKey);
     deps.resetComposePreviewUI();
     deps.resetConversationHistory(normalizedConversationKey);
     deps.markConversationLoaded(normalizedConversationKey);
@@ -68,10 +64,7 @@ export function createClearConversationController(
         normalizedConversationKey,
       );
     } catch (err) {
-      deps.logError?.(
-        "LLM: Failed to clear conversation attachment refs",
-        err,
-      );
+      deps.logError?.("LLM: Failed to clear conversation attachment refs", err);
     }
     try {
       await deps.removeConversationAttachmentFiles(normalizedConversationKey);

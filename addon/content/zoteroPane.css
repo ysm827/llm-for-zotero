@@ -236,7 +236,6 @@
   color: var(--color-accent);
 }
 
-
 .llm-history-new:disabled {
   color: var(--fill-tertiary);
   opacity: 0.55;
@@ -1078,256 +1077,6 @@
   width: 100%;
   max-width: 100%;
   min-width: 0;
-}
-
-.llm-agent-process-summary {
-  display: inline-flex;
-  align-items: center;
-  gap: 8px;
-}
-
-.llm-agent-process-summary::before {
-  content: none;
-  display: none;
-}
-
-.llm-agent-process-summary .llm-agent-toggle-indicator {
-  flex: 0 0 auto;
-}
-
-.llm-agent-process-summary-label {
-  min-width: 0;
-}
-
-.llm-agent-process-text {
-  white-space: pre-wrap;
-}
-
-/* ── Agent trace rich lines ──────────────────────────────────────────────── */
-.llm-agent-trace {
-  display: flex;
-  flex-direction: column;
-  gap: 3px;
-  padding: 2px 0;
-}
-
-.llm-at-row {
-  display: flex;
-  align-items: center;
-  gap: 5px;
-  font-size: var(--llm-fs-11);
-  line-height: 1.4;
-  min-width: 0;
-}
-
-.llm-at-icon {
-  flex: 0 0 16px;
-  text-align: center;
-  font-size: 11px;
-  line-height: 1;
-}
-
-/* plan */
-.llm-at-row-plan .llm-at-plan-text {
-  color: var(--fill-tertiary);
-  font-style: italic;
-  font-size: var(--llm-fs-10);
-}
-
-/* tool call */
-.llm-at-tool-name {
-  display: inline-flex;
-  align-items: center;
-  padding: 1px 7px;
-  border-radius: 999px;
-  font-size: var(--llm-fs-10);
-  font-weight: 600;
-  background: color-mix(in srgb, var(--color-accent) 13%, var(--fill-quinary));
-  color: var(--color-accent);
-  letter-spacing: 0.02em;
-  flex: 0 0 auto;
-}
-
-.llm-at-sep {
-  color: var(--fill-quaternary);
-  font-size: var(--llm-fs-10);
-  flex: 0 0 auto;
-}
-
-.llm-at-target {
-  display: inline-flex;
-  align-items: center;
-  padding: 1px 7px;
-  border-radius: 999px;
-  font-size: var(--llm-fs-10);
-  font-weight: 500;
-  background: var(--fill-quinary);
-  color: var(--fill-secondary);
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  flex: 0 1 auto;
-  max-width: 200px;
-}
-
-button.llm-at-target-btn {
-  all: unset;
-  box-sizing: border-box;
-  display: inline-flex;
-  align-items: center;
-  padding: 1px 7px;
-  border-radius: 999px;
-  font-size: var(--llm-fs-10);
-  font-weight: 500;
-  background: var(--fill-quinary);
-  color: var(--fill-secondary);
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  flex: 0 1 auto;
-  max-width: 200px;
-  cursor: pointer;
-  border: 1px solid transparent;
-  transition: background 0.12s, border-color 0.12s, color 0.12s;
-}
-
-button.llm-at-target-btn:hover {
-  background: color-mix(in srgb, var(--fill-quinary) 70%, var(--color-accent) 30%);
-  color: var(--fill-primary);
-  border-color: color-mix(in srgb, var(--color-accent) 35%, transparent);
-}
-
-button.llm-at-target-btn:focus-visible {
-  outline: 1px solid var(--color-accent);
-  outline-offset: 1px;
-}
-
-/* Inline paper-info card that opens below the tool-call row */
-.llm-at-paper-popover {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-  margin: 2px 0 1px 21px;
-  padding: 6px 9px;
-  border-radius: 8px;
-  background: var(--fill-quinary);
-  border: 1px solid color-mix(in srgb, var(--color-accent) 22%, var(--stroke-secondary));
-  animation: llm-at-popover-in 0.12s ease;
-}
-
-@keyframes llm-at-popover-in {
-  from { opacity: 0; transform: translateY(-3px); }
-  to   { opacity: 1; transform: translateY(0); }
-}
-
-.llm-at-popover-title {
-  font-size: var(--llm-fs-11);
-  font-weight: 600;
-  color: var(--fill-primary);
-  white-space: normal;
-  word-break: break-word;
-  line-height: 1.3;
-}
-
-.llm-at-popover-meta {
-  font-size: var(--llm-fs-10);
-  color: var(--fill-tertiary);
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
-/* ok / success */
-.llm-at-row-ok .llm-at-icon {
-  color: #4caf82;
-  font-size: 9px;
-}
-
-.llm-at-ok-text {
-  font-size: var(--llm-fs-10);
-  font-weight: 600;
-  color: var(--fill-primary);
-  flex: 0 0 auto;
-}
-
-.llm-at-paper-label {
-  font-size: var(--llm-fs-10);
-  color: var(--fill-secondary);
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  flex: 1 1 0;
-}
-
-/* duplicate */
-.llm-at-row-dup .llm-at-icon {
-  color: var(--fill-quaternary);
-}
-
-.llm-at-dup-text {
-  color: var(--fill-tertiary);
-  font-size: var(--llm-fs-10);
-  font-style: italic;
-}
-
-/* skip */
-.llm-at-row-skip .llm-at-icon {
-  color: var(--fill-quaternary);
-  font-size: 9px;
-}
-
-.llm-at-skip-text {
-  color: var(--fill-tertiary);
-  font-size: var(--llm-fs-10);
-}
-
-/* budget */
-.llm-at-row-budget .llm-at-icon {
-  color: var(--fill-tertiary);
-}
-
-.llm-at-budget-text {
-  color: var(--fill-tertiary);
-  font-size: var(--llm-fs-10);
-  font-style: italic;
-}
-
-/* done / grounding */
-.llm-at-row-done {
-  margin-top: 2px;
-}
-
-.llm-at-done-text {
-  font-size: var(--llm-fs-11);
-  font-weight: 600;
-  color: var(--fill-secondary);
-}
-
-/* LLM thought fallback */
-.llm-at-thought-text {
-  font-size: var(--llm-fs-11);
-  color: var(--fill-tertiary);
-  font-style: italic;
-  line-height: 1.4;
-  white-space: pre-wrap;
-  word-break: break-word;
-}
-
-/* Animated pulse dot on the summary label while streaming */
-.llm-agent-process[data-thinking="true"] .llm-agent-toggle-indicator::after {
-  content: " \25CF";
-  color: var(--color-accent);
-  font-size: 7px;
-  vertical-align: middle;
-  animation: llm-at-pulse 1.2s ease-in-out infinite;
-}
-
-@keyframes llm-at-pulse {
-  0%, 100% { opacity: 0.25; }
-  50%       { opacity: 1; }
 }
 
 /* Message Bubbles */
@@ -2249,7 +1998,9 @@ button.llm-at-target-btn:focus-visible {
   white-space: nowrap;
 }
 
-.llm-bubble.assistant .llm-paper-citation-link:hover .llm-paper-context-chip-label {
+.llm-bubble.assistant
+  .llm-paper-citation-link:hover
+  .llm-paper-context-chip-label {
   color: var(--fill-primary);
 }
 
@@ -2424,7 +2175,6 @@ button.llm-at-target-btn:focus-visible {
 }
 
 .llm-context-previews > #llm-selected-context-list > .llm-selected-context,
-.llm-context-previews > #llm-context-agent-toggle,
 .llm-context-previews > .llm-image-preview,
 .llm-context-previews > #llm-file-context-preview,
 .llm-context-previews > #llm-paper-context-preview {
@@ -2437,7 +2187,6 @@ button.llm-at-target-btn:focus-visible {
 .llm-context-previews
   > #llm-selected-context-list
   > .llm-selected-context.expanded,
-.llm-context-previews > #llm-context-agent-toggle,
 .llm-context-previews > .llm-image-preview.expanded,
 .llm-context-previews > #llm-file-context-preview.expanded,
 .llm-context-previews > #llm-paper-context-preview.expanded {
@@ -2614,11 +2363,7 @@ button.llm-at-target-btn:focus-visible {
   align-items: center;
   padding: 1px 6px;
   border-radius: 999px;
-  background: color-mix(
-    in srgb,
-    var(--color-accent, #3584e4) 14%,
-    transparent
-  );
+  background: color-mix(in srgb, var(--color-accent, #3584e4) 14%, transparent);
   color: var(--fill-secondary);
   font-size: var(--llm-fs-10);
   line-height: 1.2;
@@ -3171,7 +2916,11 @@ button.llm-at-target-btn:focus-visible {
 }
 
 .llm-live-locate-demo[data-demo-state="resolved"] {
-  border-color: color-mix(in srgb, var(--color-accent) 35%, var(--stroke-secondary));
+  border-color: color-mix(
+    in srgb,
+    var(--color-accent) 35%,
+    var(--stroke-secondary)
+  );
 }
 
 .llm-live-locate-demo[data-demo-state="ambiguous"],
@@ -3432,33 +3181,6 @@ button.llm-at-target-btn:focus-visible {
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
-}
-
-.llm-agent-toggle-label {
-  min-width: 0;
-}
-
-.llm-agent-toggle-indicator {
-  position: relative;
-  display: inline-flex;
-  flex: 0 0 auto;
-  width: 12px;
-  height: 12px;
-  border: 1px solid var(--fill-secondary);
-  border-radius: 999px;
-  box-sizing: border-box;
-}
-
-.llm-agent-toggle-indicator::after {
-  content: "";
-  position: absolute;
-  inset: 2px;
-  border-radius: 999px;
-  background: #9ca3af;
-}
-
-.llm-agent-toggle-enabled .llm-agent-toggle-indicator::after {
-  background: #16a34a;
 }
 
 .llm-model-menu-divider {
@@ -4010,221 +3732,4 @@ button.llm-at-target-btn:focus-visible {
 .llm-remove-img-btn:focus-visible {
   outline: 1px solid var(--color-accent);
   outline-offset: 1px;
-}
-
-/* ── Review Card Slot & Metadata Review Card ──────────────────────────────── */
-
-/* The slot sits between the shortcuts row and the input section.              */
-/* When populated it gets padding so the card doesn't touch the edges.         */
-#llm-review-card-slot:not(:empty) {
-  padding: 0 12px 6px;
-}
-
-.llm-metadata-review-card {
-  margin: 4px 0 0;
-  border: 1px solid color-mix(in srgb, var(--color-accent) 35%, transparent);
-  border-radius: 8px;
-  background: color-mix(in srgb, var(--color-accent) 6%, var(--material-sidepanel));
-  overflow: hidden;
-  font-size: var(--llm-fs-12);
-}
-
-.llm-metadata-review-card.llm-mrc-done {
-  opacity: 0.6;
-  pointer-events: none;
-}
-
-.llm-mrc-header {
-  padding: 10px 12px 8px;
-  border-bottom: 1px solid color-mix(in srgb, var(--color-accent) 20%, transparent);
-}
-
-.llm-mrc-title {
-  font-size: var(--llm-fs-13);
-  font-weight: 600;
-  color: var(--fill-primary);
-  margin-bottom: 2px;
-}
-
-.llm-mrc-subtitle {
-  font-size: var(--llm-fs-11);
-  color: var(--fill-secondary);
-}
-
-.llm-mrc-table {
-  padding: 4px 0;
-}
-
-.llm-mrc-row {
-  display: grid;
-  grid-template-columns: 20px 100px 1fr 18px 1fr;
-  align-items: baseline;
-  gap: 6px;
-  padding: 5px 12px;
-  border-bottom: 1px solid color-mix(in srgb, var(--fill-quinary, var(--fill-tertiary)) 40%, transparent);
-}
-
-.llm-mrc-row:last-child {
-  border-bottom: none;
-}
-
-.llm-mrc-check-label {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  cursor: pointer;
-}
-
-.llm-mrc-checkbox {
-  cursor: pointer;
-  accent-color: var(--color-accent);
-  width: 13px;
-  height: 13px;
-}
-
-.llm-mrc-field-name {
-  font-weight: 600;
-  color: var(--fill-secondary);
-  font-size: var(--llm-fs-11);
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
-.llm-mrc-current {
-  color: var(--fill-tertiary);
-  font-size: var(--llm-fs-11);
-  font-style: italic;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  min-width: 0;
-}
-
-.llm-mrc-arrow {
-  color: var(--fill-tertiary);
-  font-size: var(--llm-fs-11);
-  text-align: center;
-}
-
-.llm-mrc-proposed {
-  color: var(--fill-primary);
-  font-size: var(--llm-fs-12);
-  word-break: break-word;
-  min-width: 0;
-}
-
-.llm-mrc-expand-btn {
-  appearance: none;
-  -moz-appearance: none;
-  background: none;
-  border: none;
-  color: var(--color-accent);
-  cursor: pointer;
-  font-size: var(--llm-fs-11);
-  padding: 0 2px;
-  text-decoration: underline;
-}
-
-.llm-mrc-expand-btn:hover {
-  opacity: 0.8;
-}
-
-.llm-mrc-actions {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 8px 12px;
-  border-top: 1px solid color-mix(in srgb, var(--color-accent) 20%, transparent);
-}
-
-.llm-mrc-accept-btn,
-.llm-mrc-dismiss-btn {
-  appearance: none;
-  -moz-appearance: none;
-  border-radius: 5px;
-  cursor: pointer;
-  font-size: var(--llm-fs-12);
-  font-weight: 500;
-  padding: 4px 12px;
-  transition: opacity 0.15s;
-}
-
-.llm-mrc-accept-btn {
-  background: var(--color-accent);
-  border: none;
-  color: #fff;
-}
-
-.llm-mrc-accept-btn:hover:not(:disabled) {
-  opacity: 0.85;
-}
-
-.llm-mrc-dismiss-btn {
-  background: transparent;
-  border: 1px solid var(--fill-tertiary);
-  color: var(--fill-secondary);
-}
-
-.llm-mrc-dismiss-btn:hover:not(:disabled) {
-  background: var(--fill-quinary, color-mix(in srgb, var(--fill-primary) 8%, transparent));
-}
-
-.llm-mrc-accept-btn:disabled,
-.llm-mrc-dismiss-btn:disabled {
-  opacity: 0.45;
-  cursor: default;
-}
-
-.llm-mrc-status {
-  font-size: var(--llm-fs-11);
-  color: var(--fill-secondary);
-  flex: 1;
-  text-align: right;
-}
-
-/* ─── Note Review Card ──────────────────────────────────────────────────────── */
-
-.llm-note-review-card {
-  margin: 4px 0 0;
-  border: 1px solid color-mix(in srgb, var(--color-accent) 35%, transparent);
-  border-radius: 8px;
-  background: color-mix(in srgb, var(--color-accent) 6%, var(--material-sidepanel));
-  overflow: hidden;
-  font-size: var(--llm-fs-12);
-}
-
-.llm-note-review-card.llm-mrc-done {
-  opacity: 0.6;
-  pointer-events: none;
-}
-
-/* reuse .llm-mrc-header, .llm-mrc-title, .llm-mrc-subtitle, .llm-mrc-actions,
-   .llm-mrc-accept-btn, .llm-mrc-dismiss-btn, .llm-mrc-status from the
-   metadata card — they apply to both card types */
-
-.llm-nrc-textarea-wrap {
-  padding: 6px 12px 8px;
-}
-
-.llm-nrc-textarea {
-  width: 100%;
-  box-sizing: border-box;
-  resize: vertical;
-  min-height: 120px;
-  max-height: 360px;
-  background: var(--fill-quinary, color-mix(in srgb, var(--fill-primary) 5%, transparent));
-  border: 1px solid var(--stroke-secondary, color-mix(in srgb, var(--fill-primary) 15%, transparent));
-  border-radius: 4px;
-  color: var(--fill-primary);
-  font-size: var(--llm-fs-12);
-  font-family: inherit;
-  padding: 8px;
-  line-height: 1.5;
-}
-
-.llm-nrc-textarea:focus {
-  outline: 1px solid var(--color-accent);
-  outline-offset: 1px;
-  border-color: var(--color-accent);
 }

@@ -45,10 +45,7 @@ import {
 import { normalizeSelectedText, setStatus } from "./textUtils";
 import { buildUI } from "./buildUI";
 import { setupHandlers } from "./setupHandlers";
-import {
-  clearTransientAgentStatusForConversation,
-  ensureConversationLoaded,
-} from "./chat";
+import { ensureConversationLoaded } from "./chat";
 import { renderShortcuts } from "./shortcuts";
 import { refreshChat } from "./chat";
 import {
@@ -461,10 +458,11 @@ export function registerReaderSelectionTracking() {
           const selectedPaperContext = isGlobalConversation
             ? readerPaperContext
             : null;
-          const selectedTextLocation = getCurrentSelectionPageLocationFromReader(
-            event.reader as any,
-            effectiveSelectedText,
-          );
+          const selectedTextLocation =
+            getCurrentSelectionPageLocationFromReader(
+              event.reader as any,
+              effectiveSelectedText,
+            );
           const added = appendSelectedTextContextForItem(
             conversationKey,
             effectiveSelectedText,
@@ -680,7 +678,6 @@ export function registerReaderSelectionTracking() {
 export function clearConversation(itemId: number) {
   chatHistory.set(itemId, []);
   loadedConversationKeys.add(itemId);
-  clearTransientAgentStatusForConversation(itemId);
   void clearStoredConversation(itemId).catch((err) => {
     ztoolkit.log("LLM: Failed to clear persisted chat history", err);
   });

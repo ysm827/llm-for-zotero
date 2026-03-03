@@ -43,10 +43,9 @@ export function nextRequestId(): number {
   return ++currentRequestId;
 }
 /**
- * Set to the current request ID when a request starts (before the agent loop /
- * any async work) and cleared back to 0 in the finally block.  Unlike
- * currentAbortController, this is non-null for the ENTIRE lifecycle of a
- * request — including the agent-planning phase that precedes streaming.
+ * Set to the current request ID when a request starts and cleared back to 0
+ * in the finally block. Unlike currentAbortController, this stays non-null for
+ * the entire lifecycle of a request, including pre-stream work.
  */
 export let pendingRequestId = 0;
 export function setPendingRequestId(id: number): void {
@@ -111,56 +110,6 @@ export const pinnedPaperKeys = new Map<number, Set<string>>();
 export const recentReaderSelectionCache = new Map<number, string>();
 
 export const activePaperConversationByPaper = new Map<string, number>();
-
-// ── Metadata fix proposals ────────────────────────────────────────────────────
-
-export type MetadataFieldProposal = {
-  fieldName: string;
-  displayName: string;
-  currentValue: string;
-  proposedValue: string;
-};
-
-export type MetadataAuthorEntry = {
-  firstName: string;
-  lastName: string;
-};
-
-export type MetadataProposal = {
-  itemId: number;
-  targetLabel: string;
-  fields: MetadataFieldProposal[];
-  authors?: {
-    current: string;
-    proposed: string;
-    parsedAuthors: MetadataAuthorEntry[];
-  };
-};
-
-/**
- * Pending metadata proposals keyed by Zotero item ID.
- * Populated by the fix_metadata agent tool; consumed and cleared by the
- * inline review card rendered in chat.ts.
- */
-export const pendingMetadataProposals = new Map<number, MetadataProposal>();
-
-// ── Pending note proposals ──────────────────────────────────────────
-
-export type PendingNoteProposal = {
-  itemId: number;
-  targetLabel: string;
-  /** LLM-generated note content (markdown). User may edit before saving. */
-  content: string;
-  /** Model name used to generate the note, forwarded to createNoteFromAssistantText. */
-  model: string;
-};
-
-/**
- * Pending note proposals keyed by Zotero parent item ID.
- * Populated by write_note agent tool; consumed and cleared by the
- * note review card rendered in chat.ts.
- */
-export const pendingNoteProposals = new Map<number, PendingNoteProposal>();
 
 // ── Inline edit state ───────────────────────────────────────────────────────
 

@@ -13,7 +13,6 @@ import {
   callLLMStream,
   ChatFileAttachment,
   ChatMessage,
-  estimateAvailableContextBudget,
   getRuntimeReasoningOptions,
   ReasoningConfig as LLMReasoningConfig,
   ReasoningEvent,
@@ -54,8 +53,6 @@ import {
   setPendingRequestId,
   setResponseMenuTarget,
   setPromptMenuTarget,
-  pendingMetadataProposals,
-  pendingNoteProposals,
   inlineEditTarget,
   setInlineEditTarget,
   inlineEditCleanup,
@@ -67,7 +64,6 @@ import {
   setInlineEditInputSection,
   setInlineEditSavedDraft,
 } from "./state";
-import type { MetadataProposal, PendingNoteProposal } from "./state";
 import {
   sanitizeText,
   formatTime,
@@ -102,8 +98,7 @@ import {
   resolveContextSourceItem,
 } from "./contextResolution";
 import { isGlobalPortalItem } from "./portalScope";
-import { runAgentLoop } from "./agentLoop";
-import { buildChatHistoryNotePayload, createNoteFromAssistantText } from "./notes";
+import { buildChatHistoryNotePayload } from "./notes";
 import { extractManagedBlobHash } from "./attachmentStorage";
 import { toFileUrl } from "../../utils/pathFileUrl";
 import { replaceOwnerAttachmentRefs } from "../../utils/attachmentRefStore";
@@ -131,770 +126,6 @@ function isReasoningExpandedByDefault(): boolean {
   return getLastReasoningExpanded();
 }
 
-function normalizeTransientAgentStatusText(text: string): string {
-  return sanitizeText(text || "")
-    .replace(/\s+/g, " ")
-    .trim();
-}
-
-function normalizeAgentTraceLines(text: string | undefined): string[] {
-  return sanitizeText(text || "")
-    .split(/\n+/)
-    .map((line) => normalizeTransientAgentStatusText(line))
-    .filter(Boolean);
-}
-
-export function clearTransientAgentStatusForConversation(
-  conversationKey: number,
-): void {
-  const history = chatHistory.get(conversationKey) || [];
-  for (const message of history) {
-    if (message.role !== "assistant") continue;
-    delete message.agentStatusText;
-    delete message.agentTraceText;
-    delete message.agentOpen;
-  }
-}
-
-function appendAgentTraceLine(
-  previous: string | undefined,
-  nextLine: string,
-): string {
-  const normalizedNext = normalizeTransientAgentStatusText(nextLine);
-  const previousLines = normalizeAgentTraceLines(previous);
-  if (!normalizedNext) return previousLines.join("\n");
-  if (!previousLines.length) return normalizedNext;
-  if (previousLines[previousLines.length - 1] === normalizedNext) {
-    return previousLines.join("\n");
-  }
-  previousLines.push(normalizedNext);
-  return previousLines.join("\n");
-}
-
-/**
- * Converts flat agent trace lines into a rich HTML element with chips per action.
- * Unrecognised lines (LLM thoughts) fall back to dim italic text.
- * @param papers Optional paper context list from the paired user message;
- *   used to make target chips expandable.
- */
-function buildAgentTraceHtml(
-  doc: Document,
-  lines: string[],
-  papers?: Array<{ title: string; firstCreator?: string; year?: string }>,
-): HTMLDivElement {
-  const TOOL_READABLE: Record<string, string> = {
-    find_claim_evidence: "Find Evidence",
-    read_paper_text: "Read Paper",
-    read_references: "Read References",
-    list_papers: "Search Library",
-    get_paper_sections: "Paper Sections",
-    search_paper_content: "Search Content",
-    write_note: "Write Note",
-    search_internet: "Internet Search",
-    fix_metadata: "Fix Metadata",
-  };
-
-  function prettyTarget(raw: string): string {
-    // Strip surrounding double-quotes from query-style labels like "some query"
-    if (raw.startsWith('"') && raw.endsWith('"') && raw.length >= 2) {
-      return raw.slice(1, -1);
-    }
-    const m = raw.match(/^(active|selected|pinned|recent|retrieved)-paper(?:#(\d+))?$/);
-    if (!m) return raw;
-    const kindMap: Record<string, string> = {
-      active: "Active Paper",
-      selected: "Selected",
-      pinned: "Pinned",
-      recent: "Recent",
-      retrieved: "Retrieved",
-    };
-    return m[2] ? `${kindMap[m[1]!] ?? m[1]} #${m[2]}` : (kindMap[m[1]!] ?? raw);
-  }
-
-  function trunc(s: string, max = 48): string {
-    const t = (s || "").trim();
-    return t.length > max ? t.slice(0, max - 1) + "\u2026" : t;
-  }
-
-  /** Resolve which known paper (if any) a target string like "active-paper"
-   *  or "selected-paper#2" maps to, so we can show a popover. */
-  function resolvePaperForTarget(
-    rawTarget: string,
-  ): { title: string; firstCreator?: string; year?: string } | null {
-    if (!papers?.length) return null;
-    const m = rawTarget.match(
-      /^(active|selected|pinned|recent|retrieved)-paper(?:#(\d+))?$/,
-    );
-    if (!m) return null;
-    const kind = m[1];
-    const n = m[2] ? parseInt(m[2], 10) : 0;
-    if (kind === "active") return papers[0] ?? null;
-    if (kind === "selected" || kind === "pinned") {
-      const idx = n > 0 ? n - 1 : 0;
-      return papers[idx] ?? papers[0] ?? null;
-    }
-    // retrieved-paper / recent-paper have no static mapping at render time
-    return papers[0] ?? null;
-  }
-
-  function el<T extends HTMLElement>(tag: string, cls: string, text?: string): T {
-    const e = doc.createElement(tag) as T;
-    e.className = cls;
-    if (text != null) e.textContent = text;
-    return e;
-  }
-
-  function row(typeClass: string): HTMLDivElement {
-    return el<HTMLDivElement>("div", `llm-at-row llm-at-row-${typeClass}`);
-  }
-
-  const container = el<HTMLDivElement>("div", "llm-agent-trace");
-
-  for (const line of lines) {
-    const t = line.trim();
-    if (!t) continue;
-
-    // ── Planning header ───────────────────────────────────────────────────────
-    if (/^Planning Zotero retrieval/i.test(t)) {
-      const r = row("plan");
-      r.appendChild(el("span", "llm-at-icon", "\uD83D\uDD0D"));
-      r.appendChild(el("span", "llm-at-plan-text", "Planning retrieval\u2026"));
-      container.appendChild(r);
-      continue;
-    }
-
-    // ── Tool call dispatch chip ───────────────────────────────────────────────
-    {
-      const m = t.match(/^Tool call: ([\w_]+)\((.+)\)\.?$/);
-      if (m) {
-        const [, name, rawTarget] = m;
-        const r = row("tool");
-        r.appendChild(el("span", "llm-at-icon", "\u2699\uFE0F"));
-        r.appendChild(el("span", "llm-at-tool-name", TOOL_READABLE[name!] ?? name!));
-        r.appendChild(el("span", "llm-at-sep", "\u00B7"));
-
-        const resolvedPaper = resolvePaperForTarget(rawTarget ?? "");
-        if (resolvedPaper) {
-          // Clickable target button — expands an inline paper card
-          const targetBtn = doc.createElement("button") as HTMLButtonElement;
-          targetBtn.type = "button";
-          targetBtn.className = "llm-at-target llm-at-target-btn";
-          targetBtn.textContent = prettyTarget(rawTarget ?? "");
-          targetBtn.addEventListener("mousedown", (e: Event) => {
-            const me = e as MouseEvent;
-            if (me.button !== 0) return;
-            me.preventDefault();
-            me.stopPropagation();
-            // Toggle the inline paper card immediately after the row
-            const next = r.nextElementSibling as HTMLElement | null;
-            if (next?.classList.contains("llm-at-paper-popover")) {
-              next.remove();
-              return;
-            }
-            const popover = doc.createElement("div") as HTMLDivElement;
-            popover.className = "llm-at-paper-popover";
-            const ptitle = el("span", "llm-at-popover-title", resolvedPaper.title);
-            popover.appendChild(ptitle);
-            const metaParts = [
-              resolvedPaper.firstCreator || "",
-              resolvedPaper.year || "",
-            ].filter(Boolean);
-            if (metaParts.length) {
-              popover.appendChild(
-                el("span", "llm-at-popover-meta", metaParts.join(" \u00B7 ")),
-              );
-            }
-            r.parentElement?.insertBefore(popover, r.nextSibling);
-          });
-          targetBtn.addEventListener("click", (e: Event) => {
-            e.preventDefault();
-            e.stopPropagation();
-          });
-          r.appendChild(targetBtn);
-        } else {
-          r.appendChild(el("span", "llm-at-target", prettyTarget(rawTarget ?? "")));
-        }
-        container.appendChild(r);
-        continue;
-      }
-    }
-
-    // ── Evidence snippets retrieved ───────────────────────────────────────────
-    {
-      const m = t.match(/^Retrieved (\d+) evidence snippets? for (.+?)\.?$/);
-      if (m) {
-        const r = row("ok");
-        r.appendChild(el("span", "llm-at-icon", "\u2726"));
-        r.appendChild(el("span", "llm-at-ok-text", `${m[1]} snippet${Number(m[1]) !== 1 ? "s" : ""}`));
-        r.appendChild(el("span", "llm-at-sep", "\u00B7"));
-        r.appendChild(el("span", "llm-at-paper-label", trunc(m[2]!)));
-        container.appendChild(r);
-        continue;
-      }
-    }
-
-    // ── No evidence snippets ──────────────────────────────────────────────────
-    {
-      const m = t.match(/^No strong evidence snippets were found for (.+?)\.?$/);
-      if (m) {
-        const r = row("skip");
-        r.appendChild(el("span", "llm-at-icon", "\u2715"));
-        r.appendChild(el("span", "llm-at-skip-text", `No snippets \u00B7 ${trunc(m[1]!, 40)}`));
-        container.appendChild(r);
-        continue;
-      }
-    }
-
-    // ── Full text loaded ──────────────────────────────────────────────────────
-    {
-      const m = t.match(/^Loaded full text for (.+?)(\.|;| \(|$)/);
-      if (m) {
-        const r = row("ok");
-        r.appendChild(el("span", "llm-at-icon", "\u2726"));
-        r.appendChild(el("span", "llm-at-ok-text", "Full text loaded"));
-        r.appendChild(el("span", "llm-at-sep", "\u00B7"));
-        r.appendChild(el("span", "llm-at-paper-label", trunc(m[1]!)));
-        container.appendChild(r);
-        continue;
-      }
-    }
-
-    // ── Full text unavailable ─────────────────────────────────────────────────
-    {
-      const m = t.match(/^Full text unavailable for (.+?)\.?$/);
-      if (m) {
-        const r = row("skip");
-        r.appendChild(el("span", "llm-at-icon", "\u2715"));
-        r.appendChild(el("span", "llm-at-skip-text", `No full text \u00B7 ${trunc(m[1]!, 40)}`));
-        container.appendChild(r);
-        continue;
-      }
-    }
-
-    // ── References loaded ─────────────────────────────────────────────────────
-    {
-      const m = t.match(/^Loaded (\d+) reference entr(?:y|ies) for (.+?)\.?$/);
-      if (m) {
-        const r = row("ok");
-        r.appendChild(el("span", "llm-at-icon", "\u2726"));
-        r.appendChild(el("span", "llm-at-ok-text", `${m[1]} ref${Number(m[1]) !== 1 ? "s" : ""} loaded`));
-        r.appendChild(el("span", "llm-at-sep", "\u00B7"));
-        r.appendChild(el("span", "llm-at-paper-label", trunc(m[2]!)));
-        container.appendChild(r);
-        continue;
-      }
-    }
-
-    // ── Library papers retrieved ──────────────────────────────────────────────
-    {
-      const m = t.match(/^(?:Retrieved|Matched) (\d+) readable papers/i);
-      if (m) {
-        const r = row("ok");
-        r.appendChild(el("span", "llm-at-icon", "\u2726"));
-        r.appendChild(el("span", "llm-at-ok-text", `${m[1]} papers from library`));
-        container.appendChild(r);
-        continue;
-      }
-    }
-
-    // ── Library search query ──────────────────────────────────────────────────
-    {
-      const m = t.match(/^Library search query:\s+(.+)$/);
-      if (m) {
-        const r = row("plan");
-        r.appendChild(el("span", "llm-at-icon", "\uD83D\uDD0D"));
-        r.appendChild(el("span", "llm-at-plan-text", `Searching: \u201C${trunc(m[1]!, 50)}\u201D`));
-        container.appendChild(r);
-        continue;
-      }
-    }
-
-    // ── Selected papers summary ───────────────────────────────────────────────
-    if (/^Selected papers:/i.test(t)) {
-      const r = row("ok");
-      r.appendChild(el("span", "llm-at-icon", "\u2726"));
-      r.appendChild(el("span", "llm-at-ok-text", trunc(t, 80)));
-      container.appendChild(r);
-      continue;
-    }
-
-    // ── Duplicate call ────────────────────────────────────────────────────────
-    if (/^Duplicate.+call was ignored/i.test(t)) {
-      const r = row("dup");
-      r.appendChild(el("span", "llm-at-icon", "\u21BB"));
-      r.appendChild(el("span", "llm-at-dup-text", "Duplicate \u2014 skipped"));
-      container.appendChild(r);
-      continue;
-    }
-
-    // ── Unknown / malformed tool ──────────────────────────────────────────────
-    if (/^(?:Unknown|Malformed) tool call was ignored/i.test(t)) {
-      const r = row("skip");
-      r.appendChild(el("span", "llm-at-icon", "\u2715"));
-      r.appendChild(el("span", "llm-at-skip-text", "Unsupported tool \u2014 skipped"));
-      container.appendChild(r);
-      continue;
-    }
-
-    // ── Target unavailable ────────────────────────────────────────────────────
-    if (/^Tool target was unavailable/i.test(t)) {
-      const r = row("skip");
-      r.appendChild(el("span", "llm-at-icon", "\u2715"));
-      r.appendChild(el("span", "llm-at-skip-text", "Target unavailable \u2014 skipped"));
-      container.appendChild(r);
-      continue;
-    }
-
-    // ── No library / no result ────────────────────────────────────────────────
-    if (/^(?:No Zotero library is available|Library retrieval returned no result)/i.test(t)) {
-      const r = row("skip");
-      r.appendChild(el("span", "llm-at-icon", "\u2715"));
-      r.appendChild(el("span", "llm-at-skip-text", "No library available"));
-      container.appendChild(r);
-      continue;
-    }
-
-    // ── Budget exhausted ──────────────────────────────────────────────────────
-    if (/^(?:Context budget exhausted|No remaining context budget)/i.test(t)) {
-      const r = row("budget");
-      r.appendChild(el("span", "llm-at-icon", "\u23F1"));
-      r.appendChild(el("span", "llm-at-budget-text", "Budget reached \u2014 stopping"));
-      container.appendChild(r);
-      continue;
-    }
-
-    // ── Grounding done — intentionally suppressed from display ────────────────
-    if (/^Grounding the answer from \d+ paper/i.test(t)) {
-      continue;
-    }
-
-    // ── Paper sections found ──────────────────────────────────────────────────
-    {
-      const m = t.match(/^Found (\d+) sections? in (.+?)\.$/);
-      if (m) {
-        const r = row("ok");
-        r.appendChild(el("span", "llm-at-icon", "\u2726"));
-        r.appendChild(el("span", "llm-at-ok-text", `${m[1]} section${Number(m[1]) !== 1 ? "s" : ""}`))
-        r.appendChild(el("span", "llm-at-sep", "\u00B7"));
-        r.appendChild(el("span", "llm-at-paper-label", trunc(m[2]!)));
-        container.appendChild(r);
-        continue;
-      }
-    }
-
-    // ── Content search matches ────────────────────────────────────────────────
-    {
-      const m = t.match(/^Found (\d+) matches? for \u201C(.+?)\u201D in (.+?)\.$/) ||
-                t.match(/^Found (\d+) matches? for "(.+?)" in (.+?)\.?$/);
-      if (m) {
-        const r = row("ok");
-        r.appendChild(el("span", "llm-at-icon", "\u2726"));
-        r.appendChild(el("span", "llm-at-ok-text", `${m[1]} match${Number(m[1]) !== 1 ? "es" : ""}`));
-        r.appendChild(el("span", "llm-at-sep", "\u00B7"));
-        r.appendChild(el("span", "llm-at-paper-label", `\u201C${trunc(m[2]!, 30)}\u201D`));
-        container.appendChild(r);
-        continue;
-      }
-    }
-
-    // ── Note written ──────────────────────────────────────────────────────────
-    {
-      const m = t.match(/^Note written for (.+?)\.$/);
-      if (m) {
-        const r = row("ok");
-        r.appendChild(el("span", "llm-at-icon", "\uD83D\uDCDD"));
-        r.appendChild(el("span", "llm-at-ok-text", "Note saved"));
-        r.appendChild(el("span", "llm-at-sep", "\u00B7"));
-        r.appendChild(el("span", "llm-at-paper-label", trunc(m[1]!)));
-        container.appendChild(r);
-        continue;
-      }
-    }
-
-    // ── Internet search results ───────────────────────────────────────────────
-    {
-      const m = t.match(/^Found (\d+) results? for "(.+?)" on Semantic Scholar\.?$/);
-      if (m) {
-        const r = row("ok");
-        r.appendChild(el("span", "llm-at-icon", "\uD83C\uDF10"));
-        r.appendChild(el("span", "llm-at-ok-text", `${m[1]} result${Number(m[1]) !== 1 ? "s" : ""}`));
-        r.appendChild(el("span", "llm-at-sep", "\u00B7"));
-        r.appendChild(el("span", "llm-at-paper-label", `\u201C${trunc(m[2]!, 40)}\u201D`));
-        container.appendChild(r);
-        continue;
-      }
-    }
-
-    // ── Internet search — no results ──────────────────────────────────────────
-    {
-      const m = t.match(/^No results found for "(.+?)" on Semantic Scholar\.?$/);
-      if (m) {
-        const r = row("skip");
-        r.appendChild(el("span", "llm-at-icon", "\u2715"));
-        r.appendChild(el("span", "llm-at-skip-text", `No results \u00B7 \u201C${trunc(m[1]!, 40)}\u201D`));
-        container.appendChild(r);
-        continue;
-      }
-    }
-
-    // ── Metadata fields found ─────────────────────────────────────────────────
-    {
-      const m = t.match(/^Found (\d+) fields? to fill in for (.+?)\.?$/);
-      if (m) {
-        const r = row("ok");
-        r.appendChild(el("span", "llm-at-icon", "\uD83D\uDD8A"));
-        r.appendChild(el("span", "llm-at-ok-text", `${m[1]} field${Number(m[1]) !== 1 ? "s" : ""}  to update`));
-        r.appendChild(el("span", "llm-at-sep", "\u00B7"));
-        r.appendChild(el("span", "llm-at-paper-label", trunc(m[2]!)));
-        container.appendChild(r);
-        continue;
-      }
-    }
-
-    // ── Metadata complete ─────────────────────────────────────────────────────
-    {
-      const m = t.match(/^Metadata appears complete for (.+?) \u2014 nothing to fix\.?$/);
-      if (m) {
-        const r = row("ok");
-        r.appendChild(el("span", "llm-at-icon", "\u2726"));
-        r.appendChild(el("span", "llm-at-ok-text", "Metadata already complete"));
-        r.appendChild(el("span", "llm-at-sep", "\u00B7"));
-        r.appendChild(el("span", "llm-at-paper-label", trunc(m[1]!)));
-        container.appendChild(r);
-        continue;
-      }
-    }
-
-    // ── Metadata extraction failed / not found ────────────────────────────────
-    if (/^Could not extract missing metadata from/i.test(t)) {
-      const r = row("skip");
-      r.appendChild(el("span", "llm-at-icon", "\u2715"));
-      r.appendChild(el("span", "llm-at-skip-text", "No metadata extracted"));
-      container.appendChild(r);
-      continue;
-    }
-
-    // ── LLM thought fallback ──────────────────────────────────────────────────
-    {
-      const r = row("thought");
-      r.appendChild(el("span", "llm-at-thought-text", trunc(t, 100)));
-      container.appendChild(r);
-    }
-  }
-
-  return container;
-}
-
-/**
- * Build the inline metadata review card shown below the chat after a
- * fix_metadata tool call.  The user can check individual fields and click
- * "Accept Selected" to write the changes to the Zotero item.
- */
-function buildMetadataReviewCard(
-  doc: Document,
-  item: Zotero.Item,
-  body: Element,
-  proposal: MetadataProposal,
-): HTMLDivElement {
-  function el<T extends HTMLElement>(tag: string, cls: string, text?: string): T {
-    const e = doc.createElement(tag) as T;
-    e.className = cls;
-    if (text != null) e.textContent = text;
-    return e;
-  }
-
-  const card = el<HTMLDivElement>("div", "llm-metadata-review-card");
-
-  // ── Header ─────────────────────────────────────────────────────────────────
-  const header = el("div", "llm-mrc-header");
-  header.appendChild(el("div", "llm-mrc-title", "\uD83D\uDCC4 Metadata Review"));
-  header.appendChild(
-    el("div", "llm-mrc-subtitle",
-      `${proposal.targetLabel} \u2014 check each proposed change and click Accept to apply.`)
-  );
-  card.appendChild(header);
-
-  // ── Table of proposed changes ──────────────────────────────────────────────
-  const table = el("div", "llm-mrc-table");
-  const checkboxMap = new Map<string, HTMLInputElement>();
-
-  function addRow(
-    fieldKey: string,
-    displayName: string,
-    currentVal: string,
-    proposedVal: string,
-  ): void {
-    const row = el("div", "llm-mrc-row");
-
-    const checkLabel = doc.createElement("label") as HTMLLabelElement;
-    checkLabel.className = "llm-mrc-check-label";
-    const checkbox = doc.createElement("input") as HTMLInputElement;
-    checkbox.type = "checkbox";
-    checkbox.className = "llm-mrc-checkbox";
-    checkbox.checked = true;
-    checkbox.dataset.fieldKey = fieldKey;
-    checkLabel.appendChild(checkbox);
-    checkboxMap.set(fieldKey, checkbox);
-
-    const nameCel = el("div", "llm-mrc-field-name", displayName);
-    const currentCel = el("div", "llm-mrc-current", currentVal || "\u2014");
-    const arrowCel = el("div", "llm-mrc-arrow", "\u2192");
-    arrowCel.setAttribute("aria-hidden", "true");
-
-    const proposedCel = el("div", "llm-mrc-proposed");
-    const TRUNCATE_AT = 240;
-    if (proposedVal.length > TRUNCATE_AT) {
-      const shortText = proposedVal.slice(0, TRUNCATE_AT) + "\u2026";
-      const textSpan = doc.createElement("span") as HTMLSpanElement;
-      textSpan.textContent = shortText;
-      const expandBtn = doc.createElement("button") as HTMLButtonElement;
-      expandBtn.type = "button";
-      expandBtn.className = "llm-mrc-expand-btn";
-      expandBtn.textContent = "show more";
-      let isExpanded = false;
-      expandBtn.addEventListener("click", (e: Event) => {
-        e.preventDefault();
-        isExpanded = !isExpanded;
-        textSpan.textContent = isExpanded ? proposedVal : shortText;
-        expandBtn.textContent = isExpanded ? "show less" : "show more";
-      });
-      proposedCel.append(textSpan, " ", expandBtn);
-    } else {
-      proposedCel.textContent = proposedVal;
-    }
-
-    row.append(checkLabel, nameCel, currentCel, arrowCel, proposedCel);
-    table.appendChild(row);
-  }
-
-  for (const field of proposal.fields) {
-    addRow(field.fieldName, field.displayName, field.currentValue, field.proposedValue);
-  }
-  if (proposal.authors) {
-    addRow("__authors__", "Authors", proposal.authors.current, proposal.authors.proposed);
-  }
-  card.appendChild(table);
-
-  // ── Action row ─────────────────────────────────────────────────────────────
-  const actions = el("div", "llm-mrc-actions");
-  const acceptBtn = el<HTMLButtonElement>("button", "llm-mrc-accept-btn", "Accept Selected");
-  acceptBtn.type = "button";
-  const dismissBtn = el<HTMLButtonElement>("button", "llm-mrc-dismiss-btn", "Dismiss");
-  dismissBtn.type = "button";
-  const statusMsg = el("span", "llm-mrc-status");
-
-  dismissBtn.addEventListener("click", () => {
-    pendingMetadataProposals.delete(item.id);
-    card.remove();
-  });
-
-  acceptBtn.addEventListener("click", () => {
-    void (async () => {
-      acceptBtn.disabled = true;
-      dismissBtn.disabled = true;
-      statusMsg.textContent = "Applying\u2026";
-
-      let applied = 0;
-      const errors: string[] = [];
-
-      // Regular fields
-      for (const field of proposal.fields) {
-        const cb = checkboxMap.get(field.fieldName);
-        if (!cb?.checked) continue;
-        try {
-          (item as any).setField(field.fieldName, field.proposedValue);
-          applied++;
-        } catch (err) {
-          errors.push(`${field.displayName}: ${err instanceof Error ? err.message : String(err)}`);
-        }
-      }
-
-      // Authors
-      if (proposal.authors) {
-        const cb = checkboxMap.get("__authors__");
-        if (cb?.checked) {
-          try {
-            const authorTypeId: number = Zotero.CreatorTypes.getID("author") as number;
-            const existing: any[] = (item as any).getCreators?.() ?? [];
-            const nonAuthors = existing.filter((c: any) => c.creatorTypeID !== authorTypeId);
-            const newAuthors = proposal.authors.parsedAuthors.map((a) => ({
-              firstName: a.firstName,
-              lastName: a.lastName,
-              creatorTypeID: authorTypeId,
-              fieldMode: a.firstName ? 0 : 1,
-            }));
-            (item as any).setCreators([...newAuthors, ...nonAuthors]);
-            applied++;
-          } catch (err) {
-            errors.push(`Authors: ${err instanceof Error ? err.message : String(err)}`);
-          }
-        }
-      }
-
-      if (applied > 0) {
-        try {
-          await (item as any).saveTx();
-        } catch (err) {
-          errors.push(`Save: ${err instanceof Error ? err.message : String(err)}`);
-        }
-      }
-
-      pendingMetadataProposals.delete(item.id);
-
-      if (errors.length > 0) {
-        statusMsg.textContent = `\u26A0 ${errors.join("; ")}`;
-        acceptBtn.disabled = false;
-        dismissBtn.disabled = false;
-      } else {
-        statusMsg.textContent = `\u2713 ${applied} field${applied !== 1 ? "s" : ""} updated.`;
-        card.classList.add("llm-mrc-done");
-        const win = doc.defaultView;
-        if (win) win.setTimeout(() => { card.remove(); refreshChat(body, item); }, 1800);
-        else { card.remove(); refreshChat(body, item); }
-      }
-    })();
-  });
-
-  actions.append(acceptBtn, dismissBtn, statusMsg);
-  card.appendChild(actions);
-  return card;
-}
-
-function buildNoteReviewCard(
-  doc: Document,
-  item: Zotero.Item,
-  body: Element,
-  proposal: PendingNoteProposal,
-): HTMLDivElement {
-  function el<T extends HTMLElement>(tag: string, cls: string, text?: string): T {
-    const e = doc.createElement(tag) as T;
-    e.className = cls;
-    if (text != null) e.textContent = text;
-    return e;
-  }
-
-  const card = el<HTMLDivElement>("div", "llm-note-review-card");
-
-  // ── Header ────────────────────────────────────────────────────────────────
-  const header = el("div", "llm-mrc-header");
-  header.appendChild(el("div", "llm-mrc-title", "\uD83D\uDCDD Note Review"));
-  header.appendChild(
-    el("div", "llm-mrc-subtitle",
-      `${proposal.targetLabel} \u2014 edit if needed, then click Save to Zotero.`)
-  );
-  card.appendChild(header);
-
-  // ── Editable textarea ──────────────────────────────────────────────────
-  const textareaWrap = el("div", "llm-nrc-textarea-wrap");
-  const textarea = doc.createElement("textarea") as HTMLTextAreaElement;
-  textarea.className = "llm-nrc-textarea";
-  textarea.value = proposal.content;
-  textarea.spellcheck = false;
-  textareaWrap.appendChild(textarea);
-  card.appendChild(textareaWrap);
-
-  // ── Actions ──────────────────────────────────────────────────────────────
-  const actions = el("div", "llm-mrc-actions");
-  const saveBtn = el<HTMLButtonElement>("button", "llm-mrc-accept-btn", "Save to Zotero");
-  saveBtn.type = "button";
-  const dismissBtn = el<HTMLButtonElement>("button", "llm-mrc-dismiss-btn", "Dismiss");
-  dismissBtn.type = "button";
-  const statusMsg = el("span", "llm-mrc-status");
-
-  dismissBtn.addEventListener("click", () => {
-    pendingNoteProposals.delete(item.id);
-    card.remove();
-  });
-
-  saveBtn.addEventListener("click", () => {
-    void (async () => {
-      saveBtn.disabled = true;
-      dismissBtn.disabled = true;
-      statusMsg.textContent = "Saving\u2026";
-
-      const editedContent = textarea.value.trim();
-      if (!editedContent) {
-        statusMsg.textContent = "\u26A0 Note is empty.";
-        saveBtn.disabled = false;
-        dismissBtn.disabled = false;
-        return;
-      }
-
-      const parentItem = Zotero.Items.get(proposal.itemId) as Zotero.Item | false;
-      if (!parentItem) {
-        const errText = "Could not find the Zotero item \u2014 try reloading.";
-        statusMsg.textContent = `\u26A0 ${errText}`;
-        ztoolkit.log("LLM: Note save failed \u2013 item not found:", proposal.itemId);
-        saveBtn.disabled = false;
-        dismissBtn.disabled = false;
-        return;
-      }
-
-      // Delete the proposal BEFORE awaiting note.saveTx().
-      // note.saveTx() triggers Zotero\u2019s change notifier, which can fire
-      // onAsyncRender \u2192 buildUI \u2192 body.textContent="" \u2013 wiping the card before we
-      // can set the success message.  Deleting early means any mid-save re-render
-      // won\u2019t spawn a stale \u201cfresh\u201d card.  We restore the entry on failure.
-      pendingNoteProposals.delete(item.id);
-
-      let saveOutcome: "created" | "appended";
-      try {
-        saveOutcome = await createNoteFromAssistantText(
-          parentItem,
-          editedContent,
-          proposal.model || "agent",
-        );
-      } catch (err) {
-        // Restore the proposal so the user can retry via the review card.
-        pendingNoteProposals.set(item.id, proposal);
-        const msg = err instanceof Error ? err.message : String(err);
-        ztoolkit.log("LLM: Note save failed:", err);
-        // If the card is still in the DOM, show the error inline.
-        if (card.isConnected) {
-          statusMsg.textContent = `\u26A0 ${msg}`;
-          saveBtn.disabled = false;
-          dismissBtn.disabled = false;
-        } else {
-          // Card was wiped by a panel re-render during the await \u2013 show a
-          // ProgressWindow (independent of card DOM) and re-render the card.
-          new ztoolkit.ProgressWindow("LLM for Zotero", {
-            closeOnClick: true,
-            closeTime: 5000,
-          })
-            .createLine({ type: "fail", text: `Note save failed: ${msg}` })
-            .show();
-          refreshChat(body, item);
-        }
-        return;
-      }
-
-      // Success \u2013 use a ProgressWindow so feedback survives card detachment.
-      new ztoolkit.ProgressWindow("LLM for Zotero", {
-        closeOnClick: true,
-        closeTime: 4000,
-      })
-        .createLine({
-          type: "success",
-          text: `Note ${saveOutcome} under \u201c${proposal.targetLabel}\u201d`,
-        })
-        .show();
-
-      // Also update the inline card if it\u2019s still attached.
-      if (card.isConnected) {
-        statusMsg.textContent = `\u2713 Note ${saveOutcome} in Zotero under \u201c${proposal.targetLabel}\u201d.`;
-        card.classList.add("llm-mrc-done");
-        const win = doc.defaultView;
-        if (win) win.setTimeout(() => { card.remove(); refreshChat(body, item); }, 1800);
-        else { card.remove(); refreshChat(body, item); }
-      }
-    })();
-  });
-
-  actions.append(saveBtn, dismissBtn, statusMsg);
-  card.appendChild(actions);
-  return card;
-}
-
 function setHistoryControlsDisabled(body: Element, disabled: boolean): void {
   const historyNewBtn = body.querySelector(
     "#llm-history-new",
@@ -905,16 +136,6 @@ function setHistoryControlsDisabled(body: Element, disabled: boolean): void {
     if (disabled) {
       historyNewBtn.setAttribute("aria-expanded", "false");
     }
-  }
-  const contextAgentToggleBtn = body.querySelector(
-    "#llm-context-agent-toggle",
-  ) as HTMLButtonElement | null;
-  if (contextAgentToggleBtn) {
-    contextAgentToggleBtn.disabled = disabled;
-    contextAgentToggleBtn.setAttribute(
-      "aria-disabled",
-      disabled ? "true" : "false",
-    );
   }
   const historyToggleBtn = body.querySelector(
     "#llm-history-toggle",
@@ -1140,7 +361,10 @@ const followBottomStabilizers = new Map<
 /** Cumulative API token usage per conversation key for the current session. */
 const sessionTokenTotals = new Map<number, number>();
 
-function accumulateSessionTokens(conversationKey: number, delta: number): number {
+function accumulateSessionTokens(
+  conversationKey: number,
+  delta: number,
+): number {
   const prev = sessionTokenTotals.get(conversationKey) ?? 0;
   const next = prev + delta;
   sessionTokenTotals.set(conversationKey, next);
@@ -1151,7 +375,10 @@ function accumulateSessionTokens(conversationKey: number, delta: number): number
  * Seed the session token total from the existing chat history if it hasn't
  * been set yet in this Zotero session. Returns the seeded (or existing) total.
  */
-function getOrSeedSessionTokens(conversationKey: number, history: Message[]): number {
+function getOrSeedSessionTokens(
+  conversationKey: number,
+  history: Message[],
+): number {
   if (sessionTokenTotals.has(conversationKey)) {
     return sessionTokenTotals.get(conversationKey)!;
   }
@@ -1437,9 +664,6 @@ function toPanelMessage(message: StoredChatMessage): Message {
     screenshotExpanded: false,
     screenshotActiveIndex: screenshotImages?.length ? 0 : undefined,
     modelName: message.modelName,
-    agentStatusText: message.agentStatusText,
-    agentTraceText: message.agentTraceText,
-    agentOpen: message.agentOpen,
     reasoningSummary: message.reasoningSummary,
     reasoningDetails: message.reasoningDetails,
     reasoningOpen: isReasoningExpandedByDefault(),
@@ -1702,14 +926,12 @@ function createPanelUpdateHelpers(
   item: Zotero.Item,
   conversationKey: number,
   ui: PanelRequestUI,
-  assistantMessage?: Message,
 ): {
   refreshChatSafely: () => void;
   setStatusSafely: (
     text: string,
     kind: Parameters<typeof setStatus>[2],
   ) => void;
-  setAgentStatusSafely: (text: string) => void;
 } {
   const refreshChatSafely = () => {
     refreshConversationPanels(body, item);
@@ -1723,33 +945,9 @@ function createPanelUpdateHelpers(
       setStatus(ui.status as HTMLElement, text, kind);
     });
   };
-  const setAgentStatusSafely = (text: string) => {
-    if (!assistantMessage) return;
-    const normalized = normalizeTransientAgentStatusText(text);
-    const previous = assistantMessage.agentStatusText || "";
-    if (!normalized) {
-      if (!previous) return;
-      delete assistantMessage.agentStatusText;
-      delete assistantMessage.agentTraceText;
-      delete assistantMessage.agentOpen;
-      refreshChatSafely();
-      return;
-    }
-    if (previous === normalized) return;
-    assistantMessage.agentStatusText = normalized;
-    assistantMessage.agentTraceText = appendAgentTraceLine(
-      assistantMessage.agentTraceText,
-      normalized,
-    );
-    if (typeof assistantMessage.agentOpen !== "boolean") {
-      assistantMessage.agentOpen = true;
-    }
-    refreshChatSafely();
-  };
   return {
     refreshChatSafely,
     setStatusSafely,
-    setAgentStatusSafely,
   };
 }
 
@@ -1800,7 +998,6 @@ async function buildContextPlanForRequest(params: {
     text: string,
     kind: Parameters<typeof setStatus>[2],
   ) => void;
-  setAgentStatusSafely?: (text: string) => void;
 }): Promise<{
   combinedContext: string;
   paperContexts: PaperContextRef[];
@@ -1809,71 +1006,20 @@ async function buildContextPlanForRequest(params: {
 }> {
   const contextSource = resolveContextSourceItem(params.item);
   params.setStatusSafely(contextSource.statusText, "sending");
-  let activeContextItem = contextSource.contextItem;
-  let conversationMode: "open" | "paper" = isGlobalPortalItem(params.item)
+  const activeContextItem = contextSource.contextItem;
+  const conversationMode: "open" | "paper" = isGlobalPortalItem(params.item)
     ? "open"
     : "paper";
-  let paperContexts = params.paperContexts;
-  let pinnedPaperContexts = params.pinnedPaperContexts;
-  let recentPaperContexts = params.recentPaperContexts;
-  const contextBlocks: string[] = [];
-  let contextPrefix = "";
   const systemPrompt = getStringPref("systemPrompt") || undefined;
-  const baseContextBudget = estimateAvailableContextBudget({
-    model: params.effectiveRequestConfig.model,
-    prompt: params.question,
-    history: params.history,
-    images: params.images,
-    reasoning: params.effectiveRequestConfig.reasoning,
-    maxTokens: params.effectiveRequestConfig.advanced?.maxTokens,
-    inputTokenCap: params.effectiveRequestConfig.advanced?.inputTokenCap,
-    systemPrompt,
-  });
-
-  const agentLoop = await runAgentLoop({
-    item: params.item,
-    question: params.question,
-    images: params.images,
-    activeContextItem,
-    conversationMode,
-    paperContexts,
-    pinnedPaperContexts,
-    recentPaperContexts,
-    model: params.effectiveRequestConfig.model,
-    apiBase: params.effectiveRequestConfig.apiBase,
-    apiKey: params.effectiveRequestConfig.apiKey,
-    reasoning: params.effectiveRequestConfig.reasoning,
-    advanced: params.effectiveRequestConfig.advanced,
-    availableContextBudgetTokens: baseContextBudget.contextBudgetTokens,
-    onStatus: (statusText) => {
-      params.setStatusSafely(statusText, "sending");
-    },
-    onTrace: (traceLine) => {
-      params.setAgentStatusSafely?.(traceLine);
-    },
-  });
-  activeContextItem = agentLoop.activeContextItem;
-  conversationMode = agentLoop.conversationMode;
-  paperContexts = agentLoop.paperContexts;
-  pinnedPaperContexts = agentLoop.pinnedPaperContexts;
-  recentPaperContexts = agentLoop.recentPaperContexts;
-  contextPrefix = sanitizeText(agentLoop.contextPrefix || "").trim();
-  ztoolkit.log("LLM: Agent loop result", {
-    conversationMode,
-    paperContextCount: paperContexts.length,
-    pinnedPaperContextCount: pinnedPaperContexts.length,
-    recentPaperContextCount: recentPaperContexts.length,
-    hasContextPrefix: Boolean(contextPrefix),
-  });
 
   const plan = await resolveMultiContextPlan({
     activeContextItem,
     conversationMode,
     question: params.question,
-    contextPrefix,
-    paperContexts,
-    pinnedPaperContexts,
-    historyPaperContexts: recentPaperContexts,
+    contextPrefix: "",
+    paperContexts: params.paperContexts,
+    pinnedPaperContexts: params.pinnedPaperContexts,
+    historyPaperContexts: params.recentPaperContexts,
     history: params.history,
     images: params.images,
     model: params.effectiveRequestConfig.model,
@@ -1890,9 +1036,6 @@ async function buildContextPlanForRequest(params: {
         ? `Using full context (${plan.selectedPaperCount} papers)`
         : `Using retrieved evidence (${plan.selectedPaperCount} papers, ${plan.selectedChunkCount} chunks)`;
     params.setStatusSafely(modeStatus, "sending");
-    params.setAgentStatusSafely?.(
-      `Grounding the answer from ${plan.selectedPaperCount} paper${plan.selectedPaperCount === 1 ? "" : "s"}.`,
-    );
   }
   ztoolkit.log("LLM: Multi-context plan", {
     mode: plan.mode,
@@ -1901,18 +1044,12 @@ async function buildContextPlanForRequest(params: {
     contextBudgetTokens: plan.contextBudget.contextBudgetTokens,
     usedContextTokens: plan.usedContextTokens,
   });
-  if (contextPrefix) {
-    contextBlocks.push(contextPrefix);
-  }
   const planContext = sanitizeText(plan.contextText || "").trim();
-  if (planContext) {
-    contextBlocks.push(planContext);
-  }
   return {
-    combinedContext: contextBlocks.join("\n\n---\n\n"),
-    paperContexts,
-    pinnedPaperContexts,
-    recentPaperContexts,
+    combinedContext: planContext,
+    paperContexts: params.paperContexts,
+    pinnedPaperContexts: params.pinnedPaperContexts,
+    recentPaperContexts: params.recentPaperContexts,
   };
 }
 
@@ -1939,9 +1076,6 @@ type AssistantMessageSnapshot = Pick<
   | "text"
   | "timestamp"
   | "modelName"
-  | "agentStatusText"
-  | "agentTraceText"
-  | "agentOpen"
   | "reasoningSummary"
   | "reasoningDetails"
   | "reasoningOpen"
@@ -1967,9 +1101,6 @@ function takeAssistantSnapshot(message: Message): AssistantMessageSnapshot {
     text: message.text,
     timestamp: message.timestamp,
     modelName: message.modelName,
-    agentStatusText: message.agentStatusText,
-    agentTraceText: message.agentTraceText,
-    agentOpen: message.agentOpen,
     reasoningSummary: message.reasoningSummary,
     reasoningDetails: message.reasoningDetails,
     reasoningOpen: message.reasoningOpen,
@@ -1983,9 +1114,6 @@ function restoreAssistantSnapshot(
   message.text = snapshot.text;
   message.timestamp = snapshot.timestamp;
   message.modelName = snapshot.modelName;
-  message.agentStatusText = snapshot.agentStatusText;
-  message.agentTraceText = snapshot.agentTraceText;
-  message.agentOpen = snapshot.agentOpen;
   message.reasoningSummary = snapshot.reasoningSummary;
   message.reasoningDetails = snapshot.reasoningDetails;
   message.reasoningOpen = snapshot.reasoningOpen;
@@ -2358,23 +1486,15 @@ export async function retryLatestAssistantResponse(
   const assistantMessage = retryPair.assistantMessage;
   const assistantSnapshot = takeAssistantSnapshot(assistantMessage);
   assistantMessage.text = "";
-  assistantMessage.agentStatusText = undefined;
-  assistantMessage.agentTraceText = undefined;
-  assistantMessage.agentOpen = true;
   assistantMessage.reasoningSummary = undefined;
   assistantMessage.reasoningDetails = undefined;
   assistantMessage.reasoningOpen = isReasoningExpandedByDefault();
   assistantMessage.streaming = true;
-  const {
-    refreshChatSafely,
-    setStatusSafely,
-    setAgentStatusSafely,
-  } = createPanelUpdateHelpers(
+  const { refreshChatSafely, setStatusSafely } = createPanelUpdateHelpers(
     body,
     item,
     conversationKey,
     ui,
-    assistantMessage,
   );
 
   const historyForLLM = history.slice(0, retryPair.userIndex);
@@ -2425,16 +1545,15 @@ export async function retryLatestAssistantResponse(
       history: llmHistory,
       effectiveRequestConfig,
       setStatusSafely,
-      setAgentStatusSafely,
     });
     const combinedContext = contextPlan.combinedContext;
     retryPair.userMessage.paperContexts = contextPlan.paperContexts.length
       ? contextPlan.paperContexts
       : undefined;
-    retryPair.userMessage.pinnedPaperContexts =
-      contextPlan.pinnedPaperContexts.length
-        ? contextPlan.pinnedPaperContexts
-        : undefined;
+    retryPair.userMessage.pinnedPaperContexts = contextPlan.pinnedPaperContexts
+      .length
+      ? contextPlan.pinnedPaperContexts
+      : undefined;
     await updateStoredLatestUserMessage(conversationKey, {
       text: retryPair.userMessage.text,
       timestamp: retryPair.userMessage.timestamp,
@@ -2506,7 +1625,10 @@ export async function retryLatestAssistantResponse(
         queueRefresh();
       },
       (usage: UsageStats) => {
-        const total = accumulateSessionTokens(conversationKey, usage.totalTokens);
+        const total = accumulateSessionTokens(
+          conversationKey,
+          usage.totalTokens,
+        );
         if (ui.tokenUsageEl) setTokenUsage(ui.tokenUsageEl, total);
       },
     );
@@ -2534,9 +1656,6 @@ export async function retryLatestAssistantResponse(
       text: assistantMessage.text,
       timestamp: assistantMessage.timestamp,
       modelName: assistantMessage.modelName,
-      agentStatusText: assistantMessage.agentStatusText,
-      agentTraceText: assistantMessage.agentTraceText,
-      agentOpen: assistantMessage.agentOpen,
       reasoningSummary: assistantMessage.reasoningSummary,
       reasoningDetails: assistantMessage.reasoningDetails,
     });
@@ -2656,7 +1775,11 @@ export async function editUserTurnAndRetry(
 
   // Resolve current model settings and retry
   const profile = getSelectedProfileForItem(item.id);
-  const reasoning = getSelectedReasoningForItem(item.id, profile.model, profile.apiBase);
+  const reasoning = getSelectedReasoningForItem(
+    item.id,
+    profile.model,
+    profile.apiBase,
+  );
   const advanced = getAdvancedModelParamsForProfile(profile.key);
   await retryLatestAssistantResponse(
     body,
@@ -2797,16 +1920,11 @@ export async function sendQuestion(
   if (history.length > PERSISTED_HISTORY_LIMIT) {
     history.splice(0, history.length - PERSISTED_HISTORY_LIMIT);
   }
-  const {
-    refreshChatSafely,
-    setStatusSafely,
-    setAgentStatusSafely,
-  } = createPanelUpdateHelpers(
+  const { refreshChatSafely, setStatusSafely } = createPanelUpdateHelpers(
     body,
     item,
     conversationKey,
     ui,
-    assistantMessage,
   );
   refreshChatSafely();
 
@@ -2819,9 +1937,6 @@ export async function sendQuestion(
       text: assistantMessage.text,
       timestamp: assistantMessage.timestamp,
       modelName: assistantMessage.modelName,
-      agentStatusText: assistantMessage.agentStatusText,
-      agentTraceText: assistantMessage.agentTraceText,
-      agentOpen: assistantMessage.agentOpen,
       reasoningSummary: assistantMessage.reasoningSummary,
       reasoningDetails: assistantMessage.reasoningDetails,
     });
@@ -2850,7 +1965,6 @@ export async function sendQuestion(
       history: llmHistory,
       effectiveRequestConfig,
       setStatusSafely,
-      setAgentStatusSafely,
     });
     const combinedContext = contextPlan.combinedContext;
     userMessage.paperContexts = contextPlan.paperContexts.length
@@ -2913,7 +2027,10 @@ export async function sendQuestion(
         queueRefresh();
       },
       (usage: UsageStats) => {
-        const total = accumulateSessionTokens(conversationKey, usage.totalTokens);
+        const total = accumulateSessionTokens(
+          conversationKey,
+          usage.totalTokens,
+        );
         if (ui.tokenUsageEl) setTokenUsage(ui.tokenUsageEl, total);
       },
     );
@@ -2977,7 +2094,9 @@ function buildInlineEditWidget(
   const isFirstEntry = !inlineEditInputSectionEl;
   let inputSectionEl = inlineEditInputSectionEl;
   if (isFirstEntry) {
-    inputSectionEl = body.querySelector(".llm-input-section") as HTMLElement | null;
+    inputSectionEl = body.querySelector(
+      ".llm-input-section",
+    ) as HTMLElement | null;
     if (inputSectionEl) {
       setInlineEditInputSection(
         inputSectionEl,
@@ -2988,8 +2107,9 @@ function buildInlineEditWidget(
   }
 
   // The real input <textarea>
-  const inputBoxEl = body.querySelector("#llm-input") as HTMLTextAreaElement | null
-    ?? (inputSectionEl?.querySelector("#llm-input") as HTMLTextAreaElement | null);
+  const inputBoxEl =
+    (body.querySelector("#llm-input") as HTMLTextAreaElement | null) ??
+    (inputSectionEl?.querySelector("#llm-input") as HTMLTextAreaElement | null);
 
   // On first entry: save draft and pre-fill with the user message
   if (isFirstEntry) {
@@ -3069,11 +2189,19 @@ function buildInlineEditWidget(
 
   // Focus on first entry only (don't steal focus on streaming refreshes)
   const win = body.ownerDocument?.defaultView;
-  if (win && inputBoxEl && isFirstEntry && !inputBoxEl.dataset.inlineEditFocused) {
+  if (
+    win &&
+    inputBoxEl &&
+    isFirstEntry &&
+    !inputBoxEl.dataset.inlineEditFocused
+  ) {
     inputBoxEl.dataset.inlineEditFocused = "1";
     win.setTimeout(() => {
       inputBoxEl.focus({ preventScroll: true });
-      inputBoxEl.setSelectionRange(inputBoxEl.value.length, inputBoxEl.value.length);
+      inputBoxEl.setSelectionRange(
+        inputBoxEl.value.length,
+        inputBoxEl.value.length,
+      );
     }, 0);
   }
 
@@ -3093,14 +2221,18 @@ export function refreshChat(body: Element, item?: Zotero.Item | null) {
         <div class="llm-welcome-text">Select an item or open a PDF to start.</div>
       </div>
     `;
-    const tokenUsageEl = body.querySelector("#llm-token-usage") as HTMLElement | null;
+    const tokenUsageEl = body.querySelector(
+      "#llm-token-usage",
+    ) as HTMLElement | null;
     if (tokenUsageEl) tokenUsageEl.style.display = "none";
     return;
   }
 
   const conversationKey = getConversationKey(item);
   // Sync token counter for this conversation
-  const tokenUsageEl = body.querySelector("#llm-token-usage") as HTMLElement | null;
+  const tokenUsageEl = body.querySelector(
+    "#llm-token-usage",
+  ) as HTMLElement | null;
   const panelRoot = body.querySelector("#llm-main") as HTMLDivElement | null;
   const isGlobalConversation =
     isGlobalPortalItem(item) ||
@@ -3115,7 +2247,11 @@ export function refreshChat(body: Element, item?: Zotero.Item | null) {
       ? cachedSnapshot
       : buildChatScrollSnapshot(chatBox);
   const history = chatHistory.get(conversationKey) || [];
-  if (tokenUsageEl) setTokenUsage(tokenUsageEl, getOrSeedSessionTokens(conversationKey, history));
+  if (tokenUsageEl)
+    setTokenUsage(
+      tokenUsageEl,
+      getOrSeedSessionTokens(conversationKey, history),
+    );
 
   if (history.length === 0) {
     chatBox.innerHTML = `
@@ -3611,15 +2747,18 @@ export function refreshChat(body: Element, item?: Zotero.Item | null) {
         });
         renderSelectedTextStates();
       }
-      const hasPromptTurnPair = Boolean(
-        assistantPairMsg?.role === "assistant",
-      );
+      const hasPromptTurnPair = Boolean(assistantPairMsg?.role === "assistant");
       const canDeletePromptTurn = Boolean(
         hasPromptTurnPair && !assistantPairMsg?.streaming,
       );
       if (isInlineEditBubble) {
         inlineEditEl = buildInlineEditWidget(
-          doc, body, item, msg, assistantPairMsg!, conversationKey,
+          doc,
+          body,
+          item,
+          msg,
+          assistantPairMsg!,
+          conversationKey,
         );
       } else {
         bubble.textContent = sanitizeText(msg.text || "");
@@ -3690,10 +2829,6 @@ export function refreshChat(body: Element, item?: Zotero.Item | null) {
       }
     } else {
       const hasModelName = Boolean(msg.modelName?.trim());
-      const agentTraceLines = normalizeAgentTraceLines(
-        msg.agentTraceText || "",
-      );
-      const showAgentStatus = agentTraceLines.length > 0;
       const hasAnswerText = Boolean(msg.text);
       if (hasAnswerText) {
         const safeText = sanitizeText(msg.text);
@@ -3708,11 +2843,17 @@ export function refreshChat(body: Element, item?: Zotero.Item | null) {
           try {
             const pairedUserMessage =
               history[index - 1]?.role === "user" ? history[index - 1] : null;
-            ztoolkit.log("LLM: calling decorateAssistantCitationLinks",
-              "msgLen =", msg.text.length,
-              "bubbleHTML =", String(bubble.innerHTML || "").length,
-              "hasPairedUser =", Boolean(pairedUserMessage),
-              "pairedPaperContexts =", pairedUserMessage?.paperContexts?.length ?? "none");
+            ztoolkit.log(
+              "LLM: calling decorateAssistantCitationLinks",
+              "msgLen =",
+              msg.text.length,
+              "bubbleHTML =",
+              String(bubble.innerHTML || "").length,
+              "hasPairedUser =",
+              Boolean(pairedUserMessage),
+              "pairedPaperContexts =",
+              pairedUserMessage?.paperContexts?.length ?? "none",
+            );
             decorateAssistantCitationLinks({
               body,
               panelItem: item,
@@ -3790,59 +2931,6 @@ export function refreshChat(body: Element, item?: Zotero.Item | null) {
         modelName.className = "llm-model-name";
         modelName.textContent = msg.modelName?.trim() || "";
         bubbleHeaderNodes.push(modelName);
-      }
-
-      if (showAgentStatus) {
-        const details = doc.createElement("details") as HTMLDetailsElement;
-        details.className = "llm-reasoning llm-agent-process";
-        details.open = msg.agentOpen !== false;
-        details.setAttribute("data-thinking", msg.streaming ? "true" : "false");
-
-        const summary = doc.createElement("summary") as HTMLElement;
-        summary.className =
-          "llm-reasoning-summary llm-agent-process-summary llm-agent-toggle-enabled";
-        const indicator = doc.createElement("span") as HTMLSpanElement;
-        indicator.className = "llm-agent-toggle-indicator";
-        indicator.setAttribute("aria-hidden", "true");
-        const summaryLabel = doc.createElement("span") as HTMLSpanElement;
-        summaryLabel.className = "llm-agent-process-summary-label";
-        summaryLabel.textContent = msg.streaming ? "Agent is thinking" : "Agent logs";
-        summary.append(indicator, summaryLabel);
-        const toggleAgent = (e: Event) => {
-          e.preventDefault();
-          e.stopPropagation();
-          mutateChatWithScrollGuard(() => {
-            const next = !details.open;
-            msg.agentOpen = next;
-            details.open = next;
-          });
-        };
-        summary.addEventListener("mousedown", toggleAgent);
-        summary.addEventListener("click", (e: Event) => {
-          e.preventDefault();
-          e.stopPropagation();
-        });
-        summary.addEventListener("keydown", (e: KeyboardEvent) => {
-          if (e.key === "Enter" || e.key === " ") {
-            toggleAgent(e);
-          }
-        });
-        details.appendChild(summary);
-
-        const bodyWrap = doc.createElement("div") as HTMLDivElement;
-        bodyWrap.className = "llm-reasoning-body";
-
-        const traceEl = buildAgentTraceHtml(
-          doc,
-          agentTraceLines,
-          normalizePaperContexts(
-            (history[index - 1]?.role === "user" ? history[index - 1] : null)
-              ?.paperContexts || [],
-          ),
-        );
-        bodyWrap.appendChild(traceEl);
-        details.appendChild(bodyWrap);
-        bubbleHeaderNodes.push(details);
       }
 
       const hasReasoningSummary = Boolean(msg.reasoningSummary?.trim());
@@ -3984,31 +3072,6 @@ export function refreshChat(body: Element, item?: Zotero.Item | null) {
         win.clearTimeout(active.timeoutId);
       }
       followBottomStabilizers.delete(conversationKey);
-    }
-  }
-
-  // ── Review card slot ───────────────────────────────────────────────────────
-  // The card lives in #llm-review-card-slot which is OUTSIDE the constrained
-  // .llm-chat-shell (height: 50vh, overflow: hidden).  That means it always
-  // renders at full size in the normal document flow – no scrolling required.
-  const reviewSlot = body.querySelector(
-    "#llm-review-card-slot",
-  ) as HTMLDivElement | null;
-  if (reviewSlot) {
-    reviewSlot.textContent = ""; // clear any card from a previous render
-    if (item) {
-      const metaProposal = pendingMetadataProposals.get(item.id);
-      if (metaProposal) {
-        reviewSlot.appendChild(
-          buildMetadataReviewCard(doc, item, body, metaProposal),
-        );
-      }
-      const noteProposal = pendingNoteProposals.get(item.id);
-      if (noteProposal) {
-        reviewSlot.appendChild(
-          buildNoteReviewCard(doc, item, body, noteProposal),
-        );
-      }
     }
   }
 }
