@@ -6,6 +6,7 @@ import {
   pruneConversation,
   updateLatestUserMessage as updateStoredLatestUserMessage,
   updateLatestAssistantMessage as updateStoredLatestAssistantMessage,
+  deleteTurnMessages as deleteStoredTurnMessages,
   StoredChatMessage,
 } from "../../utils/chatStore";
 import {
@@ -53,6 +54,16 @@ import {
   setPromptMenuTarget,
   pendingMetadataProposals,
   pendingNoteProposals,
+  inlineEditTarget,
+  setInlineEditTarget,
+  inlineEditCleanup,
+  setInlineEditCleanup,
+  inlineEditInputSectionEl,
+  inlineEditInputSectionParent,
+  inlineEditInputSectionNextSib,
+  inlineEditSavedDraft,
+  setInlineEditInputSection,
+  setInlineEditSavedDraft,
 } from "./state";
 import type { MetadataProposal, PendingNoteProposal } from "./state";
 import {
@@ -2341,6 +2352,8 @@ export async function retryLatestAssistantResponse(
     reasoning,
     advanced,
   });
+  // Update model name before first refresh so streaming UI shows the correct model immediately
+  assistantMessage.modelName = effectiveRequestConfig.model;
   refreshChatSafely();
   let streamedAnswer = "";
   let streamedReasoningSummary: string | undefined;
@@ -2507,6 +2520,104 @@ export async function retryLatestAssistantResponse(
     restoreRequestUIIdle(ui, conversationKey, thisRequestId);
     setCurrentAbortController(null);
   }
+}
+
+/**
+ * Edit the user message in any turn (not just the latest) and retry.
+ * Truncates all subsequent turns from memory and storage, updates the
+ * user message text, then retries using the currently selected model.
+ */
+export async function editUserTurnAndRetry(
+  body: Element,
+  item: Zotero.Item,
+  userTimestamp: number,
+  assistantTimestamp: number,
+  newText: string,
+): Promise<void> {
+  await ensureConversationLoaded(item);
+  const conversationKey = getConversationKey(item);
+  const history = chatHistory.get(conversationKey) || [];
+
+  const userIndex = history.findIndex(
+    (m) => m.role === "user" && m.timestamp === userTimestamp,
+  );
+  if (userIndex < 0) {
+    ztoolkit.log("LLM: editUserTurnAndRetry — user message not found");
+    return;
+  }
+  const assistantIndex = userIndex + 1;
+  if (
+    assistantIndex >= history.length ||
+    history[assistantIndex]?.role !== "assistant"
+  ) {
+    ztoolkit.log("LLM: editUserTurnAndRetry — assistant message not found");
+    return;
+  }
+  if (history[assistantIndex]!.streaming) {
+    ztoolkit.log("LLM: editUserTurnAndRetry — assistant is still streaming");
+    return;
+  }
+
+  // Collect subsequent pairs for persistence deletion
+  const subsequentPairs: Array<{ userTs: number; assistantTs: number }> = [];
+  for (let i = assistantIndex + 1; i + 1 < history.length; i += 2) {
+    const u = history[i];
+    const a = history[i + 1];
+    if (u?.role === "user" && a?.role === "assistant") {
+      subsequentPairs.push({
+        userTs: Math.floor(u.timestamp),
+        assistantTs: Math.floor(a.timestamp),
+      });
+    }
+  }
+
+  // Truncate in-memory history to this pair
+  history.splice(assistantIndex + 1);
+
+  // Delete persisted subsequent turns
+  for (const p of subsequentPairs) {
+    try {
+      await deleteStoredTurnMessages(conversationKey, p.userTs, p.assistantTs);
+    } catch (err) {
+      ztoolkit.log("LLM: Failed to delete subsequent stored turn", err);
+    }
+  }
+
+  // Update user message text + timestamp
+  const userMsg = history[userIndex]!;
+  userMsg.text = sanitizeText(newText) || newText;
+  userMsg.timestamp = Date.now();
+
+  // Persist the updated user message
+  try {
+    await updateStoredLatestUserMessage(conversationKey, {
+      text: userMsg.text,
+      timestamp: userMsg.timestamp,
+      selectedText: userMsg.selectedText,
+      selectedTexts: userMsg.selectedTexts,
+      selectedTextSources: userMsg.selectedTextSources,
+      selectedTextPaperContexts: userMsg.selectedTextPaperContexts,
+      screenshotImages: userMsg.screenshotImages,
+      paperContexts: userMsg.paperContexts,
+      attachments: userMsg.attachments,
+    });
+  } catch (err) {
+    ztoolkit.log("LLM: Failed to persist edited user message", err);
+  }
+
+  // Resolve current model settings and retry
+  const profile = getSelectedProfileForItem(item.id);
+  const reasoning = getSelectedReasoningForItem(item.id, profile.model, profile.apiBase);
+  const advanced = getAdvancedModelParamsForProfile(profile.key);
+  await retryLatestAssistantResponse(
+    body,
+    item,
+    profile.model,
+    profile.apiBase,
+    profile.apiKey,
+    reasoning,
+    advanced,
+  );
 }
 
 export async function sendQuestion(
@@ -2797,6 +2908,127 @@ export async function sendQuestion(
   }
 }
 
+/** Build the inline edit textarea + action bar that replaces a user bubble. */
+function buildInlineEditWidget(
+  doc: Document,
+  body: Element,
+  item: Zotero.Item,
+  _userMsg: Message,
+  _assistantMsg: Message,
+  _conversationKey: number,
+): HTMLDivElement {
+  const widgetRoot = doc.createElement("div") as HTMLDivElement;
+  widgetRoot.className = "llm-inline-edit-wrapper";
+
+  // On first entry, grab the real input section and the inputBox from the panel.
+  // Subsequent refreshes (e.g. streaming) reuse the saved reference so the
+  // already-detached element can be re-attached into the new widget root.
+  const isFirstEntry = !inlineEditInputSectionEl;
+  let inputSectionEl = inlineEditInputSectionEl;
+  if (isFirstEntry) {
+    inputSectionEl = body.querySelector(".llm-input-section") as HTMLElement | null;
+    if (inputSectionEl) {
+      setInlineEditInputSection(
+        inputSectionEl,
+        inputSectionEl.parentElement,
+        inputSectionEl.nextSibling,
+      );
+    }
+  }
+
+  // The real input <textarea>
+  const inputBoxEl = body.querySelector("#llm-input") as HTMLTextAreaElement | null
+    ?? (inputSectionEl?.querySelector("#llm-input") as HTMLTextAreaElement | null);
+
+  // On first entry: save draft and pre-fill with the user message
+  if (isFirstEntry) {
+    setInlineEditSavedDraft(inputBoxEl?.value ?? "");
+    if (inputBoxEl && inlineEditTarget) {
+      inputBoxEl.value = inlineEditTarget.currentText;
+    }
+  }
+
+  // Keep inlineEditTarget.currentText in sync with what the user types
+  // (so text is preserved if chatBox rebuilds while still in edit mode).
+  // Use a one-time marker to avoid stacking duplicate listeners.
+  if (inputBoxEl && !inputBoxEl.dataset.inlineEditListening) {
+    inputBoxEl.dataset.inlineEditListening = "1";
+    inputBoxEl.addEventListener("input", () => {
+      if (inlineEditTarget) inlineEditTarget.currentText = inputBoxEl.value;
+    });
+  }
+
+  // Register cleanup (idempotent — only set once per edit session).
+  if (!inlineEditCleanup) {
+    setInlineEditCleanup(() => {
+      // Restore input section to its original position in the panel.
+      const el = inlineEditInputSectionEl;
+      const parent = inlineEditInputSectionParent;
+      const next = inlineEditInputSectionNextSib;
+      if (el && parent) {
+        parent.insertBefore(el, next);
+      }
+      // Restore the draft text.
+      if (inputBoxEl) {
+        inputBoxEl.value = inlineEditSavedDraft;
+        inputBoxEl.style.height = "auto";
+        if (inputBoxEl.scrollHeight) {
+          inputBoxEl.style.height = `${inputBoxEl.scrollHeight}px`;
+        }
+        delete inputBoxEl.dataset.inlineEditListening;
+        delete inputBoxEl.dataset.inlineEditFocused;
+      }
+      setInlineEditInputSection(null, null, null);
+      setInlineEditSavedDraft("");
+    });
+  }
+
+  const doCancel = () => {
+    inlineEditCleanup?.();
+    setInlineEditCleanup(null);
+    setInlineEditTarget(null);
+    const win = body.ownerDocument?.defaultView;
+    if (win) win.setTimeout(() => refreshChat(body, item), 0);
+  };
+
+  // Header: "Editing" label + Cancel button
+  const header = doc.createElement("div") as HTMLDivElement;
+  header.className = "llm-inline-edit-header";
+  const headerLabel = doc.createElement("span") as HTMLSpanElement;
+  headerLabel.className = "llm-inline-edit-header-label";
+  headerLabel.textContent = "Editing";
+  const cancelBtn = doc.createElement("button") as HTMLButtonElement;
+  cancelBtn.type = "button";
+  cancelBtn.className = "llm-inline-edit-header-cancel";
+  cancelBtn.textContent = "Cancel";
+  cancelBtn.addEventListener("mousedown", (e: Event) => {
+    (e as MouseEvent).preventDefault();
+    (e as MouseEvent).stopPropagation();
+    doCancel();
+  });
+  cancelBtn.addEventListener("click", (e: Event) => {
+    e.preventDefault();
+    e.stopPropagation();
+  });
+  header.append(headerLabel, cancelBtn);
+  widgetRoot.appendChild(header);
+
+  // Move the real input section into the widget
+  if (inputSectionEl) widgetRoot.appendChild(inputSectionEl);
+
+  // Focus on first entry only (don't steal focus on streaming refreshes)
+  const win = body.ownerDocument?.defaultView;
+  if (win && inputBoxEl && isFirstEntry && !inputBoxEl.dataset.inlineEditFocused) {
+    inputBoxEl.dataset.inlineEditFocused = "1";
+    win.setTimeout(() => {
+      inputBoxEl.focus({ preventScroll: true });
+      inputBoxEl.setSelectionRange(inputBoxEl.value.length, inputBoxEl.value.length);
+    }, 0);
+  }
+
+  return widgetRoot;
+}
+
 export function refreshChat(body: Element, item?: Zotero.Item | null) {
   const chatBox = body.querySelector("#llm-chat-box") as HTMLDivElement | null;
   if (!chatBox) return;
@@ -2850,22 +3082,18 @@ export function refreshChat(body: Element, item?: Zotero.Item | null) {
   const latestAssistantIndex = latestRetryPair
     ? latestRetryPair.userIndex + 1
     : -1;
-  const latestEditableUserIndex = latestRetryPair?.userIndex ?? -1;
-  const latestEditableUserTimestamp = latestRetryPair?.userMessage.timestamp;
-  const latestEditableAssistantTimestamp =
-    latestRetryPair?.assistantMessage.timestamp;
-  const latestEditableIsIdle = Boolean(
-    latestRetryPair && !latestRetryPair.assistantMessage.streaming,
-  );
+  const conversationIsIdle = !history.some((m) => m.streaming);
   for (const [index, msg] of history.entries()) {
     const isUser = msg.role === "user";
-    const canEditLatestUserPrompt = Boolean(
-      isUser &&
-      item &&
-      latestEditableIsIdle &&
-      index === latestEditableUserIndex &&
-      Number.isFinite(latestEditableUserTimestamp) &&
-      Number.isFinite(latestEditableAssistantTimestamp),
+    const assistantPairMsg = history[index + 1];
+    const hasAssistantPair = isUser && assistantPairMsg?.role === "assistant";
+    const canEditUserPrompt = Boolean(
+      isUser && item && conversationIsIdle && hasAssistantPair,
+    );
+    const isInlineEditBubble = Boolean(
+      canEditUserPrompt &&
+      inlineEditTarget?.conversationKey === conversationKey &&
+      inlineEditTarget.userTimestamp === msg.timestamp,
     );
     let hasUserContext = false;
     const wrapper = doc.createElement("div") as HTMLDivElement;
@@ -2873,6 +3101,7 @@ export function refreshChat(body: Element, item?: Zotero.Item | null) {
 
     const bubble = doc.createElement("div") as HTMLDivElement;
     bubble.className = `llm-bubble ${isUser ? "user" : "assistant"}`;
+    let inlineEditEl: HTMLElement | null = null;
 
     if (isUser) {
       const contextBadgesRow = doc.createElement("div") as HTMLDivElement;
@@ -3331,15 +3560,37 @@ export function refreshChat(body: Element, item?: Zotero.Item | null) {
         });
         renderSelectedTextStates();
       }
-      bubble.textContent = sanitizeText(msg.text || "");
-      const assistantTurnMessage = history[index + 1];
       const hasPromptTurnPair = Boolean(
-        assistantTurnMessage?.role === "assistant",
+        assistantPairMsg?.role === "assistant",
       );
       const canDeletePromptTurn = Boolean(
-        hasPromptTurnPair && !assistantTurnMessage?.streaming,
+        hasPromptTurnPair && !assistantPairMsg?.streaming,
       );
-      if (hasPromptTurnPair || canEditLatestUserPrompt) {
+      if (isInlineEditBubble) {
+        inlineEditEl = buildInlineEditWidget(
+          doc, body, item, msg, assistantPairMsg!, conversationKey,
+        );
+      } else {
+        bubble.textContent = sanitizeText(msg.text || "");
+        if (canEditUserPrompt) {
+          bubble.classList.add("llm-bubble-editable");
+          bubble.addEventListener("click", (e: Event) => {
+            if ((e.target as Element | null)?.closest("a, button")) return;
+            e.preventDefault();
+            e.stopPropagation();
+            const win = body.ownerDocument?.defaultView;
+            if (!win) return;
+            setInlineEditTarget({
+              conversationKey,
+              userTimestamp: msg.timestamp,
+              assistantTimestamp: Math.floor(assistantPairMsg!.timestamp),
+              currentText: msg.text || "",
+            });
+            win.setTimeout(() => refreshChat(body, item), 0);
+          });
+        }
+      }
+      if (hasPromptTurnPair) {
         bubble.addEventListener("contextmenu", (e: Event) => {
           const me = e as MouseEvent;
           me.preventDefault();
@@ -3367,12 +3618,12 @@ export function refreshChat(body: Element, item?: Zotero.Item | null) {
           ) as HTMLButtonElement | null;
           if (!promptMenu) return;
           if (promptMenuEditBtn) {
-            promptMenuEditBtn.disabled = !canEditLatestUserPrompt;
+            promptMenuEditBtn.disabled = true;
           }
           if (promptMenuDeleteBtn) {
             promptMenuDeleteBtn.disabled = !canDeletePromptTurn;
           }
-          if (!canEditLatestUserPrompt && !canDeletePromptTurn) return;
+          if (!canDeletePromptTurn) return;
           if (responseMenu) responseMenu.style.display = "none";
           if (exportMenu) exportMenu.style.display = "none";
           if (retryModelMenu) {
@@ -3385,9 +3636,9 @@ export function refreshChat(body: Element, item?: Zotero.Item | null) {
             conversationKey,
             userTimestamp: Math.floor(msg.timestamp),
             assistantTimestamp: hasPromptTurnPair
-              ? Math.floor(assistantTurnMessage?.timestamp || 0)
+              ? Math.floor(assistantPairMsg?.timestamp || 0)
               : 0,
-            editable: canEditLatestUserPrompt,
+            editable: false,
           });
           positionMenuAtPointer(body, promptMenu, me.clientX, me.clientY);
         });
@@ -3643,21 +3894,6 @@ export function refreshChat(body: Element, item?: Zotero.Item | null) {
     const time = doc.createElement("span") as HTMLSpanElement;
     time.className = "llm-message-time";
     time.textContent = formatTime(msg.timestamp);
-    if (canEditLatestUserPrompt) {
-      const editBtn = doc.createElement("button") as HTMLButtonElement;
-      editBtn.type = "button";
-      editBtn.className = "llm-edit-latest";
-      editBtn.textContent = "✎";
-      editBtn.title = "Edit latest prompt";
-      editBtn.setAttribute("aria-label", "Edit latest prompt");
-      editBtn.dataset.userTimestamp = String(
-        latestEditableUserTimestamp as number,
-      );
-      editBtn.dataset.assistantTimestamp = String(
-        latestEditableAssistantTimestamp as number,
-      );
-      meta.appendChild(editBtn);
-    }
     meta.appendChild(time);
     if (
       !isUser &&
@@ -3674,7 +3910,11 @@ export function refreshChat(body: Element, item?: Zotero.Item | null) {
       meta.appendChild(retryBtn);
     }
 
-    wrapper.appendChild(bubble);
+    if (isUser && inlineEditEl) {
+      wrapper.appendChild(inlineEditEl);
+    } else {
+      wrapper.appendChild(bubble);
+    }
     wrapper.appendChild(meta);
     chatBox.appendChild(wrapper);
     if (isUser && hasUserContext) {

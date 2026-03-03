@@ -151,3 +151,46 @@ export type PendingNoteProposal = {
  * note review card rendered in chat.ts.
  */
 export const pendingNoteProposals = new Map<number, PendingNoteProposal>();
+
+// ── Inline edit state ───────────────────────────────────────────────────────
+
+export type InlineEditTarget = {
+  conversationKey: number;
+  userTimestamp: number;
+  assistantTimestamp: number;
+  /** Text currently typed in the inline textarea (preserved across refreshes). */
+  currentText: string;
+};
+
+export let inlineEditTarget: InlineEditTarget | null = null;
+export function setInlineEditTarget(value: InlineEditTarget | null): void {
+  inlineEditTarget = value;
+}
+
+/** Cleanup callback to restore borrowed DOM elements when the inline edit widget is dismissed. */
+export let inlineEditCleanup: (() => void) | null = null;
+export function setInlineEditCleanup(fn: (() => void) | null): void {
+  inlineEditCleanup = fn;
+}
+
+/** The .llm-input-section element borrowed into the chat widget during inline edit. */
+export let inlineEditInputSectionEl: HTMLElement | null = null;
+/** Original parent of the borrowed input section (for restoring). */
+export let inlineEditInputSectionParent: Element | null = null;
+/** Original next-sibling of the borrowed input section (for restoring). */
+export let inlineEditInputSectionNextSib: Node | null = null;
+/** Draft text that was in the inputBox when edit mode was entered. */
+export let inlineEditSavedDraft: string = "";
+
+export function setInlineEditInputSection(
+  el: HTMLElement | null,
+  parent: Element | null,
+  nextSib: Node | null,
+): void {
+  inlineEditInputSectionEl = el;
+  inlineEditInputSectionParent = parent;
+  inlineEditInputSectionNextSib = nextSib;
+}
+export function setInlineEditSavedDraft(text: string): void {
+  inlineEditSavedDraft = text;
+}

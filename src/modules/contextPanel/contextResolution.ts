@@ -24,7 +24,7 @@ import type {
   PaperContextRef,
 } from "./types";
 import { isGlobalPortalItem } from "./portalScope";
-import { formatOpenChatTextContextLabel } from "./paperAttribution";
+import { formatPaperCitationLabel } from "./paperAttribution";
 import {
   getFirstSelectionFromReader,
   getSelectionFromDocument,
@@ -709,15 +709,17 @@ export function applySelectedTextPreview(body: Element, itemId: number) {
         const pageLabel = formatSelectedTextContextPageLabel(selectedContext);
         if (selectedSource === "pdf" && pageLabel) {
           if (isGlobalConversation) {
-            const paperLabel = formatOpenChatTextContextLabel(
+            const paperLabel = formatPaperCitationLabel(
               selectedContext.paperContext,
             );
-            return paperLabel ? `${paperLabel} - ${pageLabel}` : pageLabel;
+            return paperLabel
+              ? `${paperLabel}, ${pageLabel.replace(/^page /, "p")}`
+              : pageLabel.replace(/^page /, "p");
           }
           return pageLabel;
         }
         return isGlobalConversation && selectedSource === "pdf"
-          ? formatOpenChatTextContextLabel(selectedContext.paperContext)
+          ? formatPaperCitationLabel(selectedContext.paperContext)
           : selectedContexts.length > 1 && index > 0
             ? `Text Context (${index + 1})`
             : "Text Context";

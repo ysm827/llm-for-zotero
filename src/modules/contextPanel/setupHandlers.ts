@@ -56,6 +56,12 @@ import {
   draftInputCache,
   activeContextPanels,
   activeContextPanelStateSync,
+  inlineEditTarget,
+  setInlineEditTarget,
+  inlineEditCleanup,
+  setInlineEditCleanup,
+  setInlineEditInputSection,
+  setInlineEditSavedDraft,
 } from "./state";
 import {
   sanitizeText,
@@ -108,6 +114,7 @@ import {
   getSelectedReasoningForItem,
   retryLatestAssistantResponse,
   editLatestUserMessageAndRetry,
+  editUserTurnAndRetry,
   findLatestRetryPair,
   clearTransientAgentStatusForConversation,
   type EditLatestTurnMarker,
@@ -1409,7 +1416,9 @@ export function setupHandlers(body: Element, initialItem?: Zotero.Item | null) {
     }
   };
   const persistDraftInputForCurrentConversation = () => {
-    if (!item || !inputBox) return;
+    // Don't persist the edit-mode text as a draft; the real draft was saved in
+    // inlineEditSavedDraft when edit mode was entered.
+    if (!item || !inputBox || inlineEditTarget) return;
     setDraftInputForConversation(getConversationKey(item), inputBox.value);
   };
   const restoreDraftInputForCurrentConversation = () => {
@@ -3262,6 +3271,9 @@ export function setupHandlers(body: Element, initialItem?: Zotero.Item | null) {
     item = nextItem;
     syncConversationIdentity();
     activeEditSession = null;
+    inlineEditCleanup?.();
+    setInlineEditCleanup(null);
+    setInlineEditTarget(null);
     closePaperPicker();
     closePromptMenu();
     closeResponseMenu();
@@ -3336,6 +3348,9 @@ export function setupHandlers(body: Element, initialItem?: Zotero.Item | null) {
     item = nextItem;
     syncConversationIdentity();
     activeEditSession = null;
+    inlineEditCleanup?.();
+    setInlineEditCleanup(null);
+    setInlineEditTarget(null);
     closePaperPicker();
     closePromptMenu();
     closeResponseMenu();
@@ -5197,11 +5212,17 @@ export function setupHandlers(body: Element, initialItem?: Zotero.Item | null) {
   const rebuildRetryModelMenu = () => {
     if (!item || !retryModelMenu) return;
     const { profiles, choices } = getModelChoices();
-    const selectedKey = getSelectedModelInfo().selected;
+    // Show checkmark on the model that generated the current response, not the currently selected model
+    const convKey = getConversationKey(item);
+    const historyForRetry = chatHistory.get(convKey) || [];
+    const latestPair = findLatestRetryPair(historyForRetry);
+    const latestAssistantModelName = latestPair?.assistantMessage?.modelName?.trim();
     retryModelMenu.innerHTML = "";
     for (const entry of choices) {
       const profile = profiles[entry.key];
-      const isSelected = selectedKey === entry.key;
+      const isSelected = latestAssistantModelName
+        ? entry.model === latestAssistantModelName
+        : false;
       const option = createElement(
         body.ownerDocument as Document,
         "button",
@@ -6497,6 +6518,27 @@ export function setupHandlers(body: Element, initialItem?: Zotero.Item | null) {
     },
   });
   const executeSend = async () => {
+    // If the inline edit widget is active, route through editUserTurnAndRetry
+    // instead of the normal send flow.
+    if (inlineEditTarget && item) {
+      const editTarget = inlineEditTarget;
+      const newText = inputBox?.value.trim() ?? "";
+      inlineEditCleanup?.();
+      setInlineEditCleanup(null);
+      setInlineEditInputSection(null, null, null);
+      setInlineEditSavedDraft("");
+      setInlineEditTarget(null);
+      if (newText) {
+        void editUserTurnAndRetry(
+          body,
+          item,
+          editTarget.userTimestamp,
+          editTarget.assistantTimestamp,
+          newText,
+        );
+      }
+      return;
+    }
     await doSend();
     persistDraftInputForCurrentConversation();
   };
@@ -6557,6 +6599,17 @@ export function setupHandlers(body: Element, initialItem?: Zotero.Item | null) {
         selectPaperPickerRowAt(paperPickerActiveRowIndex);
         return;
       }
+    }
+    if (ke.key === "Escape" && inlineEditTarget) {
+      e.preventDefault();
+      e.stopPropagation();
+      inlineEditCleanup?.();
+      setInlineEditCleanup(null);
+      setInlineEditInputSection(null, null, null);
+      setInlineEditSavedDraft("");
+      setInlineEditTarget(null);
+      refreshConversationPanels(body, item);
+      return;
     }
     if (ke.key === "Enter" && !ke.shiftKey) {
       e.preventDefault();
@@ -7371,37 +7424,18 @@ export function setupHandlers(body: Element, initialItem?: Zotero.Item | null) {
 
   if (chatBox) {
     chatBox.addEventListener("click", (e: Event) => {
-      const editTarget = (e.target as Element | null)?.closest(
-        ".llm-edit-latest",
-      ) as HTMLButtonElement | null;
-      if (editTarget) {
-        e.preventDefault();
-        e.stopPropagation();
-        closeResponseMenu();
-        closeExportMenu();
-        closeRetryModelMenu();
-        if (!item || !promptMenuEditBtn) return;
-        const userTimestamp = Number(editTarget.dataset.userTimestamp || "");
-        const assistantTimestamp = Number(
-          editTarget.dataset.assistantTimestamp || "",
+      // Dismiss inline edit when clicking outside the edit widget
+      if (inlineEditTarget) {
+        const isInsideEdit = (e.target as Element | null)?.closest(
+          ".llm-inline-edit-wrapper",
         );
-        if (
-          !Number.isFinite(userTimestamp) ||
-          !Number.isFinite(assistantTimestamp)
-        ) {
-          if (status) setStatus(status, "No editable latest prompt", "error");
+        if (!isInsideEdit) {
+          inlineEditCleanup?.();
+          setInlineEditCleanup(null);
+          setInlineEditTarget(null);
+          refreshConversationPanels(body, item);
           return;
         }
-        setPromptMenuTarget({
-          item,
-          conversationKey: getConversationKey(item),
-          userTimestamp,
-          assistantTimestamp,
-          editable: true,
-        });
-        promptMenuEditBtn.disabled = false;
-        promptMenuEditBtn.click();
-        return;
       }
 
       const retryTarget = (e.target as Element | null)?.closest(
