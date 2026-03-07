@@ -26,6 +26,13 @@ export function resolveEndpoint(baseOrUrl: string, path: string): string {
   if (lowerCleaned.includes("chatgpt.com/backend-api/codex/responses")) {
     return cleaned;
   }
+  // Expand bare Gemini base URLs (e.g. https://generativelanguage.googleapis.com)
+  // to include the required OpenAI-compatibility sub-path (/v1beta/openai).
+  // The normalized URL already contains /openai so this branch won't fire again.
+  const geminiNormalized = normalizeGeminiApiBase(cleaned);
+  if (geminiNormalized !== cleaned) {
+    return resolveEndpoint(geminiNormalized, path);
+  }
   const chatSuffix = "/chat/completions";
   const responsesSuffix = "/responses";
   const embeddingSuffix = "/embeddings";
@@ -118,4 +125,35 @@ export function usesMaxCompletionTokens(model: string): boolean {
 export function isResponsesBase(baseOrUrl: string): boolean {
   const cleaned = baseOrUrl.trim().replace(/\/$/, "");
   return cleaned.endsWith("/v1/responses") || cleaned.endsWith("/responses");
+}
+
+/** Check whether the base URL points at a Gemini (generativelanguage.googleapis.com) endpoint. */
+export function isGeminiBase(baseOrUrl: string): boolean {
+  return /generativelanguage\.googleapis\.com/.test(baseOrUrl);
+}
+
+/**
+ * Expand a bare Gemini base URL to include the required OpenAI-compatibility
+ * sub-path (`/v1beta/openai`).  Any URL that already contains `/openai` is
+ * returned unchanged, so fully-qualified Gemini endpoints are safe to pass.
+ *
+ * Examples:
+ *   https://generativelanguage.googleapis.com          → …/v1beta/openai
+ *   https://generativelanguage.googleapis.com/v1beta   → …/v1beta/openai
+ *   https://generativelanguage.googleapis.com/v1beta/openai → unchanged
+ *   https://generativelanguage.googleapis.com/v1beta/openai/responses → unchanged
+ */
+export function normalizeGeminiApiBase(baseOrUrl: string): string {
+  const cleaned = baseOrUrl.trim().replace(/\/$/, "");
+  if (!isGeminiBase(cleaned)) return cleaned;
+  // Already routed through the OpenAI compat layer
+  if (cleaned.includes("/openai")) return cleaned;
+  // Find the version segment (/v1beta, /v1, …) and inject /openai after it
+  const versionMatch = cleaned.match(/\/v\d+(?:beta)?(?=\/|$)/);
+  if (versionMatch) {
+    const idx = cleaned.indexOf(versionMatch[0]) + versionMatch[0].length;
+    return `${cleaned.slice(0, idx)}/openai${cleaned.slice(idx)}`;
+  }
+  // No version segment — append the default Gemini compat path
+  return `${cleaned}/v1beta/openai`;
 }

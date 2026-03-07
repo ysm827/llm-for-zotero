@@ -38,7 +38,8 @@ const setPref = (key: PrefKey, value: string) =>
   Zotero.Prefs.set(pref(key), value, true);
 
 const API_HELPER_TEXT =
-  "Base URL or full endpoint. E.g. https://api.openai.com";
+  "Base URL or full endpoint. " +
+  "E.g. https://api.openai.com  |  Gemini: https://generativelanguage.googleapis.com  |  Gemini + PDF: …/v1beta/openai/responses";
 const CODEX_API_HELPER_TEXT =
   "codex auth usually uses https://chatgpt.com/backend-api/codex/responses";
 const MAX_PROVIDER_COUNT = 10;

@@ -8,6 +8,8 @@ import {
   buildHeaders,
   usesMaxCompletionTokens,
   isResponsesBase,
+  isGeminiBase,
+  normalizeGeminiApiBase,
 } from "../src/utils/apiHelpers";
 
 describe("apiHelpers", function () {
@@ -41,6 +43,46 @@ describe("apiHelpers", function () {
       assert.equal(
         url,
         "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions",
+      );
+    });
+
+    it("should expand bare Gemini domain to /v1beta/openai/chat/completions (404 fix)", function () {
+      assert.equal(
+        resolveEndpoint("https://generativelanguage.googleapis.com", API_ENDPOINT),
+        "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions",
+      );
+    });
+
+    it("should expand bare Gemini /v1beta base to /v1beta/openai/chat/completions", function () {
+      assert.equal(
+        resolveEndpoint("https://generativelanguage.googleapis.com/v1beta", API_ENDPOINT),
+        "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions",
+      );
+    });
+
+    it("should expand bare Gemini base to proper responses endpoint for PDF uploads", function () {
+      assert.equal(
+        resolveEndpoint("https://generativelanguage.googleapis.com", RESPONSES_ENDPOINT),
+        "https://generativelanguage.googleapis.com/v1beta/openai/responses",
+      );
+    });
+
+    it("should resolve files endpoint from bare Gemini domain", function () {
+      assert.equal(
+        resolveEndpoint("https://generativelanguage.googleapis.com", FILES_ENDPOINT),
+        "https://generativelanguage.googleapis.com/v1beta/openai/files",
+      );
+    });
+
+    it("should switch suffixes correctly from a Gemini responses base", function () {
+      const base = "https://generativelanguage.googleapis.com/v1beta/openai/responses";
+      assert.equal(
+        resolveEndpoint(base, API_ENDPOINT),
+        "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions",
+      );
+      assert.equal(
+        resolveEndpoint(base, FILES_ENDPOINT),
+        "https://generativelanguage.googleapis.com/v1beta/openai/files",
       );
     });
 
@@ -96,6 +138,57 @@ describe("apiHelpers", function () {
     it("should not treat chat endpoint as responses base", function () {
       assert.isFalse(
         isResponsesBase("https://api.openai.com/v1/chat/completions"),
+      );
+    });
+  });
+
+  describe("isGeminiBase", function () {
+    it("should detect generativelanguage.googleapis.com URLs", function () {
+      assert.isTrue(isGeminiBase("https://generativelanguage.googleapis.com"));
+      assert.isTrue(
+        isGeminiBase("https://generativelanguage.googleapis.com/v1beta/openai"),
+      );
+      assert.isTrue(
+        isGeminiBase(
+          "https://generativelanguage.googleapis.com/v1beta/openai/responses",
+        ),
+      );
+    });
+
+    it("should return false for non-Gemini URLs", function () {
+      assert.isFalse(isGeminiBase("https://api.openai.com"));
+      assert.isFalse(isGeminiBase("https://api.anthropic.com"));
+    });
+  });
+
+  describe("normalizeGeminiApiBase", function () {
+    it("should expand bare domain to /v1beta/openai", function () {
+      assert.equal(
+        normalizeGeminiApiBase("https://generativelanguage.googleapis.com"),
+        "https://generativelanguage.googleapis.com/v1beta/openai",
+      );
+    });
+
+    it("should expand /v1beta base to /v1beta/openai", function () {
+      assert.equal(
+        normalizeGeminiApiBase("https://generativelanguage.googleapis.com/v1beta"),
+        "https://generativelanguage.googleapis.com/v1beta/openai",
+      );
+    });
+
+    it("should leave already-expanded URLs unchanged", function () {
+      const full = "https://generativelanguage.googleapis.com/v1beta/openai";
+      assert.equal(normalizeGeminiApiBase(full), full);
+      const withChat = "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions";
+      assert.equal(normalizeGeminiApiBase(withChat), withChat);
+      const withResponses = "https://generativelanguage.googleapis.com/v1beta/openai/responses";
+      assert.equal(normalizeGeminiApiBase(withResponses), withResponses);
+    });
+
+    it("should leave non-Gemini URLs unchanged", function () {
+      assert.equal(
+        normalizeGeminiApiBase("https://api.openai.com/v1"),
+        "https://api.openai.com/v1",
       );
     });
   });
