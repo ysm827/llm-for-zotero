@@ -13,6 +13,9 @@
 
 Please see the latest [release notes](https://github.com/yilewang/llm-for-zotero/releases). The plugin name is now changed to `llm-for-zotero`.
 
+
+## Update: ChatGPT Plus subscription users can use their Codex quote to access Codex models (e.g. `gpt-5.4`) without an API key. Please see the [Usage Guide](#usage-guide) for more details. 
+
 ## Introduction
 
 **llm-for-zotero** is a powerful plugin for [Zotero](https://www.zotero.org/) that integrates Large Language Models (LLMs) directly into the Zotero PDF reader. Unlike other tools that require you to upload your pdfs to a portal, this plugin is designed to conveniently access LLMs without the need to leave Zotero. It quietly sits in the panel of the Zotero reader, like your standby research assistant, ready to help you with any questions you have when reading a paper.
@@ -74,7 +77,7 @@ In this plugin, you can open multiple papers in different tabs and ask the model
   <img src="./assets/upload_files.gif" alt="demo" width="1024" />
 </p>
 
-Not limited by the papers in your Zotero library, you can also upload any document from your local drive to the model as additional context. The supported file types include PDF, DOCX, PPTX, TXT, and markdown files. This feature is developed by coder contributor @jianghao-zhang. Kudos to him! 
+Not limited by the papers in your Zotero library, you can also upload any document from your local drive to the model as additional context. The supported file types include PDF, DOCX, PPTX, TXT, and markdown files. This feature is developed by coder contributor [@jianghao-zhang](https://github.com/jianghao-zhang). Kudos to him! 
 
 ### 6. "This answer is nice, I want to save it into my note"
 
@@ -194,11 +197,43 @@ Open the LLM Assistant sidebar (click the distinct icon in the right-hand toolba
 
 Type a question in the chat box, such as "What is the main conclusion of this paper?"
 
+### A special feature for users with ChatGPT Plus subscription
+
+We know token consumption is a big concern for many users. If you have a ChatGPT Plus subscription, you can use **Codex auth** mode to access Codex models (e.g. `gpt-5.4`) without an API key. The plugin reuses your ChatGPT login via the Codex CLI. This is a great way to save your tokens. Special thanks to [@jianghao-zhang](https://github.com/jianghao-zhang) for their valuable contributions to this project.
+
+**Step-by-step setup (including new computers):**
+
+1. **Install the Codex CLI** (one-time setup). You need Node.js 18+ first. If you don't have Node.js:
+   - **macOS:** Install [Node.js](https://nodejs.org/) or run `brew install node`, then:
+     ```bash
+     npm install -g @openai/codex
+     ```
+   - **macOS (Homebrew):** Alternatively, `brew install --cask codex` (no Node.js needed).
+   - **Windows/Linux:** Install [Node.js](https://nodejs.org/), then run `npm install -g @openai/codex`.
+
+2. **Log in with your ChatGPT account.** Open a terminal and run:
+   ```bash
+   codex login
+   ```
+   A browser window will open. Sign in with the same ChatGPT Plus account you use at chatgpt.com. When done, credentials are saved to `~/.codex/auth.json`.
+
+3. **Configure the plugin.** In Zotero → Preferences → llm-for-zotero:
+   - Set provider **Auth Mode** to `codex auth`.
+   - Set **API URL** to `https://chatgpt.com/backend-api/codex/responses`.
+   - Set **Model** to a Codex model (e.g. `gpt-5.4`).
+   - Click **Test Connection** to verify.
+
+<p align="center">
+  <img src="./assets/codex.png" alt="codex auth setup" width="1024" />
+</p>
+
+
+
 ### FAQ
 
 > Q: Is it free to use?
 
-A: Yes, absolutely free. You only pay for API calls, if you choose to use a paid API provider. If you find this tool helpful, please consider leaving a ⭐ on GitHub or buying me a coffee via [Buy Me a Coffee](https://buymeacoffee.com/yat.lok) / Alipay. Either way is greatly appreciated!
+A: Yes, absolutely free. You only pay for API calls, if you choose to use a paid API provider. And now, you can even use Codex models (e.g. `gpt-5.4`) from your ChatGPT Plus subscription without an API key. If you find this tool helpful, please consider leaving a ⭐ on GitHub or buying me a coffee via [Buy Me a Coffee](https://buymeacoffee.com/yat.lok) / Alipay. Either way is greatly appreciated!
 
 <p align="center">
   <img src="https://github.com/user-attachments/assets/1e945e57-4b99-4d25-b8d5-fb120e100b62" width="200">
