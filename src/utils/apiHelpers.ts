@@ -22,6 +22,10 @@ export const FILES_ENDPOINT = "/v1/files";
 export function resolveEndpoint(baseOrUrl: string, path: string): string {
   const cleaned = baseOrUrl.trim().replace(/\/$/, "");
   if (!cleaned) return "";
+  const lowerCleaned = cleaned.toLowerCase();
+  if (lowerCleaned.includes("chatgpt.com/backend-api/codex/responses")) {
+    return cleaned;
+  }
   const chatSuffix = "/chat/completions";
   const responsesSuffix = "/responses";
   const embeddingSuffix = "/embeddings";

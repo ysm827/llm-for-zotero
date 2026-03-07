@@ -48,6 +48,12 @@ describe("apiHelpers", function () {
       const url = resolveEndpoint("https://api.openai.com", API_ENDPOINT);
       assert.equal(url, "https://api.openai.com/v1/chat/completions");
     });
+
+    it("should keep Codex backend responses endpoint unchanged", function () {
+      const base = "https://chatgpt.com/backend-api/codex/responses";
+      assert.equal(resolveEndpoint(base, RESPONSES_ENDPOINT), base);
+      assert.equal(resolveEndpoint(base, API_ENDPOINT), base);
+    });
   });
 
   describe("buildHeaders", function () {

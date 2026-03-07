@@ -86,6 +86,7 @@ describe("modelProviders", function () {
     assert.lengthOf(result.groups[0].models, 2);
     assert.equal(result.groups[0].apiBase, "https://api.openai.com/v1");
     assert.equal(result.groups[0].apiKey, "sk-openai");
+    assert.equal(result.groups[0].authMode, "api_key");
     assert.equal(result.groups[0].models[0].model, "gpt-4o-mini");
     assert.equal(result.groups[0].models[1].model, "gpt-4o");
     assert.equal(result.groups[0].models[1].temperature, 0.1);
@@ -104,6 +105,7 @@ describe("modelProviders", function () {
         id: "provider-1",
         apiBase: "https://api.openai.com/v1",
         apiKey: "sk-openai",
+        authMode: "api_key",
         models: [
           {
             id: "model-1",
@@ -135,6 +137,7 @@ describe("modelProviders", function () {
     assert.equal(entries[0].displayModelLabel, "gpt-4o-mini");
     assert.equal(entries[1].displayModelLabel, "gpt-4o-mini #2");
     assert.equal(entries[0].providerLabel, "OpenAI");
+    assert.equal(entries[0].authMode, "api_key");
   });
 
   it("keeps input token cap unset when no override is stored", function () {
@@ -143,6 +146,7 @@ describe("modelProviders", function () {
         id: "provider-1",
         apiBase: "https://api.openai.com/v1",
         apiKey: "sk-openai",
+        authMode: "api_key",
         models: [
           {
             id: "model-1",
@@ -164,5 +168,33 @@ describe("modelProviders", function () {
 
     assert.lengthOf(entries, 1);
     assert.isUndefined(entries[0].advanced.inputTokenCap);
+  });
+
+  it("normalizes missing authMode to api_key for stored groups", function () {
+    (
+      globalThis.Zotero.Prefs as {
+        set: (key: string, value: unknown, global?: boolean) => void;
+      }
+    ).set(
+      `${config.prefsPrefix}.modelProviderGroups`,
+      JSON.stringify([
+        {
+          id: "provider-legacy",
+          apiBase: "https://chatgpt.com/backend-api/codex/responses",
+          apiKey: "",
+          models: [{ id: "m1", model: "gpt-5.4", temperature: 0.3, maxTokens: 4096 }],
+        },
+      ]),
+      true,
+    );
+    (
+      globalThis.Zotero.Prefs as {
+        set: (key: string, value: unknown, global?: boolean) => void;
+      }
+    ).set(`${config.prefsPrefix}.modelProviderGroupsMigrationVersion`, 2, true);
+
+    const entries = getRuntimeModelEntries();
+    assert.lengthOf(entries, 1);
+    assert.equal(entries[0].authMode, "api_key");
   });
 });

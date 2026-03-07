@@ -20,6 +20,7 @@ import {
   createProviderModelEntry,
   getModelProviderGroups,
   setModelProviderGroups,
+  type ModelProviderAuthMode,
   type ModelProviderGroup,
   type ModelProviderModel,
 } from "../utils/modelProviders";
@@ -38,8 +39,11 @@ const setPref = (key: PrefKey, value: string) =>
 
 const API_HELPER_TEXT =
   "Base URL or full endpoint. E.g. https://api.openai.com";
+const CODEX_API_HELPER_TEXT =
+  "codex auth usually uses https://chatgpt.com/backend-api/codex/responses";
 const MAX_PROVIDER_COUNT = 10;
 const INITIAL_PROVIDER_COUNT = 4;
+const DEFAULT_CODEX_API_BASE = "https://chatgpt.com/backend-api/codex/responses";
 
 type ProviderProfile = {
   label: string;
@@ -118,6 +122,153 @@ function isProviderEmpty(group: ModelProviderGroup): boolean {
 
 function hasEmptyModel(group: ModelProviderGroup): boolean {
   return group.models.some((m) => !m.model.trim());
+}
+
+function normalizeAuthMode(value: unknown): ModelProviderAuthMode {
+  return value === "codex_auth" ? "codex_auth" : "api_key";
+}
+
+type ProcessLike = { env?: Record<string, string | undefined> };
+type PathUtilsLike = { homeDir?: string; join?: (...parts: string[]) => string };
+type ServicesLike = {
+  dirsvc?: {
+    get?: (key: string, iface?: unknown) => { path?: string } | undefined;
+  };
+};
+type OSLike = {
+  Constants?: {
+    Path?: {
+      homeDir?: string;
+    };
+  };
+};
+
+function getProcess(): ProcessLike | undefined {
+  const fromGlobal = (globalThis as { process?: ProcessLike }).process;
+  if (fromGlobal?.env) return fromGlobal;
+  const fromToolkit = ztoolkit.getGlobal("process") as ProcessLike | undefined;
+  return fromToolkit?.env ? fromToolkit : undefined;
+}
+
+function getPathUtils(): PathUtilsLike | undefined {
+  const fromGlobal = (globalThis as { PathUtils?: PathUtilsLike }).PathUtils;
+  if (fromGlobal?.homeDir || fromGlobal?.join) return fromGlobal;
+  return ztoolkit.getGlobal("PathUtils") as PathUtilsLike | undefined;
+}
+
+function getServices(): ServicesLike | undefined {
+  const fromGlobal = (globalThis as { Services?: ServicesLike }).Services;
+  if (fromGlobal?.dirsvc?.get) return fromGlobal;
+  return ztoolkit.getGlobal("Services") as ServicesLike | undefined;
+}
+
+function getOS(): OSLike | undefined {
+  const fromGlobal = (globalThis as { OS?: OSLike }).OS;
+  if (fromGlobal?.Constants?.Path?.homeDir) return fromGlobal;
+  return ztoolkit.getGlobal("OS") as OSLike | undefined;
+}
+
+function getNsIFile(): unknown {
+  const ci = (globalThis as { Ci?: { nsIFile?: unknown } }).Ci;
+  if (ci?.nsIFile) return ci.nsIFile;
+  const components = (globalThis as {
+    Components?: { interfaces?: { nsIFile?: unknown } };
+  }).Components;
+  return components?.interfaces?.nsIFile;
+}
+
+function joinPath(...parts: string[]): string {
+  const pathUtils = getPathUtils();
+  if (pathUtils?.join) return pathUtils.join(...parts);
+  return parts
+    .filter(Boolean)
+    .map((part, index) =>
+      index === 0
+        ? part.replace(/[\\/]+$/, "")
+        : part.replace(/^[\\/]+|[\\/]+$/g, ""),
+    )
+    .join("/");
+}
+
+function resolveCodexAuthPath(): string {
+  const env = getProcess()?.env;
+  const codexHome = env?.CODEX_HOME?.trim();
+  if (codexHome) return joinPath(codexHome, "auth.json");
+  const home =
+    env?.HOME?.trim() ||
+    env?.USERPROFILE?.trim() ||
+    getPathUtils()?.homeDir?.trim() ||
+    getOS()?.Constants?.Path?.homeDir?.trim() ||
+    getServices()?.dirsvc?.get?.("Home", getNsIFile())?.path?.trim() ||
+    (Zotero as unknown as { Profile?: { dir?: string } }).Profile?.dir?.trim();
+  if (!home) throw new Error("Unable to resolve home directory for codex auth");
+  return joinPath(home, ".codex", "auth.json");
+}
+
+async function readCodexAccessToken(): Promise<string> {
+  const authPath = resolveCodexAuthPath();
+  const io = ztoolkit.getGlobal("IOUtils") as
+    | { read?: (path: string) => Promise<Uint8Array | ArrayBuffer> }
+    | undefined;
+  if (!io?.read) {
+    throw new Error("IOUtils is unavailable; cannot read Codex auth file");
+  }
+  const data = await io.read(authPath);
+  const bytes = data instanceof Uint8Array ? data : new Uint8Array(data);
+  const raw = new TextDecoder("utf-8").decode(bytes);
+  const parsed = JSON.parse(raw) as {
+    tokens?: { access_token?: string };
+  };
+  const token = parsed?.tokens?.access_token?.trim() || "";
+  if (!token) {
+    throw new Error("No access token found in ~/.codex/auth.json. Run `codex login` first.");
+  }
+  return token;
+}
+
+function extractTextFromCodexSSE(raw: string): string {
+  const lines = raw.split(/\r?\n/);
+  let out = "";
+  for (const line of lines) {
+    const trimmed = line.trim();
+    if (!trimmed.startsWith("data:")) continue;
+    const payload = trimmed.slice(5).trim();
+    if (!payload || payload === "[DONE]") continue;
+    try {
+      const parsed = JSON.parse(payload) as {
+        type?: string;
+        delta?: string;
+        response?: {
+          output_text?: string;
+          output?: Array<{
+            content?: Array<{ type?: string; text?: string }>;
+          }>;
+        };
+      };
+      if (typeof parsed.delta === "string") {
+        out += parsed.delta;
+      }
+      const completedText = parsed.response?.output_text;
+      if (typeof completedText === "string" && completedText.trim()) {
+        out += completedText;
+      }
+      const outputItems = parsed.response?.output || [];
+      for (const item of outputItems) {
+        const content = item.content || [];
+        for (const part of content) {
+          if (
+            (part.type === "output_text" || part.type === "text") &&
+            typeof part.text === "string"
+          ) {
+            out += part.text;
+          }
+        }
+      }
+    } catch (_err) {
+      continue;
+    }
+  }
+  return out.trim();
 }
 
 // ── Style tokens ───────────────────────────────────────────────────
@@ -229,7 +380,7 @@ export async function registerPrefsScripts(_window: Window | undefined | null) {
         doc,
         "span",
         "font-size: 11.5px; color: var(--fill-secondary, #888);",
-        "Each provider shares an API URL and key, with one or more model variants.",
+        "Each provider has an auth mode, API URL, and one or more model variants.",
       ),
     );
     wrap.appendChild(headingLeft);
@@ -238,6 +389,7 @@ export async function registerPrefsScripts(_window: Window | undefined | null) {
 
     groups.forEach((group, groupIndex) => {
       const profile = getProviderProfile(groupIndex);
+      group.authMode = normalizeAuthMode(group.authMode);
       group.models = ensureModels(group, profile);
 
       const card = el(doc, "div", CARD_STYLE);
@@ -258,6 +410,42 @@ export async function registerPrefsScripts(_window: Window | undefined | null) {
       // Card body
       const cardBody = el(doc, "div", CARD_BODY_STYLE);
 
+      // ── Auth mode ────────────────────────────────────────────────
+      const authModeWrap = el(doc, "div", "display: flex; flex-direction: column;");
+      const authModeLabel = el(doc, "label", LABEL_STYLE, "Auth Mode");
+      const authModeSelect = el(doc, "select", INPUT_STYLE) as HTMLSelectElement;
+      authModeSelect.id = `${config.addonRef}-auth-mode-${group.id}`;
+      authModeLabel.setAttribute("for", authModeSelect.id);
+      const apiKeyOption = el(doc, "option") as HTMLOptionElement;
+      apiKeyOption.value = "api_key";
+      apiKeyOption.textContent = "API Key";
+      const codexOption = el(doc, "option") as HTMLOptionElement;
+      codexOption.value = "codex_auth";
+      codexOption.textContent = "codex auth";
+      authModeSelect.append(apiKeyOption, codexOption);
+      authModeSelect.value = group.authMode;
+      authModeSelect.addEventListener("change", () => {
+        group.authMode = normalizeAuthMode(authModeSelect.value);
+        if (
+          group.authMode === "codex_auth" &&
+          !group.apiBase.trim()
+        ) {
+          group.apiBase = DEFAULT_CODEX_API_BASE;
+        }
+        persistGroups(groups);
+        rerender();
+      });
+      authModeWrap.append(
+        authModeLabel,
+        authModeSelect,
+        el(
+          doc,
+          "span",
+          HELPER_STYLE,
+          "codex auth reuses local `codex login` credentials from ~/.codex/auth.json",
+        ),
+      );
+
       // ── API URL ──────────────────────────────────────────────────
       const apiUrlWrap = el(doc, "div", "display: flex; flex-direction: column;");
       const apiUrlLabel = el(doc, "label", LABEL_STYLE, "API URL");
@@ -265,17 +453,26 @@ export async function registerPrefsScripts(_window: Window | undefined | null) {
       apiUrlInput.id = `${config.addonRef}-api-base-${group.id}`;
       apiUrlLabel.setAttribute("for", apiUrlInput.id);
       apiUrlInput.type = "text";
-      apiUrlInput.placeholder = "https://api.openai.com";
+      apiUrlInput.placeholder =
+        group.authMode === "codex_auth"
+          ? DEFAULT_CODEX_API_BASE
+          : "https://api.openai.com";
       apiUrlInput.value = group.apiBase;
       apiUrlInput.addEventListener("input", () => {
         group.apiBase = apiUrlInput.value;
         persistGroups(groups);
         syncAddProviderBtn();
       });
+      const apiUrlHelper = el(
+        doc,
+        "span",
+        HELPER_STYLE,
+        group.authMode === "codex_auth" ? CODEX_API_HELPER_TEXT : API_HELPER_TEXT,
+      );
       apiUrlWrap.append(
         apiUrlLabel,
         apiUrlInput,
-        el(doc, "span", HELPER_STYLE, API_HELPER_TEXT),
+        apiUrlHelper,
       );
 
       // ── API Key ──────────────────────────────────────────────────
@@ -293,6 +490,9 @@ export async function registerPrefsScripts(_window: Window | undefined | null) {
         syncAddProviderBtn();
       });
       apiKeyWrap.append(apiKeyLabel, apiKeyInput);
+      if (group.authMode === "codex_auth") {
+        apiKeyWrap.style.display = "none";
+      }
 
       // ── Models list ──────────────────────────────────────────────
       const modelsWrap = el(doc, "div", "display: flex; flex-direction: column; gap: 6px;");
@@ -471,31 +671,64 @@ export async function registerPrefsScripts(_window: Window | undefined | null) {
           statusLine.style.color = "var(--fill-secondary, #888)";
 
           try {
-            const apiBase = group.apiBase.trim().replace(/\/$/, "");
-            const apiKey = group.apiKey.trim();
+            const authMode = normalizeAuthMode(group.authMode);
+            const apiBase = (
+              group.apiBase.trim() ||
+              (authMode === "codex_auth" ? DEFAULT_CODEX_API_BASE : "")
+            ).replace(/\/$/, "");
+            const apiKey =
+              authMode === "codex_auth"
+                ? await readCodexAccessToken()
+                : group.apiKey.trim();
             const modelName = (
-              modelEntry.model || profile.defaultModel || "gpt-4o-mini"
+              modelEntry.model || profile.defaultModel || "gpt-5.4"
             ).trim();
 
             if (!apiBase) throw new Error("API URL is required");
+            if (!apiKey) {
+              throw new Error(
+                authMode === "codex_auth"
+                  ? "codex token missing. Run `codex login` first."
+                  : "API Key is required",
+              );
+            }
 
             const headers = buildHeaders(apiKey);
-            const isResponsesBase = checkIsResponsesBase(apiBase);
+            const isResponsesBase =
+              authMode === "codex_auth" || checkIsResponsesBase(apiBase);
             const testUrl = resolveEndpoint(
               apiBase,
               isResponsesBase ? "/v1/responses" : "/v1/chat/completions",
             );
+            const isCodexAuth = authMode === "codex_auth";
             const tokenParam = isResponsesBase
-              ? { max_output_tokens: 16 }
+              ? isCodexAuth
+                ? {}
+                : { max_output_tokens: 16 }
               : usesMaxCompletionTokens(modelName)
                 ? { max_completion_tokens: 5 }
                 : { max_tokens: 5 };
             const testPayload = isResponsesBase
-              ? {
-                  model: modelName,
-                  input: [{ role: "user", content: "Say OK" }],
-                  ...tokenParam,
-                }
+              ? isCodexAuth
+                ? {
+                    model: modelName,
+                    instructions: "You are a concise assistant. Reply with OK.",
+                    input: [
+                      {
+                        type: "message",
+                        role: "user",
+                        content: [{ type: "input_text", text: "Say OK" }],
+                      },
+                    ],
+                    store: false,
+                    stream: true,
+                  }
+                : {
+                    model: modelName,
+                    instructions: "You are a concise assistant. Reply with OK.",
+                    input: "Say OK",
+                    ...tokenParam,
+                  }
               : {
                   model: modelName,
                   messages: [{ role: "user", content: "Say OK" }],
@@ -514,10 +747,22 @@ export async function registerPrefsScripts(_window: Window | undefined | null) {
               throw new Error(`HTTP ${response.status}: ${errorText}`);
             }
 
+            if (isCodexAuth && isResponsesBase) {
+              const streamRaw = await response.text();
+              const reply = extractTextFromCodexSSE(streamRaw) || "OK";
+              statusLine.textContent = `✓ Success — model says: "${reply}"`;
+              statusLine.style.color = "green";
+              return;
+            }
+
             const data = (await response.json()) as {
               choices?: Array<{ message?: { content?: string } }>;
+              output_text?: string;
             };
-            const reply = data?.choices?.[0]?.message?.content || "OK";
+            const reply =
+              data?.choices?.[0]?.message?.content ||
+              data?.output_text ||
+              "OK";
             statusLine.textContent = `✓ Success — model says: "${reply}"`;
             statusLine.style.color = "green";
           } catch (error) {
@@ -540,7 +785,7 @@ export async function registerPrefsScripts(_window: Window | undefined | null) {
         "hr",
         "border: none; border-top: 1px solid var(--stroke-secondary, #c8c8c8); margin: 0;",
       );
-      cardBody.append(apiUrlWrap, apiKeyWrap, divider, modelsWrap);
+      cardBody.append(authModeWrap, apiUrlWrap, apiKeyWrap, divider, modelsWrap);
       card.append(cardHeader, cardBody);
       wrap.appendChild(card);
     });

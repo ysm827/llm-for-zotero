@@ -751,6 +751,19 @@ export function detectReasoningProvider(
   return "unsupported";
 }
 
+function formatDisplayModelName(
+  modelName: string | undefined,
+  modelProviderLabel: string | undefined,
+): string {
+  const normalizedModel = (modelName || "").trim();
+  if (!normalizedModel) return "";
+  const provider = (modelProviderLabel || "").trim().toLowerCase();
+  if (provider.includes("(codex auth)")) {
+    return `codex/${normalizedModel}`;
+  }
+  return normalizedModel;
+}
+
 export function getReasoningOptions(
   provider: ReasoningProviderKind,
   modelName: string,
@@ -969,6 +982,7 @@ type EffectiveRequestConfig = {
   model: string;
   apiBase: string;
   apiKey: string;
+  authMode: "api_key" | "codex_auth";
   modelEntryId?: string;
   modelProviderLabel?: string;
   reasoning: LLMReasoningConfig | undefined;
@@ -1004,6 +1018,7 @@ function resolveEffectiveRequestConfig(params: {
   ).trim();
   const apiBase = (params.apiBase || fallbackEntry?.apiBase || "").trim();
   const apiKey = (params.apiKey || fallbackEntry?.apiKey || "").trim();
+  const authMode = fallbackEntry?.authMode === "codex_auth" ? "codex_auth" : "api_key";
   const reasoning =
     params.reasoning ||
     getSelectedReasoningForItem(params.item.id, model, apiBase);
@@ -1015,6 +1030,7 @@ function resolveEffectiveRequestConfig(params: {
     model,
     apiBase,
     apiKey,
+    authMode,
     modelEntryId:
       params.modelEntryId || explicitEntry?.entryId || fallbackEntry?.entryId,
     modelProviderLabel:
@@ -1411,9 +1427,13 @@ function includeAutoLoadedPaperContext(
   const normalizedPinnedPaperContexts =
     normalizePaperContexts(pinnedPaperContexts);
   if (isGlobalPortalItem(item)) {
+    const fallbackPinned =
+      normalizedPinnedPaperContexts.length > 0
+        ? normalizedPinnedPaperContexts
+        : normalizedPaperContexts;
     return {
       paperContexts: normalizedPaperContexts,
-      pinnedPaperContexts: normalizedPinnedPaperContexts,
+      pinnedPaperContexts: fallbackPinned,
     };
   }
   const contextSource = resolveContextSourceItem(item);
@@ -1799,6 +1819,7 @@ export async function retryLatestAssistantResponse(
       model: effectiveRequestConfig.model,
       apiBase: effectiveRequestConfig.apiBase,
       apiKey: effectiveRequestConfig.apiKey,
+      authMode: effectiveRequestConfig.authMode,
       reasoning: effectiveRequestConfig.reasoning,
       temperature: effectiveRequestConfig.advanced?.temperature,
       maxTokens: effectiveRequestConfig.advanced?.maxTokens,
@@ -2323,6 +2344,7 @@ export async function sendQuestion(
       model: effectiveRequestConfig.model,
       apiBase: effectiveRequestConfig.apiBase,
       apiKey: effectiveRequestConfig.apiKey,
+      authMode: effectiveRequestConfig.authMode,
       reasoning: effectiveRequestConfig.reasoning,
       temperature: effectiveRequestConfig.advanced?.temperature,
       maxTokens: effectiveRequestConfig.advanced?.maxTokens,
@@ -3286,7 +3308,10 @@ export function refreshChat(body: Element, item?: Zotero.Item | null) {
       if (hasModelName) {
         const modelName = doc.createElement("div") as HTMLDivElement;
         modelName.className = "llm-model-name";
-        modelName.textContent = msg.modelName?.trim() || "";
+        modelName.textContent = formatDisplayModelName(
+          msg.modelName,
+          msg.modelProviderLabel,
+        );
         bubbleHeaderNodes.push(modelName);
       }
 

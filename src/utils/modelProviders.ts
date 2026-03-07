@@ -26,10 +26,13 @@ export type ModelProviderModel = AdvancedModelConfig & {
   model: string;
 };
 
+export type ModelProviderAuthMode = "api_key" | "codex_auth";
+
 export type ModelProviderGroup = {
   id: string;
   apiBase: string;
   apiKey: string;
+  authMode: ModelProviderAuthMode;
   models: ModelProviderModel[];
 };
 
@@ -39,6 +42,7 @@ export type RuntimeModelEntry = {
   model: string;
   apiBase: string;
   apiKey: string;
+  authMode: ModelProviderAuthMode;
   providerLabel: string;
   providerOrder: number;
   displayModelLabel: string;
@@ -73,7 +77,7 @@ const MODEL_PROVIDER_GROUPS_MIGRATION_VERSION_PREF_KEY =
   "modelProviderGroupsMigrationVersion";
 const LAST_USED_MODEL_ENTRY_ID_PREF_KEY = "lastUsedModelEntryId";
 const LEGACY_LAST_MODEL_PROFILE_PREF_KEY = "lastUsedModelProfile";
-const MODEL_PROVIDER_GROUPS_MIGRATION_VERSION = 1;
+const MODEL_PROVIDER_GROUPS_MIGRATION_VERSION = 2;
 
 function getZoteroPrefs(): ZoteroPrefsAPI | null {
   return (
@@ -116,6 +120,10 @@ function normalizeApiBase(apiBase: string): string {
   return normalizeString(apiBase).replace(/\/+$/, "");
 }
 
+function normalizeProviderAuthMode(value: unknown): ModelProviderAuthMode {
+  return value === "codex_auth" ? "codex_auth" : "api_key";
+}
+
 function normalizeAdvancedModelConfig(
   value?: AdvancedModelConfigInput | null,
 ): AdvancedModelConfig {
@@ -150,7 +158,9 @@ export function deriveProviderLabel(
   ) {
     return "Gemini";
   }
-  if (lowerHost.includes("openai.com")) return "OpenAI";
+  if (lowerHost.includes("openai.com") || lowerHost === "chatgpt.com") {
+    return "OpenAI";
+  }
   if (lowerHost.includes("anthropic.com")) return "Anthropic";
   if (lowerHost.includes("deepseek.com")) return "DeepSeek";
   if (lowerHost.includes("moonshot.ai")) return "Moonshot";
@@ -191,6 +201,7 @@ function normalizeGroup(
     id?: unknown;
     apiBase?: unknown;
     apiKey?: unknown;
+    authMode?: unknown;
     models?: unknown;
   };
 
@@ -207,6 +218,7 @@ function normalizeGroup(
         : createId("provider"),
     apiBase: normalizeApiBase(normalizeString(rawGroup.apiBase)),
     apiKey: normalizeString(rawGroup.apiKey),
+    authMode: normalizeProviderAuthMode(rawGroup.authMode),
     models,
   };
 }
@@ -338,6 +350,7 @@ export function buildModelProviderGroupsFromLegacySlots(
         id: createId("provider"),
         apiBase: normalizedBase,
         apiKey: normalizedKey,
+        authMode: "api_key",
         models: [],
       };
       groups.push(group);
@@ -413,6 +426,7 @@ export function createEmptyProviderGroup(): ModelProviderGroup {
     id: createId("provider"),
     apiBase: "",
     apiKey: "",
+    authMode: "api_key",
     models: [],
   };
 }
@@ -433,7 +447,12 @@ export function getRuntimeModelEntries(): RuntimeModelEntry[] {
   const entries: RuntimeModelEntry[] = [];
 
   for (const [groupIndex, group] of groups.entries()) {
-    const providerLabel = deriveProviderLabel(group.apiBase, groupIndex + 1);
+    const authMode = normalizeProviderAuthMode(group.authMode);
+    const baseProviderLabel = deriveProviderLabel(group.apiBase, groupIndex + 1);
+    const providerLabel =
+      authMode === "codex_auth"
+        ? `${baseProviderLabel} (codex auth)`
+        : baseProviderLabel;
     const normalizedCounts = new Map<string, number>();
     for (const modelEntry of group.models) {
       const modelName = modelEntry.model.trim();
@@ -441,16 +460,21 @@ export function getRuntimeModelEntries(): RuntimeModelEntry[] {
       const normalizedModel = modelName.toLowerCase();
       const duplicateCount = (normalizedCounts.get(normalizedModel) || 0) + 1;
       normalizedCounts.set(normalizedModel, duplicateCount);
+      const baseModelLabel =
+        authMode === "codex_auth" ? `codex/${modelName}` : modelName;
       entries.push({
         entryId: modelEntry.id,
         groupId: group.id,
         model: modelName,
         apiBase: normalizeApiBase(group.apiBase),
         apiKey: group.apiKey.trim(),
+        authMode,
         providerLabel,
         providerOrder: groupIndex,
         displayModelLabel:
-          duplicateCount > 1 ? `${modelName} #${duplicateCount}` : modelName,
+          duplicateCount > 1
+            ? `${baseModelLabel} #${duplicateCount}`
+            : baseModelLabel,
         advanced: normalizeAdvancedModelConfig(modelEntry),
       });
     }

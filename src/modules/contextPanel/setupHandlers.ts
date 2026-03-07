@@ -4871,8 +4871,10 @@ export function setupHandlers(body: Element, initialItem?: Zotero.Item | null) {
       getStringPref("modelPrimary") ||
       getStringPref("model") ||
       "default";
+    const currentModelDisplay =
+      selectedEntry?.displayModelLabel || currentModel;
     const currentModelHint = selectedEntry
-      ? `${selectedEntry.providerLabel} · ${selectedEntry.model}`
+      ? `${selectedEntry.providerLabel} · ${selectedEntry.displayModelLabel || selectedEntry.model}`
       : currentModel;
     return {
       selectedEntryId: selectedEntry?.entryId || "",
@@ -4880,6 +4882,7 @@ export function setupHandlers(body: Element, initialItem?: Zotero.Item | null) {
       choices,
       groupedChoices,
       currentModel,
+      currentModelDisplay,
       currentModelHint,
     };
   };
@@ -5378,9 +5381,10 @@ export function setupHandlers(body: Element, initialItem?: Zotero.Item | null) {
   const updateModelButton = () => {
     if (!item || !modelBtn) return;
     withScrollGuard(chatBox, conversationKey, () => {
-      const { choices, currentModel, currentModelHint } = getSelectedModelInfo();
+      const { choices, currentModel, currentModelDisplay, currentModelHint } =
+        getSelectedModelInfo();
       const hasSecondary = choices.length > 1;
-      modelBtn.dataset.modelLabel = `${currentModel || "default"}`;
+      modelBtn.dataset.modelLabel = `${currentModelDisplay || currentModel || "default"}`;
       modelBtn.dataset.modelHint = hasSecondary
         ? currentModelHint
         : currentModelHint || "Only one model is configured";

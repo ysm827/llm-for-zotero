@@ -157,6 +157,20 @@ Select your Provider (e.g., OpenAI, Gemini, Deepseek).
 
 Paste your API Base URL, secret key and model name.
 
+This plugin also supports **codex auth** mode (ChatGPT/Codex login reuse) for Codex models:
+
+1. Run `codex login` on your machine first.
+2. In plugin settings, set provider **Auth Mode** to `codex auth`.
+3. Use API URL `https://chatgpt.com/backend-api/codex/responses` and a Codex model (e.g. `gpt-5.4`).
+
+codex auth v1 notes:
+
+- The plugin reads local credentials from `~/.codex/auth.json` (or `$CODEX_HOME/auth.json`).
+- If request returns 401, the plugin attempts token refresh automatically.
+- Embeddings are not supported in codex auth mode yet.
+- Local PDF/reference text grounding and screenshot/image inputs are supported in codex auth mode.
+- Only Responses `/files` upload + `file_id` attachment flow is not supported in codex auth mode yet.
+
 I will give some popular model as example:
 
 | API url                                                                  | Model Name           | Reasoning Level              |
