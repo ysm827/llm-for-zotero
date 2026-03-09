@@ -1864,6 +1864,8 @@
 }
 
 .llm-agent-trace {
+  --llm-agent-surface-bg: rgba(0, 0, 0, 0.15);
+  --llm-agent-surface-padding: 10px 12px;
   margin-top: 8px;
   display: flex;
   flex-direction: column;
@@ -1871,12 +1873,19 @@
 }
 
 .llm-agent-trace-card,
-.llm-agent-trace-code,
 .llm-agent-hitl-card {
   margin: 6px 0 0;
-  padding: 8px;
+  padding: var(--llm-agent-surface-padding);
   border-radius: 6px;
-  background: color-mix(in srgb, var(--material-background) 84%, black 16%);
+  background: var(--llm-agent-surface-bg);
+  color: var(--fill-secondary);
+}
+
+.llm-bubble.assistant .llm-agent-trace-code {
+  margin: 6px 0 0;
+  padding: var(--llm-agent-surface-padding);
+  border-radius: 6px;
+  background: var(--llm-agent-surface-bg);
   color: var(--fill-secondary);
 }
 
@@ -1895,7 +1904,7 @@
 .llm-agent-trace-list {
   display: flex;
   flex-direction: column;
-  gap: 6px;
+  gap: 8px;
 }
 
 .llm-at-row {
@@ -1912,14 +1921,17 @@
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  flex: 0 0 18px;
-  width: 18px;
-  height: 18px;
-  font-size: 11px;
+  flex: 0 0 20px;
+  width: 20px;
+  height: 20px;
+  font-size: 12px;
+  font-weight: 700;
   line-height: 1;
-  color: var(--fill-secondary);
+  color: var(--fill-primary);
   border-radius: 999px;
-  background: color-mix(in srgb, var(--fill-quinary) 86%, transparent);
+  border: 1px solid color-mix(in srgb, var(--stroke-secondary) 70%, transparent);
+  background: color-mix(in srgb, var(--fill-quinary) 90%, transparent);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.04);
   margin-top: 1px;
 }
 
@@ -1931,9 +1943,9 @@
 }
 
 .llm-at-plan-text {
-  color: var(--fill-tertiary);
-  font-style: italic;
-  font-size: var(--llm-fs-10);
+  color: var(--fill-secondary);
+  font-size: var(--llm-fs-11);
+  font-weight: 500;
 }
 
 .llm-at-tool-text {
@@ -1950,7 +1962,8 @@
 
 .llm-at-skip-text {
   color: var(--fill-tertiary);
-  font-size: var(--llm-fs-10);
+  font-size: var(--llm-fs-11);
+  font-weight: 500;
 }
 
 .llm-at-done-text {
@@ -1959,17 +1972,29 @@
   font-weight: 600;
 }
 
+.llm-at-row-plan .llm-at-icon {
+  color: color-mix(in srgb, var(--fill-secondary) 92%, white 8%);
+  border-color: color-mix(in srgb, var(--fill-secondary) 16%, transparent);
+  background: color-mix(in srgb, var(--fill-secondary) 10%, transparent);
+}
+
 .llm-at-row-tool .llm-at-icon {
   color: var(--color-accent);
+  border-color: color-mix(in srgb, var(--color-accent) 28%, transparent);
+  background: color-mix(in srgb, var(--color-accent) 14%, transparent);
 }
 
 .llm-at-row-ok .llm-at-icon,
 .llm-at-row-done .llm-at-icon {
   color: #4caf82;
+  border-color: rgba(76, 175, 130, 0.28);
+  background: rgba(76, 175, 130, 0.12);
 }
 
 .llm-at-row-skip .llm-at-icon {
   color: #f39c12;
+  border-color: rgba(243, 156, 18, 0.26);
+  background: rgba(243, 156, 18, 0.1);
 }
 
 .llm-agent-trace-details {

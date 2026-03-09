@@ -977,6 +977,118 @@ type AgentTraceSummaryRow = {
   text: string;
 };
 
+function summarizeAgentTraceStatus(text: string | undefined): AgentTraceSummaryRow {
+  const raw = readAgentTraceText(text)?.toLowerCase() || "";
+  if (raw.includes("continuing")) {
+    return {
+      kind: "plan",
+      icon: "↻",
+      text: "Working through the next step",
+    };
+  }
+  return {
+    kind: "plan",
+    icon: "↻",
+    text: "Reviewing your request",
+  };
+}
+
+function summarizeAgentTraceToolCall(name: string): AgentTraceSummaryRow {
+  switch (name) {
+    case "get_active_context":
+      return {
+        kind: "tool",
+        icon: "◎",
+        text: "Checking the current Zotero context",
+      };
+    case "list_paper_contexts":
+      return {
+        kind: "tool",
+        icon: "▣",
+        text: "Reviewing the papers in scope",
+      };
+    case "retrieve_paper_evidence":
+      return {
+        kind: "tool",
+        icon: "⌕",
+        text: "Searching the paper for relevant evidence",
+      };
+    case "read_paper_excerpt":
+      return {
+        kind: "tool",
+        icon: "¶",
+        text: "Opening the most relevant passage",
+      };
+    case "search_library_items":
+      return {
+        kind: "tool",
+        icon: "⌕",
+        text: "Searching your library",
+      };
+    case "read_attachment_text":
+      return {
+        kind: "tool",
+        icon: "≣",
+        text: "Reading the attached file",
+      };
+    case "save_answer_to_note":
+      return {
+        kind: "tool",
+        icon: "✎",
+        text: "Preparing a note draft",
+      };
+    default:
+      return {
+        kind: "tool",
+        icon: "✦",
+        text: `Using ${formatAgentTraceToolName(name)}`,
+      };
+  }
+}
+
+function summarizeAgentTraceConfirmationRequest(
+  toolName: string,
+): AgentTraceSummaryRow {
+  if (toolName === "save_answer_to_note") {
+    return {
+      kind: "plan",
+      icon: "⌛",
+      text: "Waiting for your approval to save the note",
+    };
+  }
+  return {
+    kind: "plan",
+    icon: "⌛",
+    text: `Waiting for your approval to continue with ${formatAgentTraceToolName(
+      toolName,
+    )}`,
+  };
+}
+
+function summarizeAgentTraceConfirmationResolved(
+  toolName: string,
+  approved: boolean,
+): AgentTraceSummaryRow {
+  if (approved) {
+    return {
+      kind: "ok",
+      icon: "✓",
+      text:
+        toolName === "save_answer_to_note"
+          ? "Approval received; saving the note"
+          : "Approval received; continuing",
+    };
+  }
+  return {
+    kind: "skip",
+    icon: "✕",
+    text:
+      toolName === "save_answer_to_note"
+        ? "Note save cancelled"
+        : "Action cancelled",
+  };
+}
+
 function summarizeAgentTraceToolResult(
   name: string,
   ok: boolean,
@@ -984,13 +1096,19 @@ function summarizeAgentTraceToolResult(
 ): AgentTraceSummaryRow | null {
   const normalized = isAgentTraceRecord(content) ? content : null;
   if (!ok) {
+    const rawError = readAgentTraceText(normalized?.error);
+    if (rawError?.toLowerCase() === "user denied action") {
+      return null;
+    }
     const errorText =
-      readAgentTraceText(normalized?.error) ||
-      `Tool failed: ${formatAgentTraceToolName(name)}`;
+      rawError || `Tool failed: ${formatAgentTraceToolName(name)}`;
     return {
       kind: "skip",
       icon: "!",
-      text: truncateAgentTraceText(errorText, 84),
+      text: truncateAgentTraceText(
+        `Could not complete ${formatAgentTraceToolName(name)}: ${errorText}`,
+        92,
+      ),
     };
   }
 
@@ -999,8 +1117,13 @@ function summarizeAgentTraceToolResult(
       const evidence = Array.isArray(normalized?.evidence) ? normalized.evidence : [];
       return {
         kind: evidence.length > 0 ? "ok" : "skip",
-        icon: evidence.length > 0 ? "*" : "!",
-        text: `${evidence.length} snippet${evidence.length === 1 ? "" : "s"} found`,
+        icon: evidence.length > 0 ? "✓" : "!",
+        text:
+          evidence.length > 0
+            ? `Collected ${evidence.length} relevant snippet${
+                evidence.length === 1 ? "" : "s"
+              }`
+            : "No relevant snippets found",
       };
     }
     case "search_library_items": {
@@ -1009,19 +1132,24 @@ function summarizeAgentTraceToolResult(
         : 0;
       return {
         kind: count > 0 ? "ok" : "skip",
-        icon: count > 0 ? "*" : "!",
-        text: `${count} library match${count === 1 ? "" : "es"} found`,
+        icon: count > 0 ? "✓" : "!",
+        text:
+          count > 0
+            ? `Found ${count} matching paper${count === 1 ? "" : "s"} in your library`
+            : "No matching papers found in the library",
       };
     }
     case "save_answer_to_note": {
       const status = readAgentTraceText(normalized?.status);
       return {
         kind: "ok",
-        icon: "*",
+        icon: "✓",
         text:
           status === "appended"
-            ? "Appended answer to note"
-            : "Saved answer to note",
+            ? "Saved the note to the current item"
+            : status === "standalone_created"
+              ? "Saved the note as a standalone note"
+              : "Saved the note",
       };
     }
     default:
@@ -1068,6 +1196,7 @@ function buildAgentTraceSummaryRows(
   events: AgentRunEventRecord[],
 ): AgentTraceSummaryRow[] {
   const rows: AgentTraceSummaryRow[] = [];
+  const confirmationToolNames = new Map<string, string>();
   let sawRunning = false;
   let sawTool = false;
   let sawPreparationComplete = false;
@@ -1078,20 +1207,18 @@ function buildAgentTraceSummaryRows(
       case "status":
         if (!sawRunning) {
           sawRunning = true;
-          pushAgentTraceSummaryRow(rows, {
-            kind: "plan",
-            icon: ">",
-            text: entry.payload.text || "Running agent",
-          });
+          pushAgentTraceSummaryRow(
+            rows,
+            summarizeAgentTraceStatus(entry.payload.text),
+          );
         }
         break;
       case "tool_call":
         sawTool = true;
-        pushAgentTraceSummaryRow(rows, {
-          kind: "tool",
-          icon: "+",
-          text: `Using ${formatAgentTraceToolName(entry.payload.name)}`,
-        });
+        pushAgentTraceSummaryRow(
+          rows,
+          summarizeAgentTraceToolCall(entry.payload.name),
+        );
         break;
       case "tool_result":
         pushAgentTraceSummaryRow(
@@ -1104,53 +1231,56 @@ function buildAgentTraceSummaryRows(
         );
         break;
       case "confirmation_required":
-        pushAgentTraceSummaryRow(rows, {
-          kind: "plan",
-          icon: "?",
-          text: `Awaiting approval for ${formatAgentTraceToolName(
+        confirmationToolNames.set(
+          entry.payload.requestId,
+          entry.payload.action.toolName,
+        );
+        pushAgentTraceSummaryRow(
+          rows,
+          summarizeAgentTraceConfirmationRequest(
             entry.payload.action.toolName,
-          )}`,
-        });
+          ),
+        );
         break;
       case "confirmation_resolved":
-        pushAgentTraceSummaryRow(rows, {
-          kind: entry.payload.approved ? "ok" : "skip",
-          icon: entry.payload.approved ? "*" : "!",
-          text: entry.payload.approved
-            ? "Action approved"
-            : "Action cancelled",
-        });
+        pushAgentTraceSummaryRow(
+          rows,
+          summarizeAgentTraceConfirmationResolved(
+            confirmationToolNames.get(entry.payload.requestId) || "",
+            entry.payload.approved,
+          ),
+        );
         break;
       case "message_delta":
         if (sawTool && !sawPreparationComplete) {
           sawPreparationComplete = true;
           pushAgentTraceSummaryRow(rows, {
             kind: "ok",
-            icon: "*",
-            text: "Preparation complete",
+            icon: "✓",
+            text: "Preparation finished",
           });
         }
         if (!sawDrafting) {
           sawDrafting = true;
           pushAgentTraceSummaryRow(rows, {
             kind: "plan",
-            icon: "...",
-            text: "Drafting answer",
+            icon: "✎",
+            text: "Writing the response",
           });
         }
         break;
       case "final":
         pushAgentTraceSummaryRow(rows, {
           kind: "done",
-          icon: "*",
-          text: "Final answer ready",
+          icon: "✓",
+          text: "Response ready",
         });
         break;
       case "fallback":
         pushAgentTraceSummaryRow(rows, {
           kind: "skip",
           icon: "!",
-          text: entry.payload.reason,
+          text: "Tool use is unavailable for this model, so I answered directly",
         });
         break;
     }
@@ -1159,8 +1289,8 @@ function buildAgentTraceSummaryRows(
   if (!rows.length) {
     rows.push({
       kind: "plan",
-      icon: ">",
-      text: "Running agent",
+      icon: "↻",
+      text: "Reviewing your request",
     });
   }
 
