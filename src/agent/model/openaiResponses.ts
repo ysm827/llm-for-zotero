@@ -131,7 +131,11 @@ export class OpenAIResponsesAgentAdapter implements AgentModelAdapter {
     });
     const normalized = limitNormalizedResponsesStep(
       response.body
-        ? await parseResponsesStepStream(response.body, params.onTextDelta)
+        ? await parseResponsesStepStream(
+            response.body,
+            params.onTextDelta,
+            params.onReasoning,
+          )
         : normalizeResponsesStepFromPayload(
             (await response.json()) as ResponsesPayload,
           ),

@@ -7,6 +7,7 @@ import {
 import {
   stringifyMessageContent,
 } from "./messageBuilder";
+import type { ReasoningEvent } from "../../utils/llmClient";
 import type {
   AgentModelContentPart,
   AgentModelMessage,
@@ -51,6 +52,45 @@ export type ResponsesPayload = {
   output_text?: unknown;
   output?: unknown;
 };
+
+function normalizeResponsesText(value: unknown): string {
+  if (typeof value === "string") return value;
+  if (typeof value === "number" || typeof value === "boolean") {
+    return String(value);
+  }
+  return "";
+}
+
+function normalizeReasoningText(value: unknown): string {
+  if (typeof value === "string") return value;
+  if (Array.isArray(value)) {
+    return value
+      .map((entry) => {
+        if (typeof entry === "string") return entry;
+        if (entry && typeof entry === "object") {
+          const row = entry as { text?: unknown; summary?: unknown };
+          return (
+            normalizeResponsesText(row.text) ||
+            normalizeResponsesText(row.summary)
+          );
+        }
+        return "";
+      })
+      .filter(Boolean)
+      .join("\n");
+  }
+  if (value && typeof value === "object") {
+    const row = value as { text?: unknown; summary?: unknown };
+    return (
+      normalizeResponsesText(row.text) || normalizeResponsesText(row.summary)
+    );
+  }
+  return "";
+}
+
+function extractReasoningSummary(value: unknown): string {
+  return normalizeReasoningText(value);
+}
 
 export type NormalizedResponsesStep = {
   responseId?: string;
@@ -320,6 +360,7 @@ export function limitNormalizedResponsesStep(
 export async function parseResponsesStepStream(
   stream: ReadableStream<Uint8Array>,
   onTextDelta?: (delta: string) => void | Promise<void>,
+  onReasoning?: (event: ReasoningEvent) => void | Promise<void>,
 ): Promise<NormalizedResponsesStep> {
   const reader = stream.getReader() as ReadableStreamDefaultReader<Uint8Array>;
   const decoder = new TextDecoder();
@@ -328,6 +369,10 @@ export async function parseResponsesStepStream(
   let latestPayload: ResponsesPayload | null = null;
   let streamedText = "";
   const streamedOutputs: ResponsesOutputItem[] = [];
+  let sawSummaryDelta = false;
+  let sawSummaryFinal = false;
+  let sawDetailsDelta = false;
+  let sawDetailsFinal = false;
 
   const mergeOutputItem = (item: unknown) => {
     if (!item || typeof item !== "object") return;
@@ -347,6 +392,45 @@ export async function parseResponsesStepStream(
     streamedOutputs.push(normalizedItem);
   };
 
+  const emitReasoning = async (event: ReasoningEvent) => {
+    if (!onReasoning) return;
+    const summary =
+      typeof event.summary === "string" && event.summary.length > 0
+        ? event.summary
+        : undefined;
+    const details =
+      typeof event.details === "string" && event.details.length > 0
+        ? event.details
+        : undefined;
+    if (!summary && !details) return;
+    await onReasoning({ summary, details });
+  };
+
+  const emitReasoningFromOutputItem = async (value: unknown) => {
+    if (!value || typeof value !== "object") return;
+    const row = value as {
+      type?: unknown;
+      summary?: unknown;
+      content?: unknown;
+      text?: unknown;
+      reasoning?: unknown;
+    };
+    const typeValue =
+      typeof row.type === "string" ? row.type.toLowerCase() : "";
+    if (typeValue !== "reasoning") return;
+    if (!sawSummaryDelta && !sawSummaryFinal) {
+      await emitReasoning({ summary: extractReasoningSummary(row.summary) });
+    }
+    if (!sawDetailsDelta && !sawDetailsFinal) {
+      await emitReasoning({
+        details:
+          normalizeReasoningText(row.content) ||
+          normalizeReasoningText(row.reasoning) ||
+          normalizeReasoningText(row.text),
+      });
+    }
+  };
+
   try {
     while (true) {
       const { value, done } = await reader.read();
@@ -364,13 +448,22 @@ export async function parseResponsesStepStream(
           const parsed = JSON.parse(data) as {
             type?: unknown;
             delta?: unknown;
+            text?: unknown;
+            summary?: unknown;
+            reasoning?: unknown;
             item?: unknown;
+            part?: {
+              type?: unknown;
+              summary?: unknown;
+              content?: unknown;
+              text?: unknown;
+            };
             response?: ResponsesPayload;
           };
           const eventType =
             typeof parsed.type === "string" ? parsed.type.toLowerCase() : "";
           if (eventType === "response.output_text.delta") {
-            const delta = stringifyUnknown(parsed.delta);
+            const delta = normalizeResponsesText(parsed.delta);
             streamedText += delta;
             if (delta && onTextDelta) {
               await onTextDelta(delta);
@@ -378,10 +471,95 @@ export async function parseResponsesStepStream(
             continue;
           }
           if (
+            (eventType === "response.reasoning_summary.delta" ||
+              eventType === "response.reasoning_summary_text.delta") &&
+            parsed.delta
+          ) {
+            sawSummaryDelta = true;
+            await emitReasoning({
+              summary: normalizeResponsesText(parsed.delta),
+            });
+            continue;
+          }
+          if (
+            (eventType === "response.reasoning_summary.done" ||
+              eventType === "response.reasoning_summary_text.done") &&
+            (parsed.text || parsed.delta)
+          ) {
+            sawSummaryFinal = true;
+            if (!sawSummaryDelta) {
+              await emitReasoning({
+                summary: normalizeResponsesText(parsed.text ?? parsed.delta),
+              });
+            }
+            continue;
+          }
+          if (
+            (eventType === "response.reasoning_summary_part.added" ||
+              eventType === "response.reasoning_summary_part.done") &&
+            parsed.part
+          ) {
+            const partType =
+              typeof parsed.part.type === "string"
+                ? parsed.part.type.toLowerCase()
+                : "";
+            if (
+              !partType ||
+              partType === "summary_text" ||
+              partType === "reasoning_summary"
+            ) {
+              const partSummary = normalizeResponsesText(
+                parsed.part.text ??
+                  parsed.part.content ??
+                  parsed.part.summary,
+              );
+              if (partSummary) {
+                sawSummaryFinal = true;
+                await emitReasoning({ summary: partSummary });
+              }
+            }
+            continue;
+          }
+          if (
+            (eventType === "response.reasoning.delta" ||
+              eventType === "response.reasoning_text.delta") &&
+            parsed.delta
+          ) {
+            sawDetailsDelta = true;
+            await emitReasoning({
+              details: normalizeResponsesText(parsed.delta),
+            });
+            continue;
+          }
+          if (
+            (eventType === "response.reasoning.done" ||
+              eventType === "response.reasoning_text.done") &&
+            (parsed.text || parsed.delta)
+          ) {
+            sawDetailsFinal = true;
+            if (!sawDetailsDelta) {
+              await emitReasoning({
+                details: normalizeResponsesText(parsed.text ?? parsed.delta),
+              });
+            }
+            continue;
+          }
+          if (eventType === "response.reasoning" && parsed.reasoning) {
+            sawDetailsFinal = true;
+            if (!sawDetailsDelta) {
+              await emitReasoning({
+                details: normalizeReasoningText(parsed.reasoning),
+              });
+            }
+            continue;
+          }
+          if (
             eventType === "response.output_item.added" ||
+            eventType === "response.output_item.delta" ||
             eventType === "response.output_item.done"
           ) {
             mergeOutputItem(parsed.item);
+            await emitReasoningFromOutputItem(parsed.item);
             continue;
           }
           if (eventType === "response.completed" && parsed.response) {
@@ -391,6 +569,12 @@ export async function parseResponsesStepStream(
               parsed.response.id.trim()
             ) {
               responseId = parsed.response.id.trim();
+            }
+            const outputs = Array.isArray(parsed.response.output)
+              ? parsed.response.output
+              : [];
+            for (const output of outputs) {
+              await emitReasoningFromOutputItem(output);
             }
           }
         } catch (_error) {

@@ -24,6 +24,9 @@ import {
 type ChatCompletionChoice = {
   message?: {
     content?: string | null;
+    reasoning_content?: string | null;
+    reasoning?: string | null;
+    thinking?: string | null;
     tool_calls?: Array<{
       id?: string;
       function?: {
@@ -179,6 +182,14 @@ export class OpenAIChatCompatAgentAdapter implements AgentModelAdapter {
     }
     const data = (await response.json()) as { choices?: ChatCompletionChoice[] };
     const message = data.choices?.[0]?.message;
+    const reasoningText =
+      message?.reasoning_content ||
+      message?.reasoning ||
+      message?.thinking ||
+      "";
+    if (reasoningText && params.onReasoning) {
+      await params.onReasoning({ details: reasoningText });
+    }
     const toolCalls = normalizeToolCalls(message?.tool_calls);
     if (toolCalls.length) {
       return {

@@ -156,6 +156,12 @@ export type PromptSpec = {
 
 export type AgentEvent =
   | { type: "status"; text: string }
+  | {
+      type: "reasoning";
+      round: number;
+      summary?: string;
+      details?: string;
+    }
   | { type: "tool_call"; callId: string; name: string; args: unknown }
   | {
       type: "tool_result";

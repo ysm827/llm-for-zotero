@@ -263,6 +263,51 @@ describe("GeminiNativeAgentAdapter", function () {
     assert.deepEqual(deltas, ["Hello ", "world"]);
   });
 
+  it("streams thought parts separately from answer text", async function () {
+    const adapter = new GeminiNativeAgentAdapter();
+    const reasoning: string[] = [];
+    const deltas: string[] = [];
+    (
+      globalThis as typeof globalThis & {
+        ztoolkit: { getGlobal: (name: string) => unknown };
+      }
+    ).ztoolkit = {
+      getGlobal: (name: string) => {
+        if (name !== "fetch") return undefined;
+        return async () => ({
+          ok: true,
+          status: 200,
+          statusText: "OK",
+          body: makeSseStream([
+            'data: {"candidates":[{"content":{"parts":[{"text":"Think first.","thought":true,"thoughtSignature":"sig-1"},{"text":"Final answer."}]}}]}\n\n',
+          ]),
+          json: async () => ({}),
+          text: async () => "",
+        });
+      },
+    };
+
+    const step = await adapter.runStep({
+      request: makeRequest(),
+      messages: [{ role: "user", content: "Think, then answer" }],
+      tools,
+      onTextDelta: async (delta) => {
+        deltas.push(delta);
+      },
+      onReasoning: async (event) => {
+        if (event.details) {
+          reasoning.push(event.details);
+        }
+      },
+    });
+
+    assert.equal(step.kind, "final");
+    if (step.kind !== "final") return;
+    assert.equal(step.text, "Final answer.");
+    assert.deepEqual(deltas, ["Final answer."]);
+    assert.deepEqual(reasoning, ["Think first."]);
+  });
+
   it("falls back to non-stream generateContent when streaming returns no text", async function () {
     const adapter = new GeminiNativeAgentAdapter();
     let callCount = 0;

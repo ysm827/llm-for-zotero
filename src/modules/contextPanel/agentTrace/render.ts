@@ -1,4 +1,5 @@
 import { getAgentRuntime, getSharedZoteroGateway } from "../../../agent";
+import { renderMarkdown } from "../../../utils/markdown";
 import type {
   AgentPendingAction,
   AgentPendingField,
@@ -15,6 +16,7 @@ import {
   normalizePaperContextRefs,
   normalizeSelectedTextSources,
 } from "../normalizers";
+import { agentReasoningExpandedCache } from "../state";
 
 type AgentTraceSummaryKind = "plan" | "tool" | "ok" | "skip" | "done";
 
@@ -38,6 +40,13 @@ type AgentTraceDisplayItem =
   | {
       type: "card_list";
       cards: AgentToolResultCard[];
+    }
+  | {
+      type: "reasoning";
+      key: string;
+      label: string;
+      summary?: string;
+      details?: string;
     };
 
 type RenderAgentTraceParams = {
@@ -100,6 +109,16 @@ function isAgentTraceRecord(value: unknown): value is Record<string, unknown> {
 
 function readAgentTraceText(value: unknown): string | null {
   return typeof value === "string" && value.trim() ? value.trim() : null;
+}
+
+function appendAgentTraceText(
+  base: string | undefined,
+  next: unknown,
+): string | undefined {
+  const chunk =
+    typeof next === "string" && next.trim() ? sanitizeText(next) : null;
+  if (!chunk) return base;
+  return `${base || ""}${chunk}`;
 }
 
 function truncateAgentTraceText(value: unknown, max = 88): string {
@@ -1453,6 +1472,28 @@ function compactAgentTraceEvents(
       compact[compact.length - 1] = entry;
       continue;
     }
+    if (
+      entry.payload.type === "reasoning" &&
+      previous?.payload.type === "reasoning" &&
+      previous.payload.round === entry.payload.round
+    ) {
+      compact[compact.length - 1] = {
+        ...entry,
+        payload: {
+          type: "reasoning",
+          round: entry.payload.round,
+          summary: appendAgentTraceText(
+            previous.payload.summary,
+            entry.payload.summary,
+          ),
+          details: appendAgentTraceText(
+            previous.payload.details,
+            entry.payload.details,
+          ),
+        },
+      };
+      continue;
+    }
     compact.push(entry);
   }
   return compact;
@@ -1508,6 +1549,21 @@ export function buildAgentTraceDisplayItems(
           ),
         });
         break;
+      case "reasoning": {
+        const summary = readAgentTraceText(entry.payload.summary) || undefined;
+        const details = readAgentTraceText(entry.payload.details) || undefined;
+        if (!summary && !details) {
+          break;
+        }
+        items.push({
+          type: "reasoning",
+          key: `round:${entry.payload.round}`,
+          label: `Thinking for step ${entry.payload.round}`,
+          summary,
+          details,
+        });
+        break;
+      }
       case "tool_result": {
         const row = summarizeAgentTraceToolResult(
           entry.payload.name,
@@ -1672,6 +1728,78 @@ export function renderAgentTrace({
 
     if (itemEntry.type === "card_list") {
       list.appendChild(renderResultCardList(doc, itemEntry.cards));
+      continue;
+    }
+
+    if (itemEntry.type === "reasoning") {
+      const details = doc.createElement("details") as HTMLDetailsElement;
+      details.className = "llm-agent-reasoning";
+      const expansionKey = `${runId}:${itemEntry.key}`;
+      details.open = Boolean(agentReasoningExpandedCache.get(expansionKey));
+
+      const summary = doc.createElement("summary") as HTMLElement;
+      summary.className = "llm-agent-reasoning-summary";
+      summary.textContent = itemEntry.label;
+      const toggleReasoning = (event: Event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        const next = !details.open;
+        details.open = next;
+        agentReasoningExpandedCache.set(expansionKey, next);
+      };
+      summary.addEventListener("mousedown", toggleReasoning);
+      summary.addEventListener("click", (event: Event) => {
+        event.preventDefault();
+        event.stopPropagation();
+      });
+      summary.addEventListener("keydown", (event: KeyboardEvent) => {
+        if (event.key === "Enter" || event.key === " ") {
+          toggleReasoning(event);
+        }
+      });
+      details.appendChild(summary);
+
+      const bodyWrap = doc.createElement("div") as HTMLDivElement;
+      bodyWrap.className = "llm-agent-reasoning-body";
+
+      if (itemEntry.summary) {
+        const summaryBlock = doc.createElement("div") as HTMLDivElement;
+        summaryBlock.className = "llm-agent-reasoning-block";
+        const label = doc.createElement("div") as HTMLDivElement;
+        label.className = "llm-agent-reasoning-label";
+        label.textContent = "Summary";
+        const text = doc.createElement("div") as HTMLDivElement;
+        text.className = "llm-agent-reasoning-text";
+        try {
+          text.innerHTML = renderMarkdown(itemEntry.summary);
+        } catch (error) {
+          ztoolkit.log("Agent reasoning render error:", error);
+          text.textContent = itemEntry.summary;
+        }
+        summaryBlock.append(label, text);
+        bodyWrap.appendChild(summaryBlock);
+      }
+
+      if (itemEntry.details) {
+        const detailsBlock = doc.createElement("div") as HTMLDivElement;
+        detailsBlock.className = "llm-agent-reasoning-block";
+        const label = doc.createElement("div") as HTMLDivElement;
+        label.className = "llm-agent-reasoning-label";
+        label.textContent = "Details";
+        const text = doc.createElement("div") as HTMLDivElement;
+        text.className = "llm-agent-reasoning-text";
+        try {
+          text.innerHTML = renderMarkdown(itemEntry.details);
+        } catch (error) {
+          ztoolkit.log("Agent reasoning render error:", error);
+          text.textContent = itemEntry.details;
+        }
+        detailsBlock.append(label, text);
+        bodyWrap.appendChild(detailsBlock);
+      }
+
+      details.appendChild(bodyWrap);
+      list.appendChild(details);
       continue;
     }
 

@@ -234,4 +234,33 @@ describe("CodexResponsesAgentAdapter", function () {
       },
     ]);
   });
+
+  it("streams reasoning deltas separately from output text", async function () {
+    const stream = new ReadableStream<Uint8Array>({
+      start(controller) {
+        const encoder = new TextEncoder();
+        controller.enqueue(
+          encoder.encode(
+            'data: {"type":"response.reasoning.delta","delta":"Plan first."}\n',
+          ),
+        );
+        controller.enqueue(
+          encoder.encode(
+            'data: {"type":"response.output_text.delta","delta":"Final answer."}\n',
+          ),
+        );
+        controller.close();
+      },
+    });
+    const reasoning: string[] = [];
+
+    const step = await parseResponsesStepStream(stream, undefined, async (event) => {
+      if (event.details) {
+        reasoning.push(event.details);
+      }
+    });
+
+    assert.equal(step.text, "Final answer.");
+    assert.deepEqual(reasoning, ["Plan first."]);
+  });
 });

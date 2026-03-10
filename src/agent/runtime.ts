@@ -314,6 +314,7 @@ export class AgentRuntime {
       };
     };
     const runModelStep = async (
+      round: number,
       statusText: string,
     ): Promise<{ step: AgentModelStep; stepStreamedText: string }> => {
       if (params.signal?.aborted) {
@@ -349,6 +350,15 @@ export class AgentRuntime {
             await flushStepDelta();
           }
         },
+        onReasoning: async (reasoning) => {
+          if (!reasoning.summary && !reasoning.details) return;
+          await emit({
+            type: "reasoning",
+            round,
+            summary: reasoning.summary,
+            details: reasoning.details,
+          });
+        },
       });
       await flushStepDelta();
       return {
@@ -358,6 +368,7 @@ export class AgentRuntime {
     };
     for (let round = 1; round <= maxRounds; round += 1) {
       const { step, stepStreamedText } = await runModelStep(
+        round,
         round === 1 ? "Running agent" : `Continuing agent (${round}/${maxRounds})`,
       );
       if (step.kind === "final") {

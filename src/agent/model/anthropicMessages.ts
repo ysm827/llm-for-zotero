@@ -235,6 +235,10 @@ function normalizeAnthropicResponse(
 async function parseAnthropicStepStream(
   stream: ReadableStream<Uint8Array>,
   onTextDelta?: (delta: string) => void | Promise<void>,
+  onReasoning?: (event: {
+    summary?: string;
+    details?: string;
+  }) => void | Promise<void>,
 ): Promise<AnthropicNormalizedResponse> {
   const reader = stream.getReader() as ReadableStreamDefaultReader<Uint8Array>;
   const decoder = new TextDecoder();
@@ -323,6 +327,9 @@ async function parseAnthropicStepStream(
         },
         partialJson: existing?.partialJson,
       });
+      if (deltaThinking && onReasoning) {
+        await onReasoning({ details: deltaThinking });
+      }
       return;
     }
     if (
@@ -508,7 +515,11 @@ export class AnthropicMessagesAgentAdapter implements AgentModelAdapter {
       );
     }
     const normalized = response.body
-      ? await parseAnthropicStepStream(response.body, params.onTextDelta)
+      ? await parseAnthropicStepStream(
+          response.body,
+          params.onTextDelta,
+          params.onReasoning,
+        )
       : normalizeAnthropicResponse(
           (await response.json()) as AnthropicResponse,
         );

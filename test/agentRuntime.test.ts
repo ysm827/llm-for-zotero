@@ -687,4 +687,109 @@ describe("AgentRuntime", function () {
       restoreDb();
     }
   });
+
+  it("emits reasoning events for each model round", async function () {
+    const restoreDb = installMockDb();
+    try {
+      const registry = new AgentToolRegistry();
+      registry.register({
+        spec: {
+          name: "read_context",
+          description: "read",
+          inputSchema: { type: "object" },
+          mutability: "read",
+          requiresConfirmation: false,
+        },
+        validate: () => ({ ok: true, value: {} }),
+        execute: async () => ({
+          ok: true,
+        }),
+      });
+
+      let stepIndex = 0;
+      const runtime = new AgentRuntime({
+        registry,
+        adapterFactory: () => ({
+          getCapabilities: () => ({
+            streaming: true,
+            toolCalls: true,
+            multimodal: false,
+            fileInputs: false,
+            reasoning: true,
+          }),
+          supportsTools: () => true,
+          async runStep(params: AgentStepParams): Promise<AgentModelStep> {
+            stepIndex += 1;
+            if (stepIndex === 1) {
+              await params.onReasoning?.({ details: "Inspecting the request." });
+              return {
+                kind: "tool_calls",
+                calls: [
+                  {
+                    id: "call-1",
+                    name: "read_context",
+                    arguments: {},
+                  },
+                ],
+                assistantMessage: {
+                  role: "assistant",
+                  content: "",
+                  tool_calls: [
+                    {
+                      id: "call-1",
+                      name: "read_context",
+                      arguments: {},
+                    },
+                  ],
+                },
+              };
+            }
+            await params.onReasoning?.({ details: "Writing the answer." });
+            return {
+              kind: "final",
+              text: "Done.",
+              assistantMessage: {
+                role: "assistant",
+                content: "Done.",
+              },
+            };
+          },
+        }),
+      });
+
+      const events: AgentEvent[] = [];
+      const outcome = await runtime.runTurn({
+        request: {
+          conversationKey: 1,
+          mode: "agent",
+          userText: "summarize the paper",
+          model: "gpt-5.4",
+          apiBase: "https://api.openai.com/v1/responses",
+          apiKey: "test",
+        },
+        onEvent: async (event) => {
+          events.push(event);
+        },
+      });
+
+      assert.equal(outcome.kind, "completed");
+      if (outcome.kind !== "completed") return;
+      assert.equal(outcome.text, "Done.");
+      assert.deepEqual(
+        events
+          .filter((event) => event.type === "reasoning")
+          .map((event) =>
+            event.type === "reasoning"
+              ? { round: event.round, details: event.details }
+              : null,
+          ),
+        [
+          { round: 1, details: "Inspecting the request." },
+          { round: 2, details: "Writing the answer." },
+        ],
+      );
+    } finally {
+      restoreDb();
+    }
+  });
 });

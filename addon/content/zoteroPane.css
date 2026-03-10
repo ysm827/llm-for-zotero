@@ -1878,6 +1878,72 @@
   gap: 10px;
 }
 
+.llm-agent-reasoning {
+  border: 1px solid var(--stroke-secondary);
+  border-radius: 8px;
+  background: color-mix(
+    in srgb,
+    var(--material-background) 78%,
+    var(--fill-quinary)
+  );
+  padding: 8px 10px;
+}
+
+.llm-agent-reasoning-summary {
+  cursor: pointer;
+  user-select: none;
+  list-style: none;
+  font-size: var(--llm-fs-11);
+  font-weight: 600;
+  color: var(--fill-secondary);
+}
+
+.llm-agent-reasoning-summary::-webkit-details-marker {
+  display: none;
+}
+
+.llm-agent-reasoning-summary::before {
+  content: "▸";
+  display: inline-block;
+  width: 10px;
+  margin-right: 4px;
+  color: var(--fill-tertiary);
+}
+
+.llm-agent-reasoning[open] > .llm-agent-reasoning-summary::before {
+  content: "▾";
+}
+
+.llm-agent-reasoning-body {
+  margin-top: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.llm-agent-reasoning-block {
+  padding: 8px;
+  border-radius: 8px;
+  background: var(--fill-quaternary);
+  border: 1px solid var(--stroke-secondary);
+}
+
+.llm-agent-reasoning-label {
+  font-size: var(--llm-fs-10);
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--fill-tertiary);
+  margin-bottom: 4px;
+}
+
+.llm-agent-reasoning-text {
+  font-size: var(--llm-fs-11);
+  line-height: 1.5;
+  color: var(--fill-secondary);
+  white-space: pre-wrap;
+}
+
 .llm-agent-hitl-card {
   margin: 6px 0 0;
   padding: var(--llm-agent-surface-padding);

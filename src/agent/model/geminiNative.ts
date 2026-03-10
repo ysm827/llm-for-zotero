@@ -336,19 +336,42 @@ function buildGeminiContinuationMessages(
   return contents;
 }
 
+function isGeminiThoughtPart(part: GeminiPart): boolean {
+  if (part.thought === true) {
+    return true;
+  }
+  if (Object.prototype.hasOwnProperty.call(part, "thoughtSignature")) {
+    return true;
+  }
+  if (!part.functionCall || typeof part.functionCall !== "object") {
+    return false;
+  }
+  const functionCall = part.functionCall as Record<string, unknown>;
+  return (
+    functionCall.thought === true ||
+    Object.prototype.hasOwnProperty.call(functionCall, "thoughtSignature")
+  );
+}
+
 function normalizeGeminiResponse(data: GeminiResponse): {
   text: string;
+  reasoningText: string;
   toolCalls: AgentToolCall[];
   responseParts: GeminiPart[];
 } {
   const parts = extractGeminiResponseParts(data);
   const toolCalls: AgentToolCall[] = [];
   const textParts: string[] = [];
+  const reasoningParts: string[] = [];
   for (let index = 0; index < parts.length; index += 1) {
     const part = parts[index];
     if (!part || typeof part !== "object") continue;
     if (typeof part.text === "string" && part.text) {
-      textParts.push(part.text);
+      if (isGeminiThoughtPart(part)) {
+        reasoningParts.push(part.text);
+      } else {
+        textParts.push(part.text);
+      }
     }
     if (part.functionCall && typeof part.functionCall === "object") {
       const functionCall = part.functionCall as {
@@ -372,6 +395,7 @@ function normalizeGeminiResponse(data: GeminiResponse): {
   }
   return {
     text: textParts.join(""),
+    reasoningText: reasoningParts.join(""),
     toolCalls,
     responseParts: parts,
   };
@@ -380,11 +404,16 @@ function normalizeGeminiResponse(data: GeminiResponse): {
 async function parseGeminiStepStream(
   stream: ReadableStream<Uint8Array>,
   onTextDelta?: (delta: string) => void | Promise<void>,
+  onReasoning?: (event: {
+    summary?: string;
+    details?: string;
+  }) => void | Promise<void>,
 ): Promise<{ text: string; toolCalls: AgentToolCall[]; responseParts: GeminiPart[] }> {
   const reader = stream.getReader() as ReadableStreamDefaultReader<Uint8Array>;
   const decoder = new TextDecoder();
   let buffer = "";
   let text = "";
+  let reasoningText = "";
   let toolCalls: AgentToolCall[] = [];
   let responseParts: GeminiPart[] = [];
 
@@ -405,6 +434,18 @@ async function parseGeminiStepStream(
       responseParts = normalized.responseParts;
     } else if (!responseParts.length && normalized.responseParts.length) {
       responseParts = normalized.responseParts;
+    }
+    if (normalized.reasoningText) {
+      let reasoningDelta = normalized.reasoningText;
+      if (normalized.reasoningText.startsWith(reasoningText)) {
+        reasoningDelta = normalized.reasoningText.slice(reasoningText.length);
+        reasoningText = normalized.reasoningText;
+      } else {
+        reasoningText += reasoningDelta;
+      }
+      if (reasoningDelta && onReasoning) {
+        await onReasoning({ details: reasoningDelta });
+      }
     }
     if (!normalized.text) return;
     let delta = normalized.text;
@@ -546,7 +587,11 @@ export class GeminiNativeAgentAdapter implements AgentModelAdapter {
     };
     const response = await fetchGemini(true);
     let normalized = response.body
-      ? await parseGeminiStepStream(response.body, params.onTextDelta)
+      ? await parseGeminiStepStream(
+          response.body,
+          params.onTextDelta,
+          params.onReasoning,
+        )
       : normalizeGeminiResponse((await response.json()) as GeminiResponse);
     if (!normalized.text && !normalized.toolCalls.length) {
       const fallbackResponse = await fetchGemini(false);
