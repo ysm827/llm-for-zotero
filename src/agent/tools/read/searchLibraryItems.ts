@@ -8,9 +8,12 @@ import {
 } from "../shared";
 
 type SearchLibraryItemsInput = {
-  query: string;
+  query?: string;
+  filter?: "unfiled" | "untagged";
   limit?: number;
 };
+
+const VALID_FILTERS = ["unfiled", "untagged"] as const;
 
 export function createSearchLibraryItemsTool(
   zoteroGateway: ZoteroGateway,
@@ -19,13 +22,22 @@ export function createSearchLibraryItemsTool(
     spec: {
       name: "search_library_items",
       description:
-        "Search library papers by title, citation key, author, year, DOI, or attachment title. Results include full editable metadata for each matching bibliographic item.",
+        "Search library papers by title, author, year, DOI, or use filter to list all unfiled or untagged papers. Results include full editable metadata.",
       inputSchema: {
         type: "object",
-        required: ["query"],
         additionalProperties: false,
         properties: {
-          query: { type: "string" },
+          query: {
+            type: "string",
+            description:
+              "Search query. Required unless filter is set.",
+          },
+          filter: {
+            type: "string",
+            enum: ["unfiled", "untagged"],
+            description:
+              "Return only papers matching this condition instead of searching.",
+          },
           limit: { type: "number" },
         },
       },
@@ -35,14 +47,33 @@ export function createSearchLibraryItemsTool(
     presentation: {
       label: "Search Library",
       summaries: {
-        onCall: "Searching your library for matching papers",
+        onCall: ({ args }) => {
+          const filter =
+            args && typeof args === "object"
+              ? (args as { filter?: string }).filter
+              : undefined;
+          if (filter === "unfiled") return "Listing unfiled papers in the active library";
+          if (filter === "untagged") return "Listing papers without tags in the active library";
+          return "Searching your library for matching papers";
+        },
         onSuccess: ({ content }) => {
-          const results =
-            content &&
-            typeof content === "object" &&
-            Array.isArray((content as { results?: unknown }).results)
-              ? (content as { results: unknown[] }).results
-              : [];
+          const c = content as {
+            filter?: string;
+            results?: unknown[];
+            totalCount?: number;
+          } | null;
+          const results = Array.isArray(c?.results) ? c!.results : [];
+          const total = c?.totalCount ?? results.length;
+          if (c?.filter === "unfiled") {
+            return total > 0
+              ? `Listed ${total} unfiled paper${total === 1 ? "" : "s"}`
+              : "No unfiled papers found";
+          }
+          if (c?.filter === "untagged") {
+            return total > 0
+              ? `Listed ${total} untagged paper${total === 1 ? "" : "s"}`
+              : "No untagged papers found";
+          }
           return results.length > 0
             ? `Found ${results.length} matching paper${
                 results.length === 1 ? "" : "s"
@@ -55,11 +86,21 @@ export function createSearchLibraryItemsTool(
       if (!validateObject<Record<string, unknown>>(args)) {
         return fail<SearchLibraryItemsInput>("Expected an object");
       }
-      if (typeof args.query !== "string" || !args.query.trim()) {
-        return fail<SearchLibraryItemsInput>("query is required");
+      const filter =
+        typeof args.filter === "string" &&
+        (VALID_FILTERS as readonly string[]).includes(args.filter)
+          ? (args.filter as "unfiled" | "untagged")
+          : undefined;
+      const query =
+        typeof args.query === "string" ? args.query.trim() : "";
+      if (!query && !filter) {
+        return fail<SearchLibraryItemsInput>(
+          "Either query or filter is required",
+        );
       }
       return ok<SearchLibraryItemsInput>({
-        query: args.query.trim(),
+        query: query || undefined,
+        filter,
         limit: normalizePositiveInt(args.limit),
       });
     },
@@ -74,9 +115,33 @@ export function createSearchLibraryItemsTool(
       if (!libraryID) {
         throw new Error("No active library available for search");
       }
+
+      if (input.filter === "unfiled") {
+        const result = await zoteroGateway.listUnfiledPaperTargets({
+          libraryID,
+          limit: input.limit,
+        });
+        return {
+          results: result.papers,
+          totalCount: result.totalCount,
+          filter: "unfiled",
+        };
+      }
+      if (input.filter === "untagged") {
+        const result = await zoteroGateway.listUntaggedPaperTargets({
+          libraryID,
+          limit: input.limit,
+        });
+        return {
+          results: result.papers,
+          totalCount: result.totalCount,
+          filter: "untagged",
+        };
+      }
+
       const results = await zoteroGateway.searchLibraryItems({
         libraryID,
-        query: input.query,
+        query: input.query!,
         excludeContextItemId:
           zoteroGateway.getActiveContextItem(item)?.id || null,
         limit: input.limit,

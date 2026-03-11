@@ -3,6 +3,7 @@ import type {
   AgentToolExecutionOutput,
   AgentPromptDefinition,
   AgentResourceDefinition,
+  AgentRuntimeRequest,
   AgentToolCall,
   AgentToolContext,
   AgentToolDefinition,
@@ -80,6 +81,22 @@ export class AgentToolRegistry {
 
   listToolDefinitions(): AgentToolDefinition<any, any>[] {
     return Array.from(this.tools.values());
+  }
+
+  /** Return only tools whose `condition` (if any) passes for this request. */
+  listToolsForRequest(request: AgentRuntimeRequest): ToolSpec[] {
+    return Array.from(this.tools.values())
+      .filter((tool) => !tool.condition || tool.condition(request))
+      .map((tool) => tool.spec);
+  }
+
+  /** Return full definitions for tools whose `condition` passes. */
+  listToolDefinitionsForRequest(
+    request: AgentRuntimeRequest,
+  ): AgentToolDefinition<any, any>[] {
+    return Array.from(this.tools.values()).filter(
+      (tool) => !tool.condition || tool.condition(request),
+    );
   }
 
   listResources(): ResourceSpec[] {

@@ -288,6 +288,10 @@ export function createComparePapersStructuredTool(
   zoteroGateway: ZoteroGateway,
 ): AgentToolDefinition<ComparePapersStructuredInput, unknown> {
   return {
+    condition: (request) => {
+      const intent = classifyRequest(request);
+      return intent.isComparisonQuery && intent.hasMultiplePaperContexts;
+    },
     spec: {
       name: "compare_papers_structured",
       description:

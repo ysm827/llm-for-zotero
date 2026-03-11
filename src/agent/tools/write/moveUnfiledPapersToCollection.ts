@@ -247,7 +247,7 @@ export function createMoveUnfiledPapersToCollectionTool(
     guidance: {
       matches: (request) => classifyRequest(request).isMoveToCollectionQuery,
       instruction: [
-        "When the user asks to move or organize unfiled papers into collections, use browse/list tools if needed, then call move_unfiled_papers_to_collection with per-paper assignments so the confirmation card opens with one paper per row and a suggested destination for each paper.",
+        "When the user asks to move or organize unfiled papers into collections, use search_library_items with filter:'unfiled' to find candidates and browse_collections if needed, then call move_unfiled_papers_to_collection with per-paper assignments so the confirmation card opens with one paper per row and a suggested destination for each paper.",
         "Do not stop after listing papers and collections in chat, and do not ask the user to choose destinations in plain text.",
         "If you are unsure about a paper, omit targetCollectionId for that paper so the row defaults to Skip for now in the confirmation card.",
       ].join("\n"),

@@ -423,6 +423,8 @@ export type AgentToolPresentation = {
 
 export type AgentToolDefinition<TInput = unknown, TResult = unknown> = {
   spec: ToolSpec;
+  /** When set, the tool is only included in the tool list when this returns true. */
+  condition?: (request: AgentRuntimeRequest) => boolean;
   guidance?: AgentToolGuidance;
   presentation?: AgentToolPresentation;
   validate: (args: unknown) => AgentToolInputValidation<TInput>;

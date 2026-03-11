@@ -2,12 +2,8 @@ import { AgentToolRegistry } from "./registry";
 import { PdfService } from "../services/pdfService";
 import { RetrievalService } from "../services/retrievalService";
 import { ZoteroGateway } from "../services/zoteroGateway";
-import { createGetActiveContextTool } from "./read/getActiveContext";
-import { createListPaperContextsTool } from "./read/listPaperContexts";
 import { createBrowseCollectionsTool } from "./read/browseCollections";
 import { createListCollectionPapersTool } from "./read/listCollectionPapers";
-import { createListUnfiledPapersTool } from "./read/listUnfiledPapers";
-import { createListUntaggedPapersTool } from "./read/listUntaggedPapers";
 import { createRetrievePaperEvidenceTool } from "./read/retrievePaperEvidence";
 import { createReadPaperExcerptTool } from "./read/readPaperExcerpt";
 import { createSearchLibraryItemsTool } from "./read/searchLibraryItems";
@@ -49,16 +45,12 @@ export function createBuiltInToolRegistry(
   deps: BuiltInAgentToolDeps,
 ): AgentToolRegistry {
   const registry = new AgentToolRegistry();
-  registry.register(createGetActiveContextTool(deps.zoteroGateway));
   registry.register(
     createMoveUnfiledPapersToCollectionTool(deps.zoteroGateway),
   );
   registry.register(createApplyTagsTool(deps.zoteroGateway));
-  registry.register(createListPaperContextsTool(deps.zoteroGateway));
   registry.register(createBrowseCollectionsTool(deps.zoteroGateway));
   registry.register(createListCollectionPapersTool(deps.zoteroGateway));
-  registry.register(createListUnfiledPapersTool(deps.zoteroGateway));
-  registry.register(createListUntaggedPapersTool(deps.zoteroGateway));
   registry.register(
     createRetrievePaperEvidenceTool(
       deps.zoteroGateway,

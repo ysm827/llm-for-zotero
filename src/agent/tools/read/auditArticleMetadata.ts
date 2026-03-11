@@ -531,6 +531,7 @@ export function createAuditArticleMetadataTool(
   pdfService: PdfService,
 ): AgentToolDefinition<AuditArticleMetadataInput, unknown> {
   return {
+    condition: (request) => classifyRequest(request).isMetadataAuditQuery,
     spec: {
       name: "audit_article_metadata",
       description:

@@ -20,6 +20,8 @@ export function createFindRelatedPapersInLibraryTool(
   zoteroGateway: ZoteroGateway,
 ): AgentToolDefinition<FindRelatedPapersInput, unknown> {
   return {
+    condition: (request) =>
+      /\b(related|similar|overlapping)\b/i.test(request.userText || ""),
     spec: {
       name: "find_related_papers_in_library",
       description:

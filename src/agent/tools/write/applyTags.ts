@@ -251,7 +251,7 @@ export function createApplyTagsTool(
       matches: (request) => classifyRequest(request).isTaggingQuery,
       instruction: [
         "When the user asks to add, apply, or suggest tags for papers, use apply_tags as the write tool.",
-        "If the request is broad or about papers without tags, inspect candidates first with list_untagged_papers or other paper read tools, then call apply_tags with per-paper tag assignments so the confirmation card opens with one paper per row and editable suggested tags.",
+        "If the request is broad or about papers without tags, inspect candidates first with search_library_items using filter:'untagged', then call apply_tags with per-paper tag assignments so the confirmation card opens with one paper per row and editable suggested tags.",
         "Do not stop after listing candidate papers in chat, and do not ask the user to type the tag choices back in plain text.",
         "If you are unsure about a paper, omit tags for that paper so its row starts empty in the confirmation card.",
       ].join("\n"),

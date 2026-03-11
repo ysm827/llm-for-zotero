@@ -257,7 +257,7 @@ export class AgentRuntime {
     const toolsUsedThisTurn: string[] = [];
     const messages = buildAgentInitialMessages(
       request,
-      this.registry.listToolDefinitions(),
+      this.registry.listToolDefinitionsForRequest(request),
     ) as AgentModelMessage[];
 
     let consecutiveToolErrors = 0;
@@ -340,7 +340,7 @@ export class AgentRuntime {
       const step = await adapter.runStep({
         request,
         messages,
-        tools: this.registry.listTools(),
+        tools: this.registry.listToolsForRequest(request),
         signal: params.signal,
         onTextDelta: async (delta) => {
           if (!delta) return;

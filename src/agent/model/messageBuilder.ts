@@ -70,6 +70,9 @@ function buildUserMessage(request: AgentRuntimeRequest): AgentModelMessage {
     "Current Zotero context summary:",
     `- Conversation key: ${request.conversationKey}`,
   ];
+  if (request.activeItemId) {
+    contextLines.push(`- Active item ID: ${request.activeItemId}`);
+  }
   if (Array.isArray(request.selectedTexts) && request.selectedTexts.length) {
     const selectedTextBlock = request.selectedTexts
       .map((entry, index) => `Selected text ${index + 1}:\n"""\n${entry}\n"""`)

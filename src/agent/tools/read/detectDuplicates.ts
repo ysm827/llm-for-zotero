@@ -11,6 +11,7 @@ export function createDetectDuplicatesTool(
   zoteroGateway: ZoteroGateway,
 ): AgentToolDefinition<DetectDuplicatesInput, unknown> {
   return {
+    condition: (request) => /\bduplic/i.test(request.userText || ""),
     spec: {
       name: "detect_duplicates",
       description:
