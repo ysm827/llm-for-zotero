@@ -96,6 +96,8 @@ export type LibraryItemTargetAttachment = {
   contentType: string;
   /** For PDF attachments: Zotero full-text indexing state. Omitted for non-PDFs. */
   indexingState?: "indexed" | "partial" | "unindexed" | "queued" | "unavailable";
+  /** If MinerU has parsed this PDF, the cache directory path containing markdown + images. */
+  mineruCacheDir?: string;
 };
 
 export type LibraryItemTarget = {
@@ -725,6 +727,7 @@ export class ZoteroGateway {
       const att = allAtts[i];
       const contentType = normalizeText(att.attachmentContentType) || "application/octet-stream";
       let indexingState: LibraryItemTargetAttachment["indexingState"];
+      let mineruCacheDir: string | undefined;
       if (contentType === "application/pdf") {
         try {
           const stateNum = await Zotero.Fulltext.getIndexedState(att);
@@ -732,12 +735,22 @@ export class ZoteroGateway {
         } catch {
           indexingState = "unavailable";
         }
+        // Check if MinerU has parsed this PDF
+        try {
+          const { hasCachedMineruMd, getMineruItemDir } = await import(
+            "../../modules/contextPanel/mineruCache"
+          );
+          if (await hasCachedMineruMd(att.id)) {
+            mineruCacheDir = getMineruItemDir(att.id);
+          }
+        } catch { /* MinerU cache not available */ }
       }
       results.push({
         contextItemId: att.id,
         title: resolveAnyAttachmentTitle(att, i, allAtts.length),
         contentType,
         indexingState,
+        mineruCacheDir,
       });
     }
     return results;
@@ -2469,6 +2482,62 @@ export class ZoteroGateway {
         status: "error",
         reason: error instanceof Error ? error.message : String(error),
       };
+    }
+  }
+
+  // ── Embed image in note ──────────────────────────────────────────
+
+  /**
+   * Import an image file as an embedded note attachment and return its key.
+   * The key can then be used in note HTML: <img data-attachment-key="KEY" />
+   */
+  async importNoteImage(params: {
+    imagePath: string;
+    noteItemId: number;
+  }): Promise<{ key: string } | null> {
+    try {
+      // Read the image file as bytes
+      const IOUtils = (globalThis as any).IOUtils;
+      let bytes: Uint8Array;
+      if (IOUtils?.read) {
+        bytes = new Uint8Array(await IOUtils.read(params.imagePath));
+      } else {
+        const OSFile = (globalThis as any).OS?.File;
+        if (!OSFile?.read) return null;
+        const result = await OSFile.read(params.imagePath);
+        bytes = new Uint8Array(result);
+      }
+
+      // Determine MIME type from extension
+      const ext = params.imagePath.split(".").pop()?.toLowerCase() || "";
+      const mimeMap: Record<string, string> = {
+        png: "image/png",
+        jpg: "image/jpeg",
+        jpeg: "image/jpeg",
+        gif: "image/gif",
+        webp: "image/webp",
+        svg: "image/svg+xml",
+      };
+      const mimeType = mimeMap[ext] || "image/png";
+
+      // Create blob
+      const blob = new Blob([bytes], { type: mimeType });
+
+      // Import as embedded image attachment
+      const Attachments = (Zotero as any).Attachments;
+      if (!Attachments?.importEmbeddedImage) return null;
+
+      const attachment = await Attachments.importEmbeddedImage({
+        blob,
+        parentItemID: params.noteItemId,
+      });
+
+      return attachment?.key ? { key: String(attachment.key) } : null;
+    } catch (error) {
+      Zotero.debug?.(
+        `[llm-for-zotero] importNoteImage failed: ${error instanceof Error ? error.message : String(error)}`,
+      );
+      return null;
     }
   }
 

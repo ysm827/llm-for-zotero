@@ -121,7 +121,8 @@ export function normalizeNoteSourceText(contentText: string): string {
   normalized = normalized.replace(/<\/li>/gi, "");
   normalized = normalized.replace(/<blockquote[^>]*>/gi, "\n\n> ");
   normalized = normalized.replace(/<\/blockquote>/gi, "\n\n");
-  normalized = normalized.replace(/<[^>]+>/g, "");
+  // Strip remaining HTML tags, but preserve <img> tags (for embedded figures)
+  normalized = normalized.replace(/<(?!img\b)[^>]+>/g, "");
   normalized = decodeNoteHtmlEntities(normalized)
     .replace(/[ \t]+\n/g, "\n")
     .replace(/\n[ \t]+/g, "\n")

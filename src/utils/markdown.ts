@@ -762,7 +762,13 @@ function renderInline(text: string): string {
     });
   }
 
-  // 4. HTML escape (after protecting code and math)
+  // 3b. Protect <img> tags (embedded figures, data URLs, Zotero attachment keys)
+  result = result.replace(
+    /<img\s+[^>]*(?:src|data-attachment-key)\s*=\s*"[^"]*"[^>]*\/?>/gi,
+    (match) => protect(match),
+  );
+
+  // 4. HTML escape (after protecting code, math, and images)
   result = escapeHtml(result);
 
   // 5. Bold+Italic (***...***)  - only if balanced
@@ -807,22 +813,26 @@ function renderInline(text: string): string {
     "$1<em>$2</em>",
   );
 
-  // 10. Images ![alt](src) — resolved via callback if available
-  if (activeImageResolver) {
-    const resolver = activeImageResolver;
-    result = result.replace(
-      /!\[([^\]]*)\]\(([^)]+)\)/g,
-      (_match, alt: string, src: string) => {
-        const resolved = resolver(src.trim());
+  // 10. Images ![alt](src)
+  result = result.replace(
+    /!\[([^\]]*)\]\(([^)]+)\)/g,
+    (_match, alt: string, src: string) => {
+      const trimmedSrc = src.trim();
+      // Try resolver first (for MinerU images in chat)
+      if (activeImageResolver) {
+        const resolved = activeImageResolver(trimmedSrc);
         if (resolved) {
           return protect(
             `<img src="${escapeHtml(resolved)}" alt="${escapeHtml(alt)}" class="llm-chat-inline-figure" style="max-width:100%; border-radius:4px; margin:4px 0;" />`,
           );
         }
-        return _match;
-      },
-    );
-  }
+      }
+      // Always render as <img> — works for file://, data:, and http(s):// URLs
+      return protect(
+        `<img src="${escapeHtml(trimmedSrc)}" alt="${escapeHtml(alt)}" style="max-width:100%; border-radius:4px; margin:4px 0;" />`,
+      );
+    },
+  );
 
   // 11. Links [text](url)
   result = result.replace(

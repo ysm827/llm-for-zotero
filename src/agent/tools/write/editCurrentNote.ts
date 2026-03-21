@@ -6,6 +6,70 @@ import { normalizeNoteSourceText } from "../../../modules/contextPanel/notes";
 import { ok, fail, validateObject, normalizePositiveInt } from "../shared";
 import { executeAndRecordUndo } from "./mutateLibraryShared";
 
+/**
+ * Scan note content for local file image references (![alt](file:///path) or
+ * <img src="file:///path" />) and import them as Zotero embedded note images.
+ * Returns the content with references replaced by data-attachment-key img tags.
+ */
+async function importLocalImages(
+  content: string,
+  noteItemId: number,
+  zoteroGateway: ZoteroGateway,
+): Promise<string> {
+  // Match both markdown ![alt](file:///path) and HTML <img src="file:///path" />
+  const markdownPattern = /!\[([^\]]*)\]\(file:\/\/\/([^)]+)\)/g;
+  const htmlPattern = /<img\s+[^>]*src\s*=\s*"file:\/\/\/([^"]+)"[^>]*\/?>/gi;
+
+  let result = content;
+
+  // Process markdown images
+  const mdMatches = [...content.matchAll(markdownPattern)];
+  for (const match of mdMatches) {
+    const fullMatch = match[0];
+    const alt = match[1];
+    const filePath = "/" + match[2]; // restore leading /
+    try {
+      const imported = await zoteroGateway.importNoteImage({
+        imagePath: filePath,
+        noteItemId,
+      });
+      if (imported?.key) {
+        result = result.replace(
+          fullMatch,
+          `<img data-attachment-key="${imported.key}" alt="${alt}" />`,
+        );
+      }
+    } catch {
+      // Leave original reference if import fails
+    }
+  }
+
+  // Process HTML img tags with file:// src
+  const htmlMatches = [...result.matchAll(htmlPattern)];
+  for (const match of htmlMatches) {
+    const fullMatch = match[0];
+    const filePath = "/" + match[1];
+    const altMatch = fullMatch.match(/alt\s*=\s*"([^"]*)"/i);
+    const alt = altMatch?.[1] || "";
+    try {
+      const imported = await zoteroGateway.importNoteImage({
+        imagePath: filePath,
+        noteItemId,
+      });
+      if (imported?.key) {
+        result = result.replace(
+          fullMatch,
+          `<img data-attachment-key="${imported.key}" alt="${alt}" />`,
+        );
+      }
+    } catch {
+      // Leave original reference if import fails
+    }
+  }
+
+  return result;
+}
+
 type NotePatch = { find: string; replace: string };
 
 type EditCurrentNoteInput = {
@@ -295,25 +359,99 @@ export function createEditCurrentNoteTool(
       });
     },
     execute: async (input, context) => {
+      const hasLocalImages = /!\[[^\]]*\]\(file:\/\/\/|<img\s+[^>]*src\s*=\s*"file:\/\/\//i.test(
+        input.content,
+      );
+
       if (input.mode === "create") {
-        const { result } = await executeAndRecordUndo(
-          mutationService,
-          {
-            type: "save_note",
-            content: input.content,
-            target: input.target,
-            targetItemId: input.targetItemId,
+        if (!hasLocalImages) {
+          // No images — use the standard mutation service path
+          const { result } = await executeAndRecordUndo(
+            mutationService,
+            {
+              type: "save_note",
+              content: input.content,
+              target: input.target,
+              targetItemId: input.targetItemId,
+            },
+            context,
+            "edit_current_note",
+          );
+          return result;
+        }
+
+        // Has local images — create note manually to get the note ID,
+        // then import images and update note HTML
+        const parentItem = input.targetItemId
+          ? zoteroGateway.getItem(input.targetItemId)
+          : zoteroGateway.getItem(context.request.activeItemId) || context.item;
+        const parentId = parentItem?.isRegularItem?.()
+          ? parentItem.id
+          : parentItem?.parentID || parentItem?.id;
+        const libraryID = parentItem?.libraryID || context.request.libraryID || 1;
+
+        // Create a blank note first
+        const note = new Zotero.Item("note");
+        note.libraryID = libraryID;
+        if (parentId && input.target !== "standalone") {
+          note.parentID = parentId;
+        }
+        note.setNote("<p>Importing images...</p>");
+        await note.saveTx();
+        const noteId = note.id;
+
+        // Import images into this note
+        let finalContent = input.content;
+        try {
+          finalContent = await importLocalImages(input.content, noteId, zoteroGateway);
+        } catch (e) {
+          Zotero.debug?.(`[llm-for-zotero] Image import failed: ${e}`);
+        }
+
+        // Now set the final note HTML with data-attachment-key img tags
+        const { renderRawNoteHtml } = await import("../../../modules/contextPanel/notes");
+        note.setNote(renderRawNoteHtml(finalContent));
+        await note.saveTx();
+
+        // Register undo
+        pushUndoEntry(context.request.conversationKey, {
+          id: `undo-edit-current-note-create-${noteId}-${Date.now()}`,
+          toolName: "edit_current_note",
+          description: `Trash created note`,
+          revert: async () => {
+            const n = zoteroGateway.getItem(noteId);
+            if (n) {
+              n.deleted = true;
+              await n.saveTx();
+            }
           },
-          context,
-          "edit_current_note",
-        );
-        return result;
+        });
+
+        return {
+          status: "created",
+          noteId,
+          title: String(note.getField?.("title") || ""),
+        };
+      }
+
+      // For edit mode, import images before saving
+      let contentToSave = input.content;
+      if (hasLocalImages && input.noteId) {
+        try {
+          contentToSave = await importLocalImages(
+            input.content,
+            input.noteId,
+            zoteroGateway,
+          );
+        } catch (e) {
+          Zotero.debug?.(`[llm-for-zotero] Image import failed: ${e}`);
+        }
       }
 
       const result = await zoteroGateway.replaceCurrentNote({
         request: context.request,
         item: context.item,
-        content: input.content,
+        content: contentToSave,
         expectedOriginalHtml: input.expectedOriginalHtml,
       });
       pushUndoEntry(context.request.conversationKey, {

@@ -2211,6 +2211,37 @@ label.llm-search-results-item:hover {
   color: #f39c12;
 }
 
+.llm-at-code-block {
+  margin: 3px 0 2px 20px;
+  padding: 5px 10px;
+  background: color-mix(in srgb, var(--fill-quaternary) 80%, black 20%);
+  border: 1px solid var(--stroke-secondary);
+  border-radius: 6px;
+  font-family:
+    ui-monospace,
+    SFMono-Regular,
+    Menlo,
+    Monaco,
+    Consolas,
+    "Liberation Mono",
+    "Courier New",
+    monospace;
+  font-size: var(--llm-fs-10);
+  line-height: 1.4;
+  color: var(--fill-primary);
+  white-space: pre-wrap;
+  word-break: break-all;
+  overflow-wrap: anywhere;
+}
+
+.llm-at-code-block code {
+  background: none;
+  padding: 0;
+  border: none;
+  font: inherit;
+  color: inherit;
+}
+
 .llm-agent-hitl-card {
   display: flex;
   flex-direction: column;

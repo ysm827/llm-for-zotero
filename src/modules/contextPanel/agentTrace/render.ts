@@ -25,6 +25,8 @@ type AgentTraceSummaryRow = {
   kind: AgentTraceSummaryKind;
   icon: string;
   text: string;
+  /** Optional code block shown below the summary text (e.g. shell commands). */
+  codeBlock?: string;
 };
 
 type AgentTraceDisplayItem =
@@ -1854,10 +1856,21 @@ function summarizeAgentTraceToolCall(
       getToolDefinition(name)?.presentation?.summaries?.onCall,
       { label, args, request },
     ) || `Using ${label}`;
+
+  // Show code block for shell commands and file I/O
+  let codeBlock: string | undefined;
+  const a = args && typeof args === "object" ? (args as Record<string, unknown>) : {};
+  if (name === "run_command" && typeof a.command === "string") {
+    codeBlock = a.command;
+  } else if (name === "file_io" && typeof a.filePath === "string") {
+    codeBlock = `${a.action || "access"} ${a.filePath}`;
+  }
+
   return {
     kind: "tool",
     icon: "→",
-    text,
+    text: codeBlock ? label : text,
+    codeBlock,
   };
 }
 
@@ -2105,18 +2118,36 @@ export function buildAgentTraceDisplayItems(
         });
         break;
       case "reasoning": {
-        const summary = readAgentTraceText(entry.payload.summary) || undefined;
-        const details = readAgentTraceText(entry.payload.details) || undefined;
-        if (!summary && !details) {
-          break;
+        // Prefer details (full reasoning body) over summary (short title)
+        const text =
+          readAgentTraceText(entry.payload.details) ||
+          readAgentTraceText(entry.payload.summary) ||
+          undefined;
+        if (!text) break;
+        const roundKey = `round:${entry.payload.round}`;
+        const existing = items.findLast(
+          (item) => item.type === "reasoning" && item.key === roundKey,
+        );
+        if (existing && existing.type === "reasoning") {
+          // Accumulate delta chunks; skip if already contained (dedup)
+          const prev = existing.summary || "";
+          if (!prev.includes(text)) {
+            existing.summary = prev + text;
+          }
+        } else {
+          const label =
+            readAgentTraceText(entry.payload.summary) &&
+            readAgentTraceText(entry.payload.details)
+              ? readAgentTraceText(entry.payload.summary)!
+              : `Thinking for step ${entry.payload.round}`;
+          items.push({
+            type: "reasoning",
+            key: roundKey,
+            label,
+            summary: text,
+            details: undefined,
+          });
         }
-        items.push({
-          type: "reasoning",
-          key: `round:${entry.payload.round}`,
-          label: `Thinking for step ${entry.payload.round}`,
-          summary,
-          details,
-        });
         break;
       }
       case "tool_result": {
@@ -2299,41 +2330,24 @@ export function renderAgentTrace({
       const bodyWrap = doc.createElement("div") as HTMLDivElement;
       bodyWrap.className = "llm-agent-reasoning-body";
 
-      if (itemEntry.summary) {
+      // Show only summary — details from most models duplicate the summary
+      const reasoningText = itemEntry.summary || itemEntry.details;
+      if (reasoningText) {
         const summaryBlock = doc.createElement("div") as HTMLDivElement;
         summaryBlock.className = "llm-agent-reasoning-block";
-        const label = doc.createElement("div") as HTMLDivElement;
-        label.className = "llm-agent-reasoning-label";
-        label.textContent = "Summary";
         const text = doc.createElement("div") as HTMLDivElement;
         text.className = "llm-agent-reasoning-text";
         try {
-          text.innerHTML = renderMarkdown(itemEntry.summary);
+          text.innerHTML = renderMarkdown(reasoningText);
         } catch (error) {
           ztoolkit.log("Agent reasoning render error:", error);
-          text.textContent = itemEntry.summary;
+          text.textContent = reasoningText;
         }
-        summaryBlock.append(label, text);
+        summaryBlock.appendChild(text);
         bodyWrap.appendChild(summaryBlock);
       }
 
-      if (itemEntry.details) {
-        const detailsBlock = doc.createElement("div") as HTMLDivElement;
-        detailsBlock.className = "llm-agent-reasoning-block";
-        const label = doc.createElement("div") as HTMLDivElement;
-        label.className = "llm-agent-reasoning-label";
-        label.textContent = "Details";
-        const text = doc.createElement("div") as HTMLDivElement;
-        text.className = "llm-agent-reasoning-text";
-        try {
-          text.innerHTML = renderMarkdown(itemEntry.details);
-        } catch (error) {
-          ztoolkit.log("Agent reasoning render error:", error);
-          text.textContent = itemEntry.details;
-        }
-        detailsBlock.append(label, text);
-        bodyWrap.appendChild(detailsBlock);
-      }
+      // Details section removed — most models duplicate summary in details
 
       details.appendChild(bodyWrap);
       list.appendChild(details);
@@ -2352,6 +2366,16 @@ export function renderAgentTrace({
     text.textContent = itemEntry.row.text;
     row.append(icon, text);
     actionWrap.appendChild(row);
+
+    // Render code block for shell commands
+    if (itemEntry.row.codeBlock) {
+      const codeWrap = doc.createElement("pre");
+      codeWrap.className = "llm-at-code-block";
+      const code = doc.createElement("code");
+      code.textContent = itemEntry.row.codeBlock;
+      codeWrap.appendChild(code);
+      actionWrap.appendChild(codeWrap);
+    }
 
     if (itemEntry.chips?.length) {
       const chips = doc.createElement("div");

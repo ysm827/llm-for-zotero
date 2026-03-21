@@ -639,14 +639,17 @@ export async function parseResponsesStepStream(
               partType === "summary_text" ||
               partType === "reasoning_summary"
             ) {
-              const partSummary = normalizeResponsesText(
-                parsed.part.text ??
-                  parsed.part.content ??
-                  parsed.part.summary,
-              );
-              if (partSummary) {
-                sawSummaryFinal = true;
-                await emitReasoning({ summary: partSummary });
+              // Skip if we already streamed this content via delta events
+              if (!sawSummaryDelta) {
+                const partSummary = normalizeResponsesText(
+                  parsed.part.text ??
+                    parsed.part.content ??
+                    parsed.part.summary,
+                );
+                if (partSummary) {
+                  sawSummaryFinal = true;
+                  await emitReasoning({ summary: partSummary });
+                }
               }
             }
             continue;
