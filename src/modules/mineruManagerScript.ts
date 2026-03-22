@@ -136,11 +136,11 @@ export async function registerMineruManagerScript(
 
     if (deleteBtn) {
       if (hasSelection) {
-        deleteBtn.textContent = `Delete Selected (${selectedIds.size})`;
+        deleteBtn.textContent = `Delete Cache (${selectedIds.size})`;
       } else if (inFolder) {
-        deleteBtn.textContent = "Delete Folder";
+        deleteBtn.textContent = "Delete Folder Cache";
       } else {
-        deleteBtn.textContent = "Delete All";
+        deleteBtn.textContent = "Delete All Cache";
       }
     }
   }
@@ -489,11 +489,11 @@ export async function registerMineruManagerScript(
         statusEl.title = s.statusMessage;
         statusEl.style.color = "";
       } else if (s.failedCount > 0 && s.lastFailedMessage) {
-        // Not actively processing, but there were failures — show error summary
-        const prefix = s.failedCount > 1
-          ? `${s.failedCount} items failed. Last error: `
-          : "Failed: ";
-        const msg = prefix + s.lastFailedMessage;
+        // Not actively processing, but there were failures — show error reason
+        // Error reason goes first (actionable); count provides context
+        const msg = s.failedCount > 1
+          ? `${s.failedCount} items failed — ${s.lastFailedMessage}`
+          : `Failed — ${s.lastFailedMessage}`;
         statusEl.textContent = msg;
         statusEl.title = msg;
         statusEl.style.color = "#dc2626";

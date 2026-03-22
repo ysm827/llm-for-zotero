@@ -186,7 +186,7 @@ async function processNext(): Promise<void> {
       const failReason = state.statusMessage || "No content returned";
       ztoolkit.log(`MinerU batch: no content returned for "${entry.title}", skipping`);
       state.lastFailedItemId = entry.attachmentId;
-      state.lastFailedMessage = `"${entry.title}": ${failReason}`;
+      state.lastFailedMessage = failReason;
       state.failedCount++;
     }
   } catch (e) {
@@ -196,7 +196,7 @@ async function processNext(): Promise<void> {
       state.running = false;
       state.error = e.message || "Daily limit reached. Resume tomorrow.";
       state.lastFailedItemId = entry.attachmentId;
-      state.lastFailedMessage = `"${entry.title}": ${e.message}`;
+      state.lastFailedMessage = e.message || "Daily limit reached";
       state.failedCount++;
       state.currentItemId = null;
       state.currentItemTitle = "";
@@ -208,7 +208,7 @@ async function processNext(): Promise<void> {
     const errMsg = (e as Error).message || String(e);
     ztoolkit.log(`MinerU batch: error processing "${entry.title}":`, e);
     state.lastFailedItemId = entry.attachmentId;
-    state.lastFailedMessage = `"${entry.title}": ${errMsg}`;
+    state.lastFailedMessage = errMsg;
     state.failedCount++;
   }
 
