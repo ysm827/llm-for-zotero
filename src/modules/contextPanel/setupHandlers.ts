@@ -1534,6 +1534,37 @@ export function setupHandlers(body: Element, initialItem?: Zotero.Item | null) {
           if (label && label.title && !label.title.includes("MinerU")) {
             label.title = `${label.title}\n${t("Source: MinerU (enhanced markdown)")}`;
           }
+          // Update badge text in expanded card
+          const chipDoc = chip.ownerDocument;
+          const badge = chip.querySelector(".llm-paper-picker-badge") as HTMLElement | null;
+          if (badge) {
+            badge.textContent = "MD";
+          } else if (chipDoc) {
+            const titleLine = chip.querySelector(".llm-paper-picker-group-title-line");
+            if (titleLine) {
+              titleLine.appendChild(
+                createElement(chipDoc, "span", "llm-paper-picker-badge", {
+                  textContent: "MD",
+                }),
+              );
+            }
+          }
+          // Update or insert attachment text
+          const attachmentEl = chip.querySelector(".llm-paper-context-card-attachment") as HTMLElement | null;
+          if (attachmentEl) {
+            attachmentEl.textContent = "full.md";
+            attachmentEl.title = "full.md";
+          } else if (chipDoc) {
+            const rowMain = chip.querySelector(".llm-paper-picker-group-row-main");
+            if (rowMain) {
+              rowMain.appendChild(
+                createElement(chipDoc, "span",
+                  "llm-paper-picker-meta llm-paper-context-card-attachment",
+                  { textContent: "full.md", title: "full.md" },
+                ),
+              );
+            }
+          }
         }
       }
     } catch { /* ignore */ }
@@ -1791,6 +1822,7 @@ export function setupHandlers(body: Element, initialItem?: Zotero.Item | null) {
   const buildPaperChipMenuCard = (
     ownerDoc: Document,
     paperContext: PaperContextRef,
+    options?: { mineru?: boolean },
   ): HTMLButtonElement => {
     const card = createElement(
       ownerDoc,
@@ -1817,10 +1849,11 @@ export function setupHandlers(body: Element, initialItem?: Zotero.Item | null) {
     });
     titleLine.appendChild(title);
     const attachmentText = buildPaperChipAttachmentText(paperContext);
-    if (attachmentText) {
+    const isMineru = options?.mineru === true;
+    if (attachmentText || isMineru) {
       titleLine.appendChild(
         createElement(ownerDoc, "span", "llm-paper-picker-badge", {
-          textContent: "PDF",
+          textContent: isMineru ? "MD" : "PDF",
         }),
       );
     }
@@ -1834,15 +1867,16 @@ export function setupHandlers(body: Element, initialItem?: Zotero.Item | null) {
         }),
       );
     }
-    if (attachmentText) {
+    const displayAttachmentText = isMineru ? "full.md" : attachmentText;
+    if (displayAttachmentText) {
       rowMain.appendChild(
         createElement(
           ownerDoc,
           "span",
           "llm-paper-picker-meta llm-paper-context-card-attachment",
           {
-            textContent: attachmentText,
-            title: attachmentText,
+            textContent: displayAttachmentText,
+            title: displayAttachmentText,
           },
         ),
       );
@@ -1971,7 +2005,7 @@ export function setupHandlers(body: Element, initialItem?: Zotero.Item | null) {
     paperChipMenuSticky = options?.sticky === true;
     paperChipMenuTarget = paperContext;
     menu.innerHTML = "";
-    menu.appendChild(buildPaperChipMenuCard(ownerDoc, paperContext));
+    menu.appendChild(buildPaperChipMenuCard(ownerDoc, paperContext, { mineru: chip.dataset.mineru === "true" }));
     positionPaperChipMenuAboveAnchor(menu, chip);
     menu.style.display = "grid";
   };
@@ -2157,7 +2191,7 @@ export function setupHandlers(body: Element, initialItem?: Zotero.Item | null) {
       "div",
       "llm-selected-context-expanded llm-paper-context-chip-expanded",
     );
-    chipExpanded.appendChild(buildPaperChipMenuCard(ownerDoc, paperContext));
+    chipExpanded.appendChild(buildPaperChipMenuCard(ownerDoc, paperContext, { mineru }));
     chip.append(chipExpanded, chipHeader);
 
     // Restore expanded (sticky) state after re-render

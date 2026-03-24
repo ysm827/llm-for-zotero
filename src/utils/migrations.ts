@@ -10,6 +10,7 @@ declare const Services:
 
 const LEGACY_PREFS_PREFIX = "extensions.zotero.zoterollm";
 const PREF_MIGRATION_MARKER_KEY = `${config.prefsPrefix}.migrationFromZoterollmV1Done`;
+const PREF_MINERU_CONTENT_MD_CLEANUP = `${config.prefsPrefix}.migrationMineruContentMdCleanupDone`;
 
 const MIGRATABLE_PREF_KEYS = [
   "enable",
@@ -89,6 +90,20 @@ function migrateLegacyPrefs(): void {
   }
 }
 
+async function migrateMineruContentMdCleanup(): Promise<void> {
+  if (Zotero.Prefs.get(PREF_MINERU_CONTENT_MD_CLEANUP, true)) return;
+  try {
+    const { cleanupLegacyContentMdFiles } = await import(
+      "../modules/contextPanel/mineruCache"
+    );
+    await cleanupLegacyContentMdFiles();
+  } catch {
+    /* ignore – cache dir may not exist yet */
+  }
+  Zotero.Prefs.set(PREF_MINERU_CONTENT_MD_CLEANUP, true, true);
+}
+
 export async function runLegacyMigrations(): Promise<void> {
   migrateLegacyPrefs();
+  await migrateMineruContentMdCleanup();
 }

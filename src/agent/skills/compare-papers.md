@@ -22,7 +22,7 @@ Call `inspect_pdf` with `operation:'retrieve_evidence'` and a focused question a
 If the user asks about a specific aspect not covered by the retrieved evidence, make another `retrieve_evidence` call with a more specific question. Avoid `read_chunks` unless the user asks for a specific section.
 
 ### MinerU cache optimization
-Before reading PDFs, check if papers have MinerU cache available (visible in `read_library` results as `mineruCacheDir`). When available, prefer reading `file_io(read, '{mineruCacheDir}/_content.md')` — this gives high-quality structured markdown with preserved equations and figures, and is faster than `inspect_pdf`.
+Before reading PDFs, check if papers have MinerU cache available (visible in `read_library` results as `mineruCacheDir`). When available, prefer reading `file_io(read, '{mineruCacheDir}/full.md')` — this gives high-quality structured markdown with preserved equations and figures, and is faster than `inspect_pdf`.
 
 ### Key rules
 - ALWAYS batch papers in the `targets` array — do not call `inspect_pdf` separately for each paper.

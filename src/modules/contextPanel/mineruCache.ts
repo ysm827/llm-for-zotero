@@ -98,6 +98,11 @@ export function getMineruItemDir(id: number): string {
 
 // The md content is stored at a well-known path for quick access
 function getMineruMdPath(id: number): string {
+  return joinPath(getMineruItemDir(id), "full.md");
+}
+
+// Legacy path (pre-full.md, used _content.md as the well-known name)
+function getLegacyContentMdPath(id: number): string {
   return joinPath(getMineruItemDir(id), "_content.md");
 }
 
@@ -215,6 +220,8 @@ async function removePath(path: string): Promise<void> {
 
 export async function hasCachedMineruMd(id: number): Promise<boolean> {
   if (await pathExists(getMineruMdPath(id))) return true;
+  // Check legacy _content.md path
+  if (await pathExists(getLegacyContentMdPath(id))) return true;
   // Check legacy single-file cache
   return pathExists(getLegacyMdPath(id));
 }
@@ -222,9 +229,12 @@ export async function hasCachedMineruMd(id: number): Promise<boolean> {
 export async function readCachedMineruMd(
   id: number,
 ): Promise<string | null> {
-  // Try new directory-based cache
+  // Try full.md (current canonical path)
   const bytes = await readFileBytes(getMineruMdPath(id));
   if (bytes) return new TextDecoder("utf-8").decode(bytes);
+  // Try legacy _content.md
+  const legacyContentBytes = await readFileBytes(getLegacyContentMdPath(id));
+  if (legacyContentBytes) return new TextDecoder("utf-8").decode(legacyContentBytes);
   // Try legacy single-file cache
   const legacyBytes = await readFileBytes(getLegacyMdPath(id));
   if (legacyBytes) return new TextDecoder("utf-8").decode(legacyBytes);
@@ -254,11 +264,18 @@ export async function writeMineruCacheFiles(
     await writeFileBytes(filePath, file.data);
   }
 
-  // Write md content at a well-known path for quick cache reads
-  await writeFileBytes(
-    getMineruMdPath(id),
-    new TextEncoder().encode(mdContent),
-  );
+  // Ensure full.md exists (the ZIP normally includes it, but write as
+  // a safety fallback in case the MinerU ZIP structure changes)
+  const mdPath = getMineruMdPath(id);
+  if (!(await pathExists(mdPath))) {
+    await writeFileBytes(mdPath, new TextEncoder().encode(mdContent));
+  }
+
+  // Clean up legacy _content.md if it exists
+  const legacyContentPath = getLegacyContentMdPath(id);
+  if (await pathExists(legacyContentPath)) {
+    await removePath(legacyContentPath);
+  }
 
   // Clean up legacy single-file cache if it exists
   const legacyPath = getLegacyMdPath(id);
@@ -300,4 +317,50 @@ export async function invalidateMineruMd(id: number): Promise<void> {
   await removePath(getMineruItemDir(id));
   // Also remove legacy single-file cache
   await removePath(getLegacyMdPath(id));
+}
+
+/**
+ * One-time migration: remove legacy `_content.md` files from all cache
+ * directories where `full.md` already exists.
+ */
+export async function cleanupLegacyContentMdFiles(): Promise<void> {
+  const cacheDir = getMineruCacheDir();
+  if (!(await pathExists(cacheDir))) return;
+
+  const io = getIOUtils();
+  if (!io?.exists || !io?.remove) return;
+
+  // IOUtils.getChildren lists immediate children of a directory
+  const ioAny = io as Record<string, unknown>;
+  const getChildren =
+    typeof ioAny.getChildren === "function"
+      ? (ioAny.getChildren as (path: string) => Promise<string[]>)
+      : null;
+  if (!getChildren) return;
+
+  let entries: string[];
+  try {
+    entries = await getChildren(cacheDir);
+  } catch {
+    return;
+  }
+
+  let cleaned = 0;
+  for (const entry of entries) {
+    // Only process numbered directories (attachment IDs)
+    const basename = entry.split(/[\\/]/).pop() || "";
+    if (!/^\d+$/.test(basename)) continue;
+
+    const fullMdPath = joinPath(entry, "full.md");
+    const contentMdPath = joinPath(entry, "_content.md");
+
+    if ((await pathExists(fullMdPath)) && (await pathExists(contentMdPath))) {
+      await removePath(contentMdPath);
+      cleaned += 1;
+    }
+  }
+
+  if (cleaned > 0) {
+    ztoolkit.log(`LLM: Cleaned up ${cleaned} legacy _content.md file(s).`);
+  }
 }
