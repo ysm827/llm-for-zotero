@@ -14,6 +14,7 @@ export type ModelPdfSupport = "native" | "vision" | "none";
 export function getModelPdfSupport(
   modelName: string,
   providerProtocol?: string,
+  authMode?: string,
 ): ModelPdfSupport {
   const m = modelName.trim().toLowerCase();
   // Text-only models: no PDF, no vision

@@ -58,8 +58,8 @@ type SendFlowControllerDeps = {
   ) => Promise<ChatAttachment[]>;
   renderPdfPagesAsImages: (
     paperContexts: PaperContextRef[],
-  ) => Promise<ChatAttachment[]>;
-  getModelPdfSupport: (modelName: string, providerProtocol?: string) => "native" | "vision" | "none";
+  ) => Promise<string[]>;
+  getModelPdfSupport: (modelName: string, providerProtocol?: string, authMode?: string) => "native" | "vision" | "none";
   getSelectedFiles: (itemId: number) => ChatAttachment[];
   getSelectedImages: (itemId: number) => string[];
   resolvePromptText: (
@@ -209,8 +209,9 @@ export function createSendFlowController(deps: SendFlowControllerDeps): {
     const earlyModelName = (
       earlyProfile?.model || deps.getCurrentModelName() || ""
     ).trim();
-    const pdfSupport = deps.getModelPdfSupport(earlyModelName, earlyProfile?.providerProtocol);
-    let pdfAttachments: ChatAttachment[] = [];
+    const pdfSupport = deps.getModelPdfSupport(earlyModelName, earlyProfile?.providerProtocol, earlyProfile?.authMode);
+    let pdfFileAttachments: ChatAttachment[] = [];
+    let pdfPageImageDataUrls: string[] = [];
     if (pdfModePaperContexts.length) {
       if (pdfSupport === "none") {
         deps.setStatusMessage?.(
@@ -219,16 +220,16 @@ export function createSendFlowController(deps: SendFlowControllerDeps): {
         );
       } else if (pdfSupport === "vision") {
         deps.setStatusMessage?.(`Rendering PDF pages as images for ${earlyModelName}...`, "ready");
-        pdfAttachments = await deps.renderPdfPagesAsImages(pdfModePaperContexts);
-        deps.setStatusMessage?.(`Sending ${pdfAttachments.length} page image(s)...`, "ready");
+        pdfPageImageDataUrls = await deps.renderPdfPagesAsImages(pdfModePaperContexts);
+        deps.setStatusMessage?.(`Sending ${pdfPageImageDataUrls.length} page image(s)...`, "ready");
       } else {
         deps.setStatusMessage?.(`Sending native PDF to ${earlyModelName}...`, "ready");
-        pdfAttachments = await deps.resolvePdfPaperAttachments(pdfModePaperContexts);
+        pdfFileAttachments = await deps.resolvePdfPaperAttachments(pdfModePaperContexts);
       }
     }
     const selectedFiles = [
       ...deps.getSelectedFiles(item.id),
-      ...pdfAttachments,
+      ...pdfFileAttachments,
     ];
     const hasPaperComposeState = allSelectedPaperContexts.length > 0 || !deps.isGlobalMode();
 
@@ -310,9 +311,10 @@ export function createSendFlowController(deps: SendFlowControllerDeps): {
     const selectedImages = deps
       .getSelectedImages(item.id)
       .slice(0, MAX_SELECTED_IMAGES);
-    const images = deps.isScreenshotUnsupportedModel(activeModelName)
-      ? []
-      : selectedImages;
+    const images = [
+      ...(deps.isScreenshotUnsupportedModel(activeModelName) ? [] : selectedImages),
+      ...pdfPageImageDataUrls,
+    ];
     const selectedReasoning = deps.getSelectedReasoning();
     const advancedParams = deps.getAdvancedModelParams(selectedProfile?.entryId);
 

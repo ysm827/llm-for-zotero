@@ -7974,28 +7974,25 @@ export function setupHandlers(body: Element, initialItem?: Zotero.Item | null) {
     },
     renderPdfPagesAsImages: async (paperContexts) => {
       const { renderAllPdfPages } = await import("../../agent/services/pdfPageService");
-      const results: import("./types").ChatAttachment[] = [];
+      const dataUrls: string[] = [];
       for (const pc of paperContexts) {
         try {
           const pages = await renderAllPdfPages(pc.contextItemId, { maxPages: 20 });
           for (const page of pages) {
-            results.push({
-              id: `pdf-page-${pc.contextItemId}-${page.pageIndex}-${Date.now()}`,
-              name: `${pc.title || "PDF"} - page ${page.pageIndex + 1}.png`,
-              mimeType: "image/png",
-              sizeBytes: 0,
-              category: "image",
-              storedPath: page.storedPath,
-              contentHash: page.contentHash,
-            });
+            // Read the persisted PNG and convert to data URL for the image pipeline
+            const bytes = await readAttachmentBytes(page.storedPath);
+            if (bytes.byteLength > 0) {
+              const base64 = btoa(String.fromCharCode(...bytes));
+              dataUrls.push(`data:image/png;base64,${base64}`);
+            }
           }
         } catch (err) {
           ztoolkit.log("LLM: Failed to render PDF pages for", pc.contextItemId, err);
         }
       }
-      return results;
+      return dataUrls;
     },
-    getModelPdfSupport: (modelName, protocol) => getModelPdfSupport(modelName, protocol),
+    getModelPdfSupport: (modelName, protocol, authMode) => getModelPdfSupport(modelName, protocol, authMode),
     getSelectedFiles: (itemId) => selectedFileAttachmentCache.get(itemId) || [],
     getSelectedImages: (itemId) => selectedImageCache.get(itemId) || [],
     resolvePromptText,
