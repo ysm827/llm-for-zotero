@@ -63,7 +63,8 @@ import {
   getSelectionFromDocument,
 } from "./readerSelection";
 import { resolveReaderPopupPaperContext } from "./readerPopup";
-import { resolveInitialPanelItemState } from "./portalScope";
+import { resolveInitialPanelItemState, resolveActiveLibraryID } from "./portalScope";
+import { getLockedGlobalConversationKey } from "./prefHelpers";
 import { getEditableSelectionFromDocument } from "./noteSelection";
 
 // =============================================================================
@@ -119,9 +120,29 @@ export function registerReaderContextPanel() {
       getActiveReaderForSelectedTab();
       return true;
     },
-    onRender: ({ body }) => {
-      // Intentional no-op for main rendering, but used to refresh visibility state.
+    onRender: ({ body, item }) => {
       syncGlobalLockVisibility(body);
+      // If a global lock is active but the panel is showing paper chat,
+      // the panel state is stale (e.g. tab was already open before auto-lock).
+      // Schedule a full async re-render so the panel switches to the locked session.
+      try {
+        const libraryID = resolveActiveLibraryID() || 0;
+        const lockedKey = libraryID > 0 ? getLockedGlobalConversationKey(libraryID) : null;
+        const panelRoot = body.querySelector("#llm-main") as HTMLElement | null;
+        const currentKind = panelRoot?.dataset?.conversationKind;
+        if (lockedKey !== null && currentKind === "paper") {
+          const resolvedState = resolveInitialPanelItemState(item);
+          // Micro-task so onRender returns synchronously
+          void (async () => {
+            try {
+              buildUI(body, resolvedState.item);
+              if (resolvedState.item) await ensureConversationLoaded(resolvedState.item);
+              setupHandlers(body, item);
+              refreshChat(body, resolvedState.item);
+            } catch { /* ignore */ }
+          })();
+        }
+      } catch { /* ignore */ }
     },
     onAsyncRender: async ({ body, item, setEnabled, tabType }) => {
       setEnabled(true);

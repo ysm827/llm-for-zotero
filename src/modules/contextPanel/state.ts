@@ -126,6 +126,12 @@ export const recentReaderSelectionCache = new Map<number, string>();
 
 export const activePaperConversationByPaper = new Map<string, number>();
 
+// ── Auto-lock state (open chat locks during generation) ─────────────────────
+export let autoLockedGlobalConversationKey: number | null = null;
+export function setAutoLockedGlobalConversationKey(value: number | null): void {
+  autoLockedGlobalConversationKey = value;
+}
+
 // ── Inline edit state ───────────────────────────────────────────────────────
 
 export type InlineEditTarget = {

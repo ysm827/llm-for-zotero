@@ -154,6 +154,8 @@ type SendFlowControllerDeps = {
   scheduleAttachmentGc: () => void;
   refreshGlobalHistoryHeader: () => void;
   persistDraftInput: () => void;
+  autoLockGlobalChat: () => void;
+  autoUnlockGlobalChat: () => void;
   setStatusMessage?: (message: string, level: StatusLevel) => void;
   editStaleStatusText: string;
 };
@@ -167,6 +169,7 @@ export function createSendFlowController(deps: SendFlowControllerDeps): {
 
     deps.closeSlashMenu();
     deps.closePaperPicker();
+    deps.autoLockGlobalChat();
 
     const textContextConversationKey = deps.getConversationKey(item);
     const text = deps.inputBox.value.trim();
@@ -381,6 +384,7 @@ export function createSendFlowController(deps: SendFlowControllerDeps): {
       }
       deps.setActiveEditSession(null);
       deps.scheduleAttachmentGc();
+      deps.autoUnlockGlobalChat();
       deps.refreshGlobalHistoryHeader();
       return;
     }
@@ -430,6 +434,7 @@ export function createSendFlowController(deps: SendFlowControllerDeps): {
       }, 120);
     }
     await sendTask;
+    deps.autoUnlockGlobalChat();
     deps.refreshGlobalHistoryHeader();
   };
 

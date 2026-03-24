@@ -70,6 +70,8 @@ import {
   setInlineEditInputSection,
   setInlineEditSavedDraft,
   pdfTextCache,
+  autoLockedGlobalConversationKey,
+  setAutoLockedGlobalConversationKey,
 } from "./state";
 import {
   sanitizeText,
@@ -5147,6 +5149,8 @@ export function setupHandlers(body: Element, initialItem?: Zotero.Item | null) {
       if (!currentKey) return;
       const lockedKey = getLockedGlobalConversationKey(libraryID);
       const isLocked = lockedKey !== null && lockedKey === currentKey;
+      // Manual lock/unlock overrides any auto-lock
+      setAutoLockedGlobalConversationKey(null);
       if (isLocked) {
         setLockedGlobalConversationKey(libraryID, null);
       } else {
@@ -8027,6 +8031,26 @@ export function setupHandlers(body: Element, initialItem?: Zotero.Item | null) {
       void refreshGlobalHistoryHeader();
     },
     persistDraftInput: persistDraftInputForCurrentConversation,
+    autoLockGlobalChat: () => {
+      if (!item || !isGlobalMode() || isNoteSession()) return;
+      const libraryID = getCurrentLibraryID();
+      const existingLock = getLockedGlobalConversationKey(libraryID);
+      if (existingLock) return; // already manually locked — don't override
+      setLockedGlobalConversationKey(libraryID, conversationKey);
+      setAutoLockedGlobalConversationKey(conversationKey);
+      syncConversationIdentity();
+    },
+    autoUnlockGlobalChat: () => {
+      const autoKey = autoLockedGlobalConversationKey;
+      if (autoKey === null) return;
+      setAutoLockedGlobalConversationKey(null);
+      const libraryID = getCurrentLibraryID();
+      const currentLock = getLockedGlobalConversationKey(libraryID);
+      if (currentLock === autoKey) {
+        setLockedGlobalConversationKey(libraryID, null);
+        syncConversationIdentity();
+      }
+    },
     setStatusMessage: status
       ? (message, level) => {
           setStatus(status, message, level);
