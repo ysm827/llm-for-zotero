@@ -36,6 +36,31 @@ export class MineruRateLimitError extends Error {
   }
 }
 
+export class MineruCancelledError extends Error {
+  constructor() {
+    super("Cancelled");
+    this.name = "MineruCancelledError";
+  }
+}
+
+function throwIfAborted(signal?: AbortSignal): void {
+  if (signal?.aborted) throw new MineruCancelledError();
+}
+
+/** Race a promise against an AbortSignal — rejects immediately when aborted. */
+function raceAbort<T>(promise: Promise<T>, signal?: AbortSignal): Promise<T> {
+  if (!signal) return promise;
+  if (signal.aborted) return Promise.reject(new MineruCancelledError());
+  return new Promise<T>((resolve, reject) => {
+    const onAbort = () => reject(new MineruCancelledError());
+    signal.addEventListener("abort", onAbort, { once: true });
+    promise.then(
+      (v) => { signal.removeEventListener("abort", onAbort); resolve(v); },
+      (e) => { signal.removeEventListener("abort", onAbort); reject(e); },
+    );
+  });
+}
+
 type IOUtilsLike = {
   read?: (path: string) => Promise<Uint8Array | ArrayBuffer>;
   write?: (path: string, data: Uint8Array) => Promise<unknown>;
@@ -53,8 +78,12 @@ function getOSFile(): OSFileLike | undefined {
   return (globalThis as { OS?: { File?: OSFileLike } }).OS?.File;
 }
 
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
+function sleep(ms: number, signal?: AbortSignal): Promise<void> {
+  return new Promise((resolve, reject) => {
+    if (signal?.aborted) { reject(new MineruCancelledError()); return; }
+    const timer = setTimeout(resolve, ms);
+    signal?.addEventListener("abort", () => { clearTimeout(timer); reject(new MineruCancelledError()); }, { once: true });
+  });
 }
 
 // ── HTTP helpers using Zotero.HTTP (bypasses CORS) ────────────────────────────
@@ -599,7 +628,10 @@ async function httpPutBinary(
   headers: Record<string, string>,
   pdfPath: string,
   bytes: Uint8Array,
+  signal?: AbortSignal,
 ): Promise<{ status: number }> {
+  throwIfAborted(signal);
+
   const urlHost = (() => {
     try { return new URL(url).host; } catch { return "unknown"; }
   })();
@@ -609,20 +641,37 @@ async function httpPutBinary(
   if (curlResult.status >= 200 && curlResult.status < 300) {
     return curlResult;
   }
+  throwIfAborted(signal);
 
-  // Attempt 2: fetch
+  // Attempt 2: fetch (with timeout)
   try {
     const fetchFn = ztoolkit.getGlobal("fetch") as typeof fetch;
+    const AbortCtrl = (globalThis as { AbortController?: typeof AbortController }).AbortController
+      ?? ztoolkit.getGlobal("AbortController") as typeof AbortController | undefined;
+    let fetchSignal: AbortSignal | undefined;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    if (AbortCtrl) {
+      const ctrl = new AbortCtrl();
+      fetchSignal = ctrl.signal;
+      timer = setTimeout(() => ctrl.abort(), REQUEST_TIMEOUT_MS * 3);
+      // Also abort if the parent signal fires
+      signal?.addEventListener("abort", () => ctrl.abort(), { once: true });
+    }
     const resp = await fetchFn(url, {
       method: "PUT",
       headers,
       body: new Uint8Array(bytes),
+      signal: fetchSignal,
     });
+    if (timer) clearTimeout(timer);
     ztoolkit.log(`MinerU upload [fetch]: status=${resp.status} host=${urlHost}`);
     return { status: resp.status };
   } catch (e) {
+    if (signal?.aborted) throw new MineruCancelledError();
     ztoolkit.log(`MinerU upload [fetch] threw: ${(e as Error).message} host=${urlHost}`);
   }
+
+  throwIfAborted(signal);
 
   // Attempt 3: Zotero.HTTP.request
   try {
@@ -636,6 +685,7 @@ async function httpPutBinary(
     ztoolkit.log(`MinerU upload [Zotero.HTTP]: status=${xhr.status} host=${urlHost}`);
     if (xhr.status > 0) return { status: xhr.status };
   } catch (e) {
+    if (signal?.aborted) throw new MineruCancelledError();
     ztoolkit.log(`MinerU upload [Zotero.HTTP] threw: ${(e as Error).message} host=${urlHost}`);
   }
 
@@ -646,7 +696,9 @@ async function parsePdfViaUpload(
   pdfPath: string,
   apiKey: string,
   report: (s: string) => void,
+  signal?: AbortSignal,
 ): Promise<MinerUResult> {
+  throwIfAborted(signal);
   report("Reading PDF file…");
   const pdfBytes = await readPdfBytes(pdfPath);
   if (!pdfBytes || !pdfBytes.length) {
@@ -654,8 +706,11 @@ async function parsePdfViaUpload(
     return null;
   }
 
-  const fileName = pdfPath.split(/[\\/]/).pop() || "paper.pdf";
+  // Sanitize filename to ASCII — MinerU's backend may not handle unicode names
+  const rawName = pdfPath.split(/[\\/]/).pop() || "paper.pdf";
+  const fileName = rawName.replace(/[^\x20-\x7E]/g, "_") || "paper.pdf";
   const sizeMB = (pdfBytes.length / (1024 * 1024)).toFixed(1);
+  throwIfAborted(signal);
   report(`Requesting upload URL… (${sizeMB} MB)`);
 
   const batchResult = await httpJson(
@@ -699,15 +754,19 @@ async function parsePdfViaUpload(
     return null;
   }
 
+  throwIfAborted(signal);
   report("Uploading PDF…");
   // Do NOT send Content-Type — the presigned URL's signature may not include it,
   // and adding it would cause Alibaba OSS to return 403.
-  const uploadResult = await httpPutBinary(
+  // Race the entire upload chain against the abort signal so pause/stop
+  // takes effect immediately, even while curl is blocked.
+  const uploadResult = await raceAbort(httpPutBinary(
     fileUrls[0],
     {},
     pdfPath,
     pdfBytes,
-  );
+    signal,
+  ), signal);
 
   if (uploadResult.status < 200 || uploadResult.status >= 300) {
     const uploadHost = (() => {
@@ -720,7 +779,7 @@ async function parsePdfViaUpload(
   report("Processing on server…");
   const startTime = Date.now();
   while (Date.now() - startTime < POLL_TIMEOUT_MS) {
-    await sleep(POLL_INTERVAL_MS);
+    await sleep(POLL_INTERVAL_MS, signal);
     const elapsed = Math.round((Date.now() - startTime) / 1000);
     report(`Processing on server… (${elapsed}s)`);
 
@@ -774,15 +833,17 @@ export async function parsePdfWithMineruCloud(
   pdfPath: string,
   apiKey: string,
   onProgress?: MinerUProgressCallback,
+  signal?: AbortSignal,
 ): Promise<MinerUResult> {
   const report = (stage: string) => {
     ztoolkit.log(`MinerU: ${stage}`);
     onProgress?.(stage);
   };
   try {
-    return await parsePdfViaUpload(pdfPath, apiKey, report);
+    return await parsePdfViaUpload(pdfPath, apiKey, report, signal);
   } catch (e) {
     if (e instanceof MineruRateLimitError) throw e;
+    if (e instanceof MineruCancelledError) throw e;
     report(`Error: ${(e as Error).message}`);
     return null;
   }

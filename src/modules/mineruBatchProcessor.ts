@@ -2,6 +2,7 @@ import { getMineruApiKey } from "../utils/mineruConfig";
 import {
   parsePdfWithMineruCloud,
   MineruRateLimitError,
+  MineruCancelledError,
 } from "../utils/mineruClient";
 import {
   hasCachedMineruMd,
@@ -56,6 +57,15 @@ let state: MineruBatchState = {
 let queue: QueueEntry[] = [];
 let queueBuilt = false;
 const listeners = new Set<(s: MineruBatchState) => void>();
+let currentAbort: AbortController | null = null;
+
+function getAbortControllerCtor(): (new () => AbortController) | null {
+  return (
+    (ztoolkit.getGlobal("AbortController") as (new () => AbortController) | undefined) ||
+    (globalThis as typeof globalThis & { AbortController?: new () => AbortController }).AbortController ||
+    null
+  );
+}
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -144,6 +154,7 @@ async function processNext(): Promise<void> {
     state.running = false;
     state.currentItemId = null;
     state.currentItemTitle = "";
+    currentAbort = null;
     notify();
     return;
   }
@@ -154,6 +165,11 @@ async function processNext(): Promise<void> {
   state.statusMessage = `Starting: ${entry.title}`;
   state.error = null;
   notify();
+
+  // Create an AbortController for this item so pause/stop can cancel it
+  const AbortCtor = getAbortControllerCtor();
+  const abort = AbortCtor ? new AbortCtor() : null;
+  currentAbort = abort;
 
   try {
     const pdfItem = Zotero.Items.get(entry.attachmentId);
@@ -177,7 +193,7 @@ async function processNext(): Promise<void> {
     const result = await parsePdfWithMineruCloud(pdfPath as string, apiKey, (stage) => {
       state.statusMessage = stage;
       notify();
-    });
+    }, abort?.signal);
     if (result?.mdContent) {
       await writeMineruCacheFiles(entry.attachmentId, result.mdContent, result.files);
       state.processedCount++;
@@ -190,6 +206,21 @@ async function processNext(): Promise<void> {
       state.failedCount++;
     }
   } catch (e) {
+    if (e instanceof MineruCancelledError) {
+      ztoolkit.log(`MinerU batch: cancelled "${entry.title}"`);
+      // Put the item back so it can be retried on resume
+      queue.unshift(entry);
+      state.running = false;
+      state.currentItemId = null;
+      state.currentItemTitle = "";
+      state.statusMessage = "Paused";
+      // Signal the UI that this item did NOT succeed — prevents green dot
+      state.lastFailedItemId = entry.attachmentId;
+      state.lastFailedMessage = "Cancelled";
+      currentAbort = null;
+      notify();
+      return;
+    }
     if (e instanceof MineruRateLimitError) {
       state.rateLimited = true;
       state.paused = true;
@@ -202,6 +233,7 @@ async function processNext(): Promise<void> {
       state.currentItemTitle = "";
       // Put entry back at front so it retries next time
       queue.unshift(entry);
+      currentAbort = null;
       notify();
       return;
     }
@@ -212,6 +244,7 @@ async function processNext(): Promise<void> {
     state.failedCount++;
   }
 
+  currentAbort = null;
   scheduleNext();
 }
 
@@ -290,6 +323,11 @@ export async function processSelectedItems(
 
 export function pauseBatchProcessing(): void {
   state.paused = true;
+  // Abort the in-flight operation so pause takes effect immediately
+  if (currentAbort) {
+    currentAbort.abort();
+    currentAbort = null;
+  }
   notify();
 }
 
