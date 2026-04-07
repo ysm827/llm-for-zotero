@@ -185,6 +185,7 @@ export function renderStandalonePlaceholder(body: Element): void {
     type: "button",
   });
   focusBtn.style.cssText =
+    "display:flex;align-items:center;justify-content:center;" +
     "padding:6px 16px;border-radius:6px;cursor:pointer;font-size:12px;" +
     "background:var(--color-accent,#2563eb);color:#fff;border:none;";
   focusBtn.addEventListener("click", () => {
@@ -196,6 +197,7 @@ export function renderStandalonePlaceholder(body: Element): void {
     type: "button",
   });
   closeBtn.style.cssText =
+    "display:flex;align-items:center;justify-content:center;" +
     "padding:6px 16px;border-radius:6px;cursor:pointer;font-size:12px;" +
     "background:none;color:var(--fill-secondary);border:1px solid var(--stroke-secondary,#888);";
   closeBtn.addEventListener("click", () => {
