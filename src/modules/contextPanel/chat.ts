@@ -1130,6 +1130,14 @@ function restoreRequestUIIdle(
   requestId: number,
 ): void {
   if (getCancelledRequestId(conversationKey) >= requestId) return;
+  // Guard: only restore UI if the panel is still showing this conversation.
+  // If the user switched away, the panel rebuild (onAsyncRender) will handle
+  // the correct idle/busy state for the new conversation.
+  const panelRoot = body.querySelector("#llm-main") as HTMLElement | null;
+  if (panelRoot) {
+    const displayedKey = Number(panelRoot.dataset.itemId || 0);
+    if (displayedKey > 0 && displayedKey !== conversationKey) return;
+  }
   // Re-query the DOM at restore time: buildUI() wipes body.textContent when the
   // user navigates to a new item while streaming, making any previously-captured
   // ui references point to detached (removed) elements.  Querying from the
@@ -1162,6 +1170,16 @@ function createPanelUpdateHelpers(
   ) => void;
 } {
   const refreshChatSafely = () => {
+    // Guard: only refresh if the panel is still showing this conversation.
+    // When the user switches conversations mid-stream, the panel's dataset
+    // changes but the streaming closure still references the old body/item.
+    // Without this check the streamed content would overwrite the new
+    // conversation's display.
+    const panelRoot = body.querySelector("#llm-main") as HTMLElement | null;
+    if (panelRoot) {
+      const displayedKey = Number(panelRoot.dataset.itemId || 0);
+      if (displayedKey > 0 && displayedKey !== conversationKey) return;
+    }
     refreshConversationPanels(body, item);
   };
   const setStatusSafely = (
@@ -1169,6 +1187,12 @@ function createPanelUpdateHelpers(
     kind: Parameters<typeof setStatus>[2],
   ) => {
     if (!ui.status) return;
+    // Same guard for status updates.
+    const panelRoot = body.querySelector("#llm-main") as HTMLElement | null;
+    if (panelRoot) {
+      const displayedKey = Number(panelRoot.dataset.itemId || 0);
+      if (displayedKey > 0 && displayedKey !== conversationKey) return;
+    }
     withScrollGuard(ui.chatBox, conversationKey, () => {
       setStatus(ui.status as HTMLElement, text, kind);
     });
