@@ -3423,21 +3423,29 @@ export function setupHandlers(
       itemsList.appendChild(dayLabel);
 
       for (const entry of group.items) {
-        const btn = createElement(
+        // Use <div> instead of <button> — Gecko buttons ignore overflow:hidden
+        const item = createElement(
           body.ownerDocument as Document,
-          "button",
+          "div",
           "llm-history-item",
-          { type: "button" },
-        ) as HTMLButtonElement;
-        btn.dataset.conversationKey = `${entry.conversationKey}`;
-        btn.dataset.historyKind = entry.kind;
-        btn.dataset.historySection = entry.section;
+        ) as HTMLDivElement;
+        item.setAttribute("role", "button");
+        item.setAttribute("tabindex", "0");
+        item.dataset.conversationKey = `${entry.conversationKey}`;
+        item.dataset.historyKind = entry.kind;
+        item.dataset.historySection = entry.section;
         if (isHistoryEntryActive(entry)) {
-          btn.classList.add("active");
+          item.classList.add("active");
         }
         if (entry.isPendingDelete) {
-          btn.classList.add("pending-delete");
+          item.classList.add("pending-delete");
         }
+
+        const titleRow = createElement(
+          body.ownerDocument as Document,
+          "div",
+          "llm-history-item-title-row",
+        ) as HTMLDivElement;
 
         const titleSpan = createElement(
           body.ownerDocument as Document,
@@ -3456,23 +3464,7 @@ export function setupHandlers(
         } else {
           titleSpan.textContent = displayTitle;
         }
-        btn.appendChild(titleSpan);
-
-        // Search preview snippet
-        if (searchResult && searchResult.previewText) {
-          btn.classList.add("has-preview");
-          const preview = createElement(
-            body.ownerDocument as Document,
-            "div",
-            "llm-history-item-preview",
-          );
-          appendHistorySearchHighlightedText(
-            preview,
-            searchResult.previewText,
-            searchResult.previewRanges,
-          );
-          btn.appendChild(preview);
-        }
+        titleRow.appendChild(titleSpan);
 
         if (entry.deletable) {
           const deleteBtn = createElement(
@@ -3484,10 +3476,28 @@ export function setupHandlers(
           deleteBtn.setAttribute("aria-label", `Delete ${entry.title}`);
           deleteBtn.title = t("Delete conversation");
           deleteBtn.dataset.action = "delete";
-          btn.appendChild(deleteBtn);
+          titleRow.appendChild(deleteBtn);
         }
 
-        itemsList.appendChild(btn);
+        item.appendChild(titleRow);
+
+        // Search preview snippet
+        if (searchResult && searchResult.previewText) {
+          item.classList.add("has-preview");
+          const preview = createElement(
+            body.ownerDocument as Document,
+            "div",
+            "llm-history-item-preview",
+          );
+          appendHistorySearchHighlightedText(
+            preview,
+            searchResult.previewText,
+            searchResult.previewRanges,
+          );
+          item.appendChild(preview);
+        }
+
+        itemsList.appendChild(item);
       }
     }
 

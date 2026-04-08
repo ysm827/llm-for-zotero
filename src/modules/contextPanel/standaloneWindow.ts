@@ -1234,10 +1234,11 @@ export function openStandaloneChat(options?: {
 
           const label = doc.createElementNS(HTML_NS, "span") as HTMLSpanElement;
           label.className = "llm-standalone-search-label";
+          label.dataset.labelType = entry.mode === "paper" ? "paper" : "library";
           const labelText = entry.mode === "paper"
             ? resolvePaperLabel(entry.paperItemID)
             : t("Library chat");
-          label.textContent = `(${labelText})`;
+          label.textContent = entry.mode === "paper" ? labelText : t("Library chat");
 
           const title = doc.createElementNS(HTML_NS, "span") as HTMLSpanElement;
           title.className = "llm-standalone-search-title";
