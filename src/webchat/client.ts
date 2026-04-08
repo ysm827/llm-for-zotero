@@ -27,6 +27,7 @@ import {
 const POLL_INTERVAL_MS = 500;
 const REMOTE_READY_POLL_INTERVAL_MS = 250;
 const REMOTE_READY_TIMEOUT_MS = 30_000;
+const DEEPSEEK_SCRAPE_TIMEOUT_MS = 45_000;
 const HISTORY_REFRESH_POLL_INTERVAL_MS = 500;
 const HISTORY_REFRESH_TIMEOUT_MS = 10_000;
 const TIMEOUT_MS = 300_000; // 5 minutes
@@ -734,12 +735,15 @@ async function waitForFreshScrapedMessagesForChat(
       }
     })()
     : null;
+  const isDeepSeekChat = normalizeHistoryHostname(siteHostname) === "chat.deepseek.com";
   const snapshot = await waitForFreshScrapedTranscriptSnapshot(host, {
     expectedChatUrl: options.expectedChatUrl,
     expectedChatId: options.expectedChatId,
     siteHostname,
     minCapturedAt: options.minCapturedAt,
-    timeoutMs: options.timeoutMs || REMOTE_READY_TIMEOUT_MS,
+    timeoutMs:
+      options.timeoutMs ||
+      (isDeepSeekChat ? DEEPSEEK_SCRAPE_TIMEOUT_MS : REMOTE_READY_TIMEOUT_MS),
     signal: options.signal,
   });
 

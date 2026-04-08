@@ -472,11 +472,6 @@ export function openStandaloneChat(options?: {
     iconNewChat.title = t("New chat");
     iconNewChat.textContent = "+";
 
-    const iconHistory = doc.createElementNS(HTML_NS, "button") as HTMLButtonElement;
-    iconHistory.className = "llm-standalone-icon-btn llm-standalone-icon-history";
-    iconHistory.type = "button";
-    iconHistory.title = t("History");
-
     const iconSearch = doc.createElementNS(HTML_NS, "button") as HTMLButtonElement;
     iconSearch.className = "llm-standalone-icon-btn llm-standalone-icon-search";
     iconSearch.type = "button";
@@ -500,12 +495,7 @@ export function openStandaloneChat(options?: {
     iconClear.type = "button";
     iconClear.title = t("Clear");
 
-    iconStrip.append(iconSidebarToggle, iconNewChat, iconHistory, iconSearch, iconStripSpacer, iconSettings, iconExport, iconClear);
-
-    // History popup — floating panel for collapsed icon strip
-    const historyPopup = doc.createElementNS(HTML_NS, "div") as HTMLDivElement;
-    historyPopup.className = "llm-standalone-history-popup";
-    historyPopup.style.display = "none";
+    iconStrip.append(iconSidebarToggle, iconNewChat, iconSearch, iconStripSpacer, iconSettings, iconExport, iconClear);
 
     // Export popup — floating menu from sidebar export icon
     const exportPopup = doc.createElementNS(HTML_NS, "div") as HTMLDivElement;
@@ -535,7 +525,19 @@ export function openStandaloneChat(options?: {
     sidebarTitle.className = "llm-standalone-sidebar-title";
     sidebarTitle.textContent = t("History");
 
-    sidebarHeader.append(sidebarTitle);
+    const sidebarHeaderActions = doc.createElementNS(HTML_NS, "div") as HTMLDivElement;
+    sidebarHeaderActions.className = "llm-standalone-sidebar-actions";
+
+    const webHistoryRefreshBtn = doc.createElementNS(HTML_NS, "button") as HTMLButtonElement;
+    webHistoryRefreshBtn.className = "llm-standalone-sidebar-refresh";
+    webHistoryRefreshBtn.type = "button";
+    webHistoryRefreshBtn.textContent = "\u21BB";
+    webHistoryRefreshBtn.title = t("Refresh web history");
+    webHistoryRefreshBtn.setAttribute("aria-label", t("Refresh web history"));
+    webHistoryRefreshBtn.style.display = "none";
+
+    sidebarHeaderActions.append(webHistoryRefreshBtn);
+    sidebarHeader.append(sidebarTitle, sidebarHeaderActions);
 
     const sidebarList = doc.createElementNS(HTML_NS, "div") as HTMLDivElement;
     sidebarList.className = "llm-standalone-sidebar-list";
@@ -588,7 +590,7 @@ export function openStandaloneChat(options?: {
     searchPopup.append(searchHeader, searchResults);
     searchOverlay.appendChild(searchPopup);
 
-    root.append(lowerArea, historyPopup, exportPopup, searchOverlay);
+    root.append(lowerArea, exportPopup, searchOverlay);
 
     // -- Sidebar state management --
     let userManualSidebarState: "expanded" | "collapsed" | null = null;
@@ -664,6 +666,7 @@ export function openStandaloneChat(options?: {
 
       // Keep original paper title — webchat mode is already indicated by tabs/mode chip
       updateContentTitle();
+      webHistoryRefreshBtn.style.display = isWebChat ? "inline-flex" : "none";
 
       // Sidebar: populate with webchat history, or restore local history
       if (isWebChat) {
@@ -676,10 +679,16 @@ export function openStandaloneChat(options?: {
     };
 
     const resolveActiveWebChatHostname = async (): Promise<string | null> => {
-      const [{ relayGetStateSnapshot }, { WEBCHAT_TARGETS }] = await Promise.all([
+      const [{ relayGetStateSnapshot }, { getWebChatTargetByModelName, WEBCHAT_TARGETS }] = await Promise.all([
         import("../../webchat/relayServer"),
         import("../../webchat/types"),
       ]);
+      const currentModelName = currentChatHooks?.getCurrentModelName?.() || null;
+      const currentTargetHostname =
+        getWebChatTargetByModelName(currentModelName || "")?.modelName || null;
+      if (currentTargetHostname) {
+        return currentTargetHostname;
+      }
       const activeTarget = relayGetStateSnapshot().active_target || null;
       return (
         WEBCHAT_TARGETS.find((target) => target.id === activeTarget)?.modelName ||
@@ -687,172 +696,12 @@ export function openStandaloneChat(options?: {
       );
     };
 
-    // Render webchat sessions in the standalone history popup
-    const renderWebChatHistoryPopup = async () => {
-      if (cancelled) return;
-      // Clear popup
-      if (typeof (historyPopup as any).replaceChildren === "function") {
-        (historyPopup as any).replaceChildren();
-      } else {
-        historyPopup.textContent = "";
-      }
-
-      // Loading indicator
-      const loadingEl = doc.createElementNS(HTML_NS, "div") as HTMLDivElement;
-      loadingEl.className = "llm-standalone-sidebar-empty";
-      loadingEl.textContent = t("Fetching chat history…");
-      historyPopup.appendChild(loadingEl);
-
-      try {
-        const requestedAt = Date.now();
-        const [{ relaySetCommand }, {
-          filterWebChatHistorySessionsForHostname,
-          getWebChatHistorySiteSyncEntry,
-          isWebChatHistorySiteFailure,
-          waitForFreshChatHistorySnapshot,
-        }] = await Promise.all([
-          import("../../webchat/relayServer"),
-          import("../../webchat/client"),
-        ]);
-        const targetHostname = await resolveActiveWebChatHostname();
-
-        relaySetCommand({ type: "SCRAPE_HISTORY" });
-
-        let sessions: Array<{ id: string; title: string; chatUrl: string | null }> = [];
-        let historyFetchFailed = false;
-        try {
-          const snapshot = await waitForFreshChatHistorySnapshot(
-            "",
-            targetHostname,
-            requestedAt,
-          );
-          sessions = filterWebChatHistorySessionsForHostname(
-            snapshot.sessions,
-            targetHostname,
-          );
-          historyFetchFailed = isWebChatHistorySiteFailure(
-            getWebChatHistorySiteSyncEntry(snapshot, targetHostname),
-          );
-        } catch { /* relay not reachable */ }
-
-        if (cancelled || !isInWebChatMode) return;
-
-        // Remove loading indicator
-        loadingEl.remove();
-
-        if (!sessions.length) {
-          const emptyEl = doc.createElementNS(HTML_NS, "div") as HTMLDivElement;
-          emptyEl.className = "llm-standalone-popup-empty";
-          emptyEl.textContent = historyFetchFailed
-            ? t("Failed to fetch history")
-            : t("No conversations yet");
-          historyPopup.appendChild(emptyEl);
-          return;
-        }
-
-        // Render session list — use popup-item styling (matches regular history popup)
-        for (const session of sessions) {
-          const row = doc.createElementNS(HTML_NS, "button") as HTMLButtonElement;
-          row.className = "llm-standalone-popup-item";
-          row.type = "button";
-          row.textContent = session.title || "Untitled";
-          row.title = session.title || "Untitled";
-
-          row.addEventListener("click", () => {
-            historyPopup.style.display = "none";
-            if (!activeItem) return;
-            // Load the webchat conversation via the relay
-            void (async () => {
-              const key = getConversationKey(activeItem);
-              const isDeepSeekSession =
-                typeof session.chatUrl === "string" &&
-                /chat\.deepseek\.com/i.test(session.chatUrl);
-              try {
-                // Derive model name from the session's chat URL
-                let loadModelName = "chatgpt.com";
-                try {
-                  if (session.chatUrl) {
-                    const loadUrl = new URL(session.chatUrl);
-                    const { WEBCHAT_TARGETS: targets } = await import("../../webchat/types");
-                    const matched = targets.find((wt) =>
-                      loadUrl.hostname === wt.modelName || loadUrl.hostname === `www.${wt.modelName}`,
-                    );
-                    if (matched) loadModelName = matched.modelName;
-                  }
-                } catch { /* default */ }
-
-                // Show loading state
-                chatHistory.set(key, [{
-                  role: "assistant" as const,
-                  text: `Loading conversation: **${session.title || "Untitled"}**\n\nFetching messages…`,
-                  timestamp: Date.now(),
-                  modelName: loadModelName,
-                  modelProviderLabel: "WebChat",
-                  streaming: true,
-                }]);
-                refreshChat(contentArea, activeItem);
-
-                // Clear force-new-chat intent so follow-up sends
-                // continue in the loaded conversation, not start fresh.
-                currentChatHooks?.clearWebChatNewChatIntent?.();
-
-                const { loadChatSession } = await import("../../webchat/client");
-                const result = await loadChatSession("", session.id);
-
-                if (cancelled || !isInWebChatMode) return;
-
-                const messages: Array<{
-                  role: "user" | "assistant";
-                  text: string;
-                  timestamp: number;
-                  modelName?: string;
-                  modelProviderLabel?: string;
-                  reasoningDetails?: string;
-                }> = [];
-
-                if (result?.messages?.length) {
-                  for (const m of result.messages) {
-                    messages.push({
-                      role: m.kind === "user" ? "user" : "assistant",
-                      text: m.text || "",
-                      timestamp: m.timestamp ? new Date(m.timestamp).getTime() : Date.now(),
-                      modelName: m.kind === "bot" ? loadModelName : undefined,
-                      modelProviderLabel: m.kind === "bot" ? "WebChat" : undefined,
-                      reasoningDetails: m.thinking || undefined,
-                    });
-                  }
-                }
-
-                chatHistory.set(key, messages);
-                refreshChat(contentArea, activeItem);
-              } catch (err) {
-                ztoolkit.log("LLM: standalone webchat load failed", err);
-                chatHistory.set(key, [{
-                  role: "assistant" as const,
-                  text: isDeepSeekSession
-                    ? t("Failed to load selected DeepSeek conversation")
-                    : t("Failed to load selected conversation"),
-                  timestamp: Date.now(),
-                  modelProviderLabel: "WebChat",
-                }]);
-                refreshChat(contentArea, activeItem);
-              }
-            })();
-          });
-
-          historyPopup.appendChild(row);
-        }
-      } catch (err) {
-        ztoolkit.log("LLM: standalone webchat history fetch failed", err);
-        loadingEl.textContent = t("Failed to fetch history");
-      }
-    };
-
     // Render webchat history items directly into the sidebar list
     let webChatSidebarRenderSeq = 0;
     const renderWebChatSidebar = async () => {
       if (cancelled || !isInWebChatMode) return;
       const mySeq = ++webChatSidebarRenderSeq;
+      webHistoryRefreshBtn.disabled = true;
       clearSidebarList();
 
       // Loading indicator
@@ -1001,8 +850,15 @@ export function openStandaloneChat(options?: {
       } catch (err) {
         ztoolkit.log("LLM: standalone webchat sidebar fetch failed", err);
         loadingEl.textContent = t("Failed to fetch history");
+      } finally {
+        webHistoryRefreshBtn.disabled = false;
       }
     };
+
+    webHistoryRefreshBtn.addEventListener("click", () => {
+      if (cancelled || !isInWebChatMode || webHistoryRefreshBtn.disabled) return;
+      void renderWebChatSidebar();
+    });
 
     // -----------------------------------------------------------------------
     // Mount chat UI into contentArea
@@ -1172,10 +1028,6 @@ export function openStandaloneChat(options?: {
           if (cancelled) return;
           sidebarTitle.textContent = t("History");
           renderSidebarItems(conversations);
-        }
-        // Sync popup if currently visible
-        if (historyPopup.style.display !== "none") {
-          void renderHistoryPopup();
         }
       } catch (err) {
         ztoolkit.log("LLM: standalone sidebar render failed", err);
@@ -1427,90 +1279,9 @@ export function openStandaloneChat(options?: {
       }
     });
 
-    // History popup renderer — floating conversation list from collapsed icon strip
-    const renderHistoryPopup = async () => {
-      historyPopup.textContent = "";
-      try {
-        let conversations: ConversationHistoryScopeEntry[];
-        if (standaloneMode === "open") {
-          await ensureGlobalConversationExists(libraryID, activeConversationKey);
-          conversations = await loadConversationHistoryScope({
-            mode: "open", libraryID, limit: 15,
-          });
-        } else {
-          if (!currentBasePaperItem) { conversations = []; }
-          else {
-            const paperID = Number(currentBasePaperItem.id || 0);
-            const paperLibID = Number(currentBasePaperItem.libraryID || libraryID);
-            conversations = await loadConversationHistoryScope({
-              mode: "paper", libraryID: paperLibID, paperItemID: paperID, limit: 15,
-            });
-          }
-        }
-        if (cancelled) return;
-
-        if (conversations.length === 0) {
-          const empty = doc.createElementNS(HTML_NS, "div") as HTMLDivElement;
-          empty.className = "llm-standalone-popup-empty";
-          empty.textContent = t("No conversations yet");
-          historyPopup.appendChild(empty);
-          return;
-        }
-
-        for (const conv of conversations) {
-          const btn = doc.createElementNS(HTML_NS, "button") as HTMLButtonElement;
-          btn.className = "llm-standalone-popup-item";
-          if (conv.conversationKey === activeConversationKey) {
-            btn.classList.add("active");
-          }
-          btn.type = "button";
-          btn.dataset.conversationKey = String(conv.conversationKey);
-          if (conv.sessionVersion !== undefined) {
-            btn.dataset.sessionVersion = String(conv.sessionVersion);
-          }
-          btn.textContent = conv.title || t("Untitled chat");
-          btn.title = conv.title || t("Untitled chat");
-          historyPopup.appendChild(btn);
-        }
-      } catch (err) {
-        ztoolkit.log("LLM: standalone history popup render failed", err);
-      }
-    };
-
-    // History popup click handler — switch conversation
-    historyPopup.addEventListener("click", (e: Event) => {
-      const target = (e.target as HTMLElement).closest(
-        ".llm-standalone-popup-item",
-      ) as HTMLElement | null;
-      if (!target) return;
-      const key = Number(target.dataset.conversationKey);
-      if (!key || key === activeConversationKey) return;
-
-      activeConversationKey = key;
-
-      if (standaloneMode === "open") {
-        const newItem = createGlobalPortalItem(libraryID, key);
-        activeGlobalConversationByLibrary.set(libraryID, key);
-        mountChatPanel(newItem);
-      } else {
-        if (currentBasePaperItem) {
-          const sessionVersion = Number(target.dataset.sessionVersion || 0);
-          const newItem = createPaperPortalItem(currentBasePaperItem, key, sessionVersion);
-          mountChatPanel(newItem);
-        }
-      }
-
-      historyPopup.style.display = "none";
-    });
-
-    // Click-outside dismissal for history popup and export popup
+    // Click-outside dismissal for export popup
     doc.addEventListener("mousedown", (e: Event) => {
       const target = e.target as HTMLElement;
-      if (historyPopup.style.display !== "none") {
-        if (!historyPopup.contains(target) && !iconHistory.contains(target)) {
-          historyPopup.style.display = "none";
-        }
-      }
       if (exportPopup.style.display !== "none") {
         if (!exportPopup.contains(target) && !iconExport.contains(target)) {
           exportPopup.style.display = "none";
@@ -1699,29 +1470,6 @@ export function openStandaloneChat(options?: {
       }
     });
 
-    iconHistory.addEventListener("click", (e: Event) => {
-      e.stopPropagation();
-      exportPopup.style.display = "none";
-      if (historyPopup.style.display !== "none") {
-        historyPopup.style.display = "none";
-        return;
-      }
-      // Position popup to the right of the icon strip
-      const stripRect = iconStrip.getBoundingClientRect();
-      historyPopup.style.position = "fixed";
-      historyPopup.style.left = `${Math.round(stripRect.right + 4)}px`;
-      historyPopup.style.top = `${Math.round(stripRect.top)}px`;
-      historyPopup.style.maxHeight = `${Math.min(400, Math.max(200, Math.round(stripRect.height - 20)))}px`;
-      historyPopup.style.overflowY = "auto";
-      historyPopup.style.display = "flex";
-      // [webchat] Render web history instead of local history
-      if (isInWebChatMode) {
-        void renderWebChatHistoryPopup();
-      } else {
-        void renderHistoryPopup();
-      }
-    });
-
     iconSidebarToggle.addEventListener("click", () => toggleSidebar());
 
     // Icon strip action buttons
@@ -1731,7 +1479,6 @@ export function openStandaloneChat(options?: {
     });
     iconExport.addEventListener("click", (e: Event) => {
       e.stopPropagation();
-      historyPopup.style.display = "none";
       if (exportPopup.style.display !== "none") {
         exportPopup.style.display = "none";
         return;

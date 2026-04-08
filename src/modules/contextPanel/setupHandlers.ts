@@ -342,6 +342,8 @@ export type SetupHandlersHooks = {
   onWebChatModeChanged?: (isWebChat: boolean) => void;
   /** Called by standalone to clear force-new-chat intent before loading a session. */
   clearWebChatNewChatIntent?: () => void;
+  /** Called by standalone to resolve the currently selected model consistently. */
+  getCurrentModelName?: () => string | null;
 };
 
 export function setupHandlers(
@@ -6128,6 +6130,7 @@ export function setupHandlers(
       clearNextWebChatNewChatIntent();
       resetWebChatPdfUploadedForCurrentConversation();
     };
+    hooks.getCurrentModelName = () => getSelectedModelInfo().currentModel || null;
   }
 
   const startWebChatConnectionCheck = (dot: HTMLElement) => {
