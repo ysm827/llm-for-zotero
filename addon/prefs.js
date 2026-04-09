@@ -25,3 +25,4 @@ pref("obsidianNoteTemplate", "");
 pref("locale", "auto");
 pref("mineruAutoWatchCollections", "");
 pref("mineruGlobalAutoParse", false);
+pref("mineruExcludePatterns", "");

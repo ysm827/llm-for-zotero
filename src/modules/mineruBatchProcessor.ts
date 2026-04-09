@@ -1,4 +1,4 @@
-import { getMineruApiKey } from "../utils/mineruConfig";
+import { getMineruApiKey, isFilenameExcluded } from "../utils/mineruConfig";
 import {
   parsePdfWithMineruCloud,
   MineruRateLimitError,
@@ -138,10 +138,14 @@ async function buildQueue(): Promise<void> {
     return db > da ? 1 : db < da ? -1 : 0;
   });
 
-  // Build queue — skip items already cached
+  // Build queue — skip items already cached or excluded by filename pattern
   queue = [];
   let processed = 0;
   for (const { item, pdfAtt } of candidates) {
+    const pdfFilename =
+      (pdfAtt as unknown as { attachmentFilename?: string })
+        .attachmentFilename || "";
+    if (isFilenameExcluded(pdfFilename)) continue;
     const cached = await hasCachedMineruMd(pdfAtt.id);
     const parentTitle = item.getField("title") || `Item ${item.id}`;
     // Count PDFs for this parent to decide whether to show attachment name
@@ -340,11 +344,15 @@ export async function processSelectedItems(
   if (state.running) return;
   if (attachmentIds.length === 0) return;
 
-  // Build a queue from the selected IDs
+  // Build a queue from the selected IDs — skip excluded filenames
   queue = [];
   for (const attId of attachmentIds) {
     const pdfItem = Zotero.Items.get(attId);
     if (!pdfItem) continue;
+    const pdfFilename =
+      (pdfItem as unknown as { attachmentFilename?: string })
+        .attachmentFilename || "";
+    if (isFilenameExcluded(pdfFilename)) continue;
     const parentId = pdfItem.parentID;
     const parentItem = parentId ? Zotero.Items.get(parentId) : null;
     const title = parentItem?.getField?.("title") || `Item ${attId}`;
@@ -449,6 +457,7 @@ export type MineruItemEntry = {
   year: string;
   dateAdded: string;
   cached: boolean;
+  excluded: boolean;
   collectionIds: number[];
 };
 
@@ -545,6 +554,10 @@ export async function getMineruItemList(): Promise<MineruItemEntry[]> {
       for (const pdfAtt of pdfs) {
         const cached = await hasCachedMineruMd(pdfAtt.id);
         const pdfTitle = pdfAtt.getField?.("title") || `PDF ${pdfAtt.id}`;
+        const pdfFilename =
+          (pdfAtt as unknown as { attachmentFilename?: string })
+            .attachmentFilename || pdfTitle;
+        const excluded = isFilenameExcluded(pdfFilename);
         results.push({
           parentItemId: item.id,
           attachmentId: pdfAtt.id,
@@ -554,6 +567,7 @@ export async function getMineruItemList(): Promise<MineruItemEntry[]> {
           year,
           dateAdded,
           cached,
+          excluded,
           collectionIds,
         });
       }

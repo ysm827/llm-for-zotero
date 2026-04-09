@@ -34,6 +34,7 @@ declare namespace _ZoteroTypes {
       "locale": string;
       "mineruAutoWatchCollections": string;
       "mineruGlobalAutoParse": boolean;
+      "mineruExcludePatterns": string;
     };
   }
 }

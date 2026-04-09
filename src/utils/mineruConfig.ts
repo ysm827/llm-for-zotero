@@ -67,3 +67,44 @@ export function removeAutoWatchCollection(collectionId: number): void {
 export function isAutoWatchCollection(collectionId: number): boolean {
   return getAutoWatchCollectionIds().has(collectionId);
 }
+
+// ── Filename Exclusion Patterns ─────────────────────────────────────────────
+
+const MINERU_EXCLUDE_PATTERNS_KEY = `${config.prefsPrefix}.mineruExcludePatterns`;
+
+export function getMineruExcludePatterns(): string[] {
+  const raw = Zotero.Prefs.get(MINERU_EXCLUDE_PATTERNS_KEY, true);
+  const str = typeof raw === "string" ? raw : "";
+  if (!str) return [];
+  try {
+    const parsed = JSON.parse(str);
+    if (!Array.isArray(parsed)) return [];
+    return parsed
+      .filter((v): v is string => typeof v === "string" && v.trim() !== "")
+      .map((v) => v.trim());
+  } catch {
+    return [];
+  }
+}
+
+export function setMineruExcludePatterns(patterns: string[]): void {
+  Zotero.Prefs.set(MINERU_EXCLUDE_PATTERNS_KEY, JSON.stringify(patterns), true);
+}
+
+export function isFilenameExcluded(filename: string): boolean {
+  const patterns = getMineruExcludePatterns();
+  if (patterns.length === 0) return false;
+  const lower = filename.toLowerCase();
+  for (const pat of patterns) {
+    if (pat.startsWith("/") && pat.endsWith("/") && pat.length > 2) {
+      try {
+        if (new RegExp(pat.slice(1, -1), "i").test(filename)) return true;
+      } catch {
+        /* invalid regex — skip */
+      }
+    } else {
+      if (lower.includes(pat.toLowerCase())) return true;
+    }
+  }
+  return false;
+}

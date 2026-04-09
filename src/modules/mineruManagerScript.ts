@@ -788,6 +788,8 @@ export async function registerMineruManagerScript(
       if (allChildrenSelected)
         parentRow.style.background =
           "color-mix(in srgb, var(--color-accent, #2563eb) 12%, transparent)";
+      const allExcluded = group.children.every((c) => c.excluded);
+      if (allExcluded) parentRow.style.opacity = "0.45";
 
       // Checkbox
       if (hasSelection) {
@@ -964,6 +966,7 @@ export async function registerMineruManagerScript(
       if (!collapsed) {
         for (const child of group.children) {
           const childRow = buildItemRow(child, { isChild: true });
+          if (child.excluded) childRow.style.opacity = "0.45";
           if (selectedIds.has(child.attachmentId))
             childRow.style.background =
               "color-mix(in srgb, var(--color-accent, #2563eb) 12%, transparent)";
@@ -1186,7 +1189,7 @@ export async function registerMineruManagerScript(
         const entry = allItems.find((i) => i.attachmentId === id);
         if (entry) entry.cached = false;
       }
-      localProcessedCount = allItems.filter((i) => i.cached).length;
+      localProcessedCount = allItems.filter((i) => !i.excluded && i.cached).length;
       updateProgressBar();
     });
     addHover(ctxDeleteBtn);
@@ -1338,7 +1341,7 @@ export async function registerMineruManagerScript(
         }
         selectedIds.clear();
         lastClickedId = null;
-        localProcessedCount = allItems.filter((i) => i.cached).length;
+        localProcessedCount = allItems.filter((i) => !i.excluded && i.cached).length;
         updateProgressBar();
         renderItemsList();
       } else if (isSubfolder() || activeCollectionId === "unfiled") {
@@ -1354,7 +1357,7 @@ export async function registerMineruManagerScript(
           const entry = allItems.find((i) => i.attachmentId === id);
           if (entry) entry.cached = false;
         }
-        localProcessedCount = allItems.filter((i) => i.cached).length;
+        localProcessedCount = allItems.filter((i) => !i.excluded && i.cached).length;
         updateProgressBar();
         renderItemsList();
       } else {
@@ -1388,8 +1391,9 @@ export async function registerMineruManagerScript(
       collectionTree = [];
     }
     buildCollectionMaps();
-    localTotalCount = allItems.length;
-    localProcessedCount = allItems.filter((i) => i.cached).length;
+    const actionableItems = allItems.filter((i) => !i.excluded);
+    localTotalCount = actionableItems.length;
+    localProcessedCount = actionableItems.filter((i) => i.cached).length;
     updateProgressBar();
   }
 

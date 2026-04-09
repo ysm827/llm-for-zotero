@@ -48,6 +48,8 @@ import {
   setMineruApiKey,
   isGlobalAutoParseEnabled,
   setGlobalAutoParseEnabled,
+  getMineruExcludePatterns,
+  setMineruExcludePatterns,
 } from "../utils/mineruConfig";
 import {
   getObsidianVaultPath,
@@ -2000,6 +2002,26 @@ export async function registerPrefsScripts(_window: Window | undefined | null) {
     };
     mineruTestBtn.addEventListener("click", () => void runMineruTest());
     mineruTestBtn.addEventListener("command", () => void runMineruTest());
+  }
+
+  // ── Filename exclusion patterns ────────────────────────────────
+  const mineruExcludePatternsInput = doc.querySelector(
+    `#${config.addonRef}-mineru-exclude-patterns`,
+  ) as HTMLInputElement | null;
+  if (mineruExcludePatternsInput) {
+    const patterns = getMineruExcludePatterns();
+    mineruExcludePatternsInput.value = patterns.join(", ");
+    let saveTimer: ReturnType<typeof setTimeout> | null = null;
+    mineruExcludePatternsInput.addEventListener("input", () => {
+      if (saveTimer) clearTimeout(saveTimer);
+      saveTimer = setTimeout(() => {
+        const parsed = mineruExcludePatternsInput.value
+          .split(",")
+          .map((s) => s.trim())
+          .filter(Boolean);
+        setMineruExcludePatterns(parsed);
+      }, 500);
+    });
   }
 
   // ── Language selector ────────────────────────────────────────────

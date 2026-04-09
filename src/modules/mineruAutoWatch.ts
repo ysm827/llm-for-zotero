@@ -1,5 +1,9 @@
 import { config } from "../../package.json";
-import { getMineruApiKey, isGlobalAutoParseEnabled } from "../utils/mineruConfig";
+import {
+  getMineruApiKey,
+  isGlobalAutoParseEnabled,
+  isFilenameExcluded,
+} from "../utils/mineruConfig";
 import {
   parsePdfWithMineruCloud,
   MineruRateLimitError,
@@ -282,6 +286,15 @@ async function handleItemNotification(
       const pdfs = getPdfAttachments(item);
       ztoolkit.log(`MinerU auto-parse: found ${pdfs.length} PDF attachment(s)`);
       for (const pdf of pdfs) {
+        const pdfFilename =
+          (pdf as unknown as { attachmentFilename?: string })
+            .attachmentFilename || "";
+        if (isFilenameExcluded(pdfFilename)) {
+          ztoolkit.log(
+            `MinerU auto-parse: PDF ${pdf.id} excluded by filename pattern`,
+          );
+          continue;
+        }
         if (await hasCachedMineruMd(pdf.id)) {
           ztoolkit.log(`MinerU auto-parse: PDF ${pdf.id} already cached`);
           continue;
@@ -292,6 +305,15 @@ async function handleItemNotification(
       }
     }
     else if (isPdfAttachment(item)) {
+      const pdfFilename =
+        (item as unknown as { attachmentFilename?: string })
+          .attachmentFilename || "";
+      if (isFilenameExcluded(pdfFilename)) {
+        ztoolkit.log(
+          `MinerU auto-parse: PDF ${item.id} excluded by filename pattern`,
+        );
+        continue;
+      }
       if (await hasCachedMineruMd(item.id)) {
         ztoolkit.log(`MinerU auto-parse: PDF ${item.id} already cached`);
         continue;
