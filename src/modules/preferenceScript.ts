@@ -761,9 +761,9 @@ export async function registerPrefsScripts(_window: Window | undefined | null) {
             + "Keep the corresponding chat tab open while using WebChat mode.")
           : group.authMode === "copilot_auth"
             ? t(COPILOT_API_HELPER_TEXT)
-            : t(
-                "codex auth reuses local `codex login` credentials from ~/.codex/auth.json",
-              );
+            : group.authMode === "codex_auth"
+              ? t("codex auth reuses local `codex login` credentials from ~/.codex/auth.json")
+              : "";
       authModeWrap.append(
         authModeLabel,
         authModeSelect,
