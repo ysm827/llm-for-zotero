@@ -26,6 +26,8 @@ export type ProviderPreset = {
   supportsResponsesEndpoint?: boolean;
   /** Whether this provider exposes an OpenAI-compatible /v1/embeddings endpoint. */
   supportsEmbeddings?: boolean;
+  /** Default embedding model name for providers that support embeddings. */
+  defaultEmbeddingModel?: string;
 };
 
 type ParsedApiBase = {
@@ -127,6 +129,7 @@ export const PROVIDER_PRESETS: ProviderPreset[] = [
     matches: makeHostAndPathMatcher(["api.openai.com"], OPENAI_PATHS),
     supportsResponsesEndpoint: true,
     supportsEmbeddings: true,
+    defaultEmbeddingModel: "text-embedding-3-small",
   },
   {
     id: "gemini",
@@ -144,6 +147,7 @@ export const PROVIDER_PRESETS: ProviderPreset[] = [
       GEMINI_PATHS,
     ),
     supportsEmbeddings: true,
+    defaultEmbeddingModel: "gemini-embedding-001",
   },
   {
     id: "anthropic",
@@ -167,7 +171,7 @@ export const PROVIDER_PRESETS: ProviderPreset[] = [
       ["api.minimax.io", "api.minimaxi.com"],
       MINIMAX_PATHS,
     ),
-    supportsEmbeddings: true,
+    supportsEmbeddings: false,
   },
   {
     id: "glm",
@@ -178,7 +182,7 @@ export const PROVIDER_PRESETS: ProviderPreset[] = [
     helperText:
       "Preset uses GLM's Claude-compatible endpoint for agent tool use.",
     matches: makeHostAndPathMatcher(["open.bigmodel.cn"], GLM_PATHS),
-    supportsEmbeddings: true,
+    supportsEmbeddings: false,
   },
   {
     id: "deepseek",
@@ -189,6 +193,7 @@ export const PROVIDER_PRESETS: ProviderPreset[] = [
     helperText: "Preset uses DeepSeek's official API base (v1).",
     matches: makeHostAndPathMatcher(["api.deepseek.com"], DEEPSEEK_PATHS),
     supportsEmbeddings: true,
+    defaultEmbeddingModel: "deepseek-embedding",
   },
   {
     id: "grok",
@@ -199,7 +204,7 @@ export const PROVIDER_PRESETS: ProviderPreset[] = [
     helperText: "Preset uses xAI's official Responses endpoint.",
     matches: makeHostAndPathMatcher(["api.x.ai"], GROK_PATHS),
     supportsResponsesEndpoint: true,
-    supportsEmbeddings: true,
+    supportsEmbeddings: false,
   },
   {
     id: "qwen",
@@ -213,6 +218,7 @@ export const PROVIDER_PRESETS: ProviderPreset[] = [
       QWEN_PATHS,
     ),
     supportsEmbeddings: true,
+    defaultEmbeddingModel: "text-embedding-v4",
   },
   {
     id: "kimi",
@@ -225,7 +231,7 @@ export const PROVIDER_PRESETS: ProviderPreset[] = [
       ["api.moonshot.cn", "api.moonshot.ai"],
       KIMI_PATHS,
     ),
-    supportsEmbeddings: true,
+    supportsEmbeddings: false,
   },
   {
     id: "copilot",

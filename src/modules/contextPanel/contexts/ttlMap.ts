@@ -59,6 +59,16 @@ export class TTLMap<K, V> {
     }
   }
 
+  /** Iterate over all non-expired values. */
+  forEach(fn: (value: V, key: K) => void): void {
+    const now = Date.now();
+    for (const [key, entry] of this.data) {
+      if (now <= entry.expiresAt) {
+        fn(entry.value, key);
+      }
+    }
+  }
+
   get size(): number {
     return this.data.size;
   }

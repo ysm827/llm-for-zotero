@@ -125,7 +125,11 @@ export type PdfContext = {
   avgChunkLength: number;
   fullLength: number;
   embeddings?: number[][];
+  embeddingCacheKey?: string;
   embeddingPromise?: Promise<number[][] | null>;
+  embeddingPromiseKey?: string;
+  /** Last embedding attempt that failed; suppresses retry storms for the same config. */
+  embeddingFailureKey?: string;
   sourceType?: "mineru" | "zotero-worker";
 };
 

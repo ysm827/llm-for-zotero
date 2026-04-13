@@ -111,6 +111,7 @@ import {
   getLastReasoningExpanded,
   getLastUsedReasoningLevel,
   getSelectedModelEntryForItem,
+  getBoolPref,
   getStringPref,
   setLastReasoningExpanded,
 } from "./prefHelpers";
@@ -1346,8 +1347,11 @@ async function buildContextPlanForRequest(params: {
   });
 
   if (plan.selectedPaperCount > 0) {
+    const semanticEnabled = getBoolPref("enableSemanticSearch", false);
     const semanticTag =
-      plan.mode === "retrieval" && checkEmbeddingAvailability()
+      plan.mode === "retrieval" &&
+      semanticEnabled &&
+      checkEmbeddingAvailability()
         ? " + semantic search"
         : "";
     const modeStatus =

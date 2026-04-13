@@ -1,5 +1,9 @@
 import type { ChatMessage, ReasoningConfig } from "../../utils/llmClient";
-import { estimateAvailableContextBudget } from "../../utils/llmClient";
+import {
+  estimateAvailableContextBudget,
+  callEmbeddings,
+  checkEmbeddingAvailability,
+} from "../../utils/llmClient";
 import { estimateTextTokens } from "../../utils/modelInputCap";
 import {
   PAPER_FOLLOWUP_RETRIEVAL_MAX_CHUNKS,
@@ -65,6 +69,26 @@ function setCachedRetrievalCandidates(
     if (first !== undefined) retrievalCandidateCache.delete(first);
   }
   retrievalCandidateCache.set(key, candidates);
+}
+
+/**
+ * Evict retrieval candidates for a specific context item (PDF attachment
+ * or note), or all entries if no contextItemId is given.
+ * Called when chunks change (MinerU refresh) or when the embedding
+ * provider changes (scores become stale).
+ *
+ * Paper keys are formatted as "${parentItemId}:${contextItemId}", so we
+ * match on ":${contextItemId}::" to find the right entries.
+ */
+export function clearRetrievalCandidateCache(contextItemId?: number): void {
+  if (contextItemId == null) {
+    retrievalCandidateCache.clear();
+    return;
+  }
+  const needle = `:${Math.floor(contextItemId)}::`;
+  for (const key of [...retrievalCandidateCache.keys()]) {
+    if (key.includes(needle)) retrievalCandidateCache.delete(key);
+  }
 }
 
 /**
@@ -344,7 +368,6 @@ export async function assembleRetrievedMultiPaperContext(params: {
   question: string;
   contextBudgetTokens: number;
   minChunksByPaper?: Map<string, number>;
-  apiOverrides?: { apiBase?: string; apiKey?: string };
   options?: RetrievedAssemblyOptions;
 }): Promise<RetrievedAssembly> {
   const {
@@ -352,11 +375,21 @@ export async function assembleRetrievedMultiPaperContext(params: {
     question,
     contextBudgetTokens,
     minChunksByPaper,
-    apiOverrides,
     options,
   } = params;
   if (!papers.length || contextBudgetTokens <= 0) {
     return { contextText: "", selectedChunkCount: 0, selectedPaperCount: 0 };
+  }
+
+  // Pre-compute query embedding once so we don't make N identical API calls
+  // for N papers in the loop below.
+  let precomputedQueryEmbedding: number[] | undefined;
+  if (question.trim() && checkEmbeddingAvailability()) {
+    try {
+      precomputedQueryEmbedding = (await callEmbeddings([question]))[0];
+    } catch {
+      // Embedding unavailable — fall back to BM25-only scoring per paper.
+    }
   }
 
   const allCandidates: PaperContextCandidate[] = [];
@@ -370,8 +403,11 @@ export async function assembleRetrievedMultiPaperContext(params: {
       paper.paperContext,
       paper.pdfContext,
       question,
-      apiOverrides,
-      { topK: RETRIEVAL_TOP_K_PER_PAPER, mode: "evidence" },
+      {
+        topK: RETRIEVAL_TOP_K_PER_PAPER,
+        mode: "evidence",
+        precomputedQueryEmbedding,
+      },
     );
     setCachedRetrievalCandidates(paper.paperKey, question, candidates);
     allCandidates.push(...candidates);
@@ -486,10 +522,17 @@ export async function assembleRetrievedMultiPaperContext(params: {
   // Jaccard comparisons against the growing selected set become expensive
   // in Zotero's single-threaded runtime.
   const MAX_MMR_CANDIDATES = 80;
+  // Sort by relevance before slicing so we keep the globally top-ranked
+  // candidates rather than whichever papers happened to be appended first.
+  const sortedCandidates = [...allCandidates].sort(
+    (a, b) =>
+      (relevanceByCandidate.get(candidateKey(b)) || 0) -
+      (relevanceByCandidate.get(candidateKey(a)) || 0),
+  );
   const mmrPool =
-    allCandidates.length > MAX_MMR_CANDIDATES
-      ? allCandidates.slice(0, MAX_MMR_CANDIDATES)
-      : allCandidates;
+    sortedCandidates.length > MAX_MMR_CANDIDATES
+      ? sortedCandidates.slice(0, MAX_MMR_CANDIDATES)
+      : sortedCandidates;
 
   while (remainingTokens > 0 && selected.size < maxChunks) {
     let best: PaperContextCandidate | null = null;
@@ -772,13 +815,8 @@ export async function resolveMultiContextPlan(params: {
 
       // Pre-generate embeddings in the background so they are cached for
       // future retrieval queries (e.g. multi-paper or long conversations).
-      const embeddingOverrides = { apiBase: params.apiBase, apiKey: params.apiKey };
       for (const paper of pinnedPapers) {
-        preGenerateEmbeddings(
-          paper.pdfContext,
-          paper.paperContext.itemId,
-          embeddingOverrides,
-        );
+        preGenerateEmbeddings(paper.pdfContext, paper.paperContext.itemId);
       }
 
       // Include remaining @-referenced (unpinned) papers via retrieval if
@@ -799,10 +837,6 @@ export async function resolveMultiContextPlan(params: {
             question: enrichedQuestion,
             contextBudgetTokens: remainingTokens,
             minChunksByPaper: buildMinChunkMapForRetrievedPapers(otherUnpinned),
-            apiOverrides: {
-              apiBase: params.apiBase,
-              apiKey: params.apiKey,
-            },
           });
         }
       }
@@ -839,10 +873,6 @@ export async function resolveMultiContextPlan(params: {
       question: enrichedQuestion,
       contextBudgetTokens: adjustedContextBudget.contextBudgetTokens,
       minChunksByPaper: buildMinChunkMapForRetrievedPapers(allRetrievalPapers),
-      apiOverrides: {
-        apiBase: params.apiBase,
-        apiKey: params.apiKey,
-      },
       options: {
         guaranteedAbstractPaperKey: activePaper.paperKey,
         maxChunks: PAPER_FOLLOWUP_RETRIEVAL_MAX_CHUNKS,
@@ -876,9 +906,8 @@ export async function resolveMultiContextPlan(params: {
     const full = assembleFullMultiPaperContext({ papers: fullPreferredPapers });
 
     // Pre-generate embeddings for full-text papers in background
-    const embOverrides = { apiBase: params.apiBase, apiKey: params.apiKey };
     for (const paper of fullPreferredPapers) {
-      preGenerateEmbeddings(paper.pdfContext, paper.paperContext.itemId, embOverrides);
+      preGenerateEmbeddings(paper.pdfContext, paper.paperContext.itemId);
     }
 
     if (
@@ -899,10 +928,6 @@ export async function resolveMultiContextPlan(params: {
           question: params.question,
           contextBudgetTokens: remainingTokens,
           minChunksByPaper: new Map<string, number>(),
-          apiOverrides: {
-            apiBase: params.apiBase,
-            apiKey: params.apiKey,
-          },
         });
       }
       const extraBlock =
@@ -964,10 +989,6 @@ export async function resolveMultiContextPlan(params: {
           minChunksByPaper: buildMinChunkMapForRetrievedPapers(
             retrievalCompanionPapers,
           ),
-          apiOverrides: {
-            apiBase: params.apiBase,
-            apiKey: params.apiKey,
-          },
         });
       }
       const combinedContext = appendContextBlocks([
@@ -1011,10 +1032,6 @@ export async function resolveMultiContextPlan(params: {
     question: params.question,
     contextBudgetTokens: adjustedContextBudget.contextBudgetTokens,
     minChunksByPaper: buildMinChunkMapForRetrievedPapers(retrievalPapers),
-    apiOverrides: {
-      apiBase: params.apiBase,
-      apiKey: params.apiKey,
-    },
   });
   const usedContextTokens = estimateTextTokens(retrieved.contextText);
   return {

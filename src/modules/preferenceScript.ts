@@ -42,6 +42,8 @@ import {
   fetchCopilotModelList,
   callEmbeddings,
 } from "../utils/llmClient";
+import { resetEmbeddingFailedFlags } from "./contextPanel/pdfContext";
+import { clearRetrievalCandidateCache } from "./contextPanel/multiContextPlanner";
 import { joinLocalPath } from "../utils/localPath";
 import {
   isMineruEnabled,
@@ -1952,8 +1954,14 @@ export async function registerPrefsScripts(_window: Window | undefined | null) {
       return "";
     };
 
-    // Normalize legacy embedding provider values to the new three-option set
-    const normalizeEmbeddingProvider = (): string => {
+    const readEmbPref = (key: string): string =>
+      (Zotero.Prefs.get(`${config.prefsPrefix}.${key}`, true) || "").toString();
+    const writeEmbPref = (key: string, val: string | boolean) =>
+      Zotero.Prefs.set(`${config.prefsPrefix}.${key}`, val, true);
+
+    // Read the current embedding provider; migrates legacy or unset
+    // values to a concrete provider on first open.
+    const resolveEmbeddingProvider = (): string => {
       const stored = readEmbPref("embeddingProvider");
       if (stored === "openai" || stored === "gemini" || stored === "custom") {
         return stored;
@@ -1962,7 +1970,7 @@ export async function registerPrefsScripts(_window: Window | undefined | null) {
         writeEmbPref("embeddingProvider", "custom");
         return "custom";
       }
-      // "main" or empty → default to "gemini" (free tier available)
+      // "main", empty, or unset → default to "gemini" (free tier available)
       writeEmbPref("embeddingProvider", "gemini");
       writeEmbPref("embeddingApiBase", EMBEDDING_PRESETS.gemini.apiBase);
       if (!readEmbPref("embeddingModel")) {
@@ -1971,11 +1979,6 @@ export async function registerPrefsScripts(_window: Window | undefined | null) {
       return "gemini";
     };
 
-    const readEmbPref = (key: string): string =>
-      (Zotero.Prefs.get(`${config.prefsPrefix}.${key}`, true) || "").toString();
-    const writeEmbPref = (key: string, val: string | boolean) =>
-      Zotero.Prefs.set(`${config.prefsPrefix}.${key}`, val, true);
-
     // Toggle visibility (same pattern as MinerU)
     const syncSemanticVisibility = () => {
       semanticSearchSubSettings.style.display = semanticSearchToggle.checked
@@ -1983,11 +1986,11 @@ export async function registerPrefsScripts(_window: Window | undefined | null) {
         : "none";
     };
 
-    const enabled =
-      Zotero.Prefs.get(
-        `${config.prefsPrefix}.enableSemanticSearch`,
-        true,
-      ) !== false;
+    const enabledRaw = Zotero.Prefs.get(
+      `${config.prefsPrefix}.enableSemanticSearch`,
+      true,
+    );
+    const enabled = enabledRaw === true || enabledRaw === "true";
     semanticSearchToggle.checked = enabled;
     syncSemanticVisibility();
 
@@ -2000,7 +2003,7 @@ export async function registerPrefsScripts(_window: Window | undefined | null) {
     const renderEmbeddingCard = () => {
       semanticSearchMount.innerHTML = "";
 
-      const provider = normalizeEmbeddingProvider();
+      const provider = resolveEmbeddingProvider();
       const preset = EMBEDDING_PRESETS[provider];
       const isCustom = provider === "custom";
 
@@ -2050,7 +2053,13 @@ export async function registerPrefsScripts(_window: Window | undefined | null) {
           // Clear dedicated key — runtime will auto-detect from provider groups
           writeEmbPref("embeddingApiKey", "");
         }
-        renderEmbeddingCard();
+        // Reset failed-embedding flags so queries retry with the new config
+        resetEmbeddingFailedFlags();
+        // Cached retrieval candidates carry scores from the old provider
+        clearRetrievalCandidateCache();
+        // Defer re-render so Gecko finishes processing the select change event
+        // before we destroy the element (avoids "this.element is null" error).
+        doc.defaultView?.setTimeout(() => renderEmbeddingCard(), 0);
       });
       providerWrap.appendChild(providerSelect);
       cardBody.appendChild(providerWrap);
@@ -2092,6 +2101,8 @@ export async function registerPrefsScripts(_window: Window | undefined | null) {
         apiKeyInput.value = readEmbPref("embeddingApiKey");
         apiKeyInput.addEventListener("change", () => {
           writeEmbPref("embeddingApiKey", apiKeyInput.value.trim());
+          resetEmbeddingFailedFlags();
+          clearRetrievalCandidateCache();
         });
         apiKeyWrap.appendChild(apiKeyInput);
         cardBody.appendChild(apiKeyWrap);
@@ -2138,7 +2149,9 @@ export async function registerPrefsScripts(_window: Window | undefined | null) {
           apiKeyInput.value = "";
           apiKeyInput.addEventListener("change", () => {
             writeEmbPref("embeddingApiKey", apiKeyInput.value.trim());
-            renderEmbeddingCard();
+            resetEmbeddingFailedFlags();
+            clearRetrievalCandidateCache();
+            doc.defaultView?.setTimeout(() => renderEmbeddingCard(), 0);
           });
           apiKeyWrap.appendChild(apiKeyInput);
           const providerLabel = provider === "openai" ? "OpenAI" : "Google";
@@ -2215,6 +2228,8 @@ export async function registerPrefsScripts(_window: Window | undefined | null) {
         }
         modelSelect.addEventListener("change", () => {
           writeEmbPref("embeddingModel", modelSelect.value);
+          resetEmbeddingFailedFlags();
+          clearRetrievalCandidateCache();
           updatePricingHint(modelSelect.value);
         });
         modelRow.appendChild(modelSelect);

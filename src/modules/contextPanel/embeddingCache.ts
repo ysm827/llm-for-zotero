@@ -13,7 +13,7 @@
 import { joinLocalPath } from "../../utils/localPath";
 
 const EMBEDDING_CACHE_DIR = "llm-for-zotero-embeddings";
-const CACHE_VERSION = 1;
+const CACHE_VERSION = 2; // v2: added provider field for cross-provider cache isolation
 
 // ── Gecko I/O helpers (mirrors mineruCache.ts) ──────────────────────────────
 
@@ -190,6 +190,8 @@ type EmbeddingCacheEntry = {
   version: number;
   model: string;
   chunkHash: string;
+  /** Embedding provider identifier (e.g. "openai", "gemini", "main:openai") */
+  provider: string;
   dimensions: number;
   count: number;
   embeddings: number[][];
@@ -199,12 +201,13 @@ type EmbeddingCacheEntry = {
 
 /**
  * Attempt to load cached embeddings from disk.
- * Returns null on any mismatch (model, chunkHash, version) or I/O error.
+ * Returns null on any mismatch (model, chunkHash, provider, version) or I/O error.
  */
 export async function loadCachedEmbeddings(
   itemId: number,
   chunkHash: string,
   model: string,
+  provider: string,
 ): Promise<number[][] | null> {
   try {
     const bytes = await readFileBytes(getCachePath(itemId));
@@ -216,6 +219,7 @@ export async function loadCachedEmbeddings(
     if (entry.version !== CACHE_VERSION) return null;
     if (entry.model !== model) return null;
     if (entry.chunkHash !== chunkHash) return null;
+    if (entry.provider !== provider) return null;
     if (
       !Array.isArray(entry.embeddings) ||
       entry.embeddings.length !== entry.count
@@ -236,6 +240,7 @@ export async function saveCachedEmbeddings(
   itemId: number,
   chunkHash: string,
   model: string,
+  provider: string,
   dimensions: number,
   embeddings: number[][],
 ): Promise<void> {
@@ -246,6 +251,7 @@ export async function saveCachedEmbeddings(
       version: CACHE_VERSION,
       model,
       chunkHash,
+      provider,
       dimensions,
       count: embeddings.length,
       embeddings,

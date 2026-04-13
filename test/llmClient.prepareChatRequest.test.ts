@@ -3,6 +3,7 @@ import {
   callEmbeddings,
   callLLM,
   callLLMStream,
+  getResolvedEmbeddingConfig,
   prepareChatRequest,
 } from "../src/utils/llmClient";
 
@@ -205,19 +206,44 @@ describe("llmClient prepareChatRequest", function () {
     assert.equal(prepared.authMode, "codex_auth");
   });
 
-  it("blocks embeddings when codex auth mode is selected", async function () {
+  it("throws when no dedicated embedding provider is configured", async function () {
+    const setPref = globalThis.Zotero.Prefs.set as (
+      key: string,
+      value: unknown,
+    ) => void;
+    setPref("extensions.zotero.llmforzotero.embeddingProvider", "");
+    setPref("extensions.zotero.llmforzotero.embeddingApiBase", "");
     try {
-      await callEmbeddings(["hello"], {
-        apiBase: "https://chatgpt.com/backend-api/codex/responses",
-        authMode: "codex_auth",
-      });
+      await callEmbeddings(["hello"]);
       assert.fail("expected callEmbeddings to throw");
     } catch (error) {
       assert.include(
         (error as Error).message,
-        "does not support embeddings",
+        "No embedding provider configured",
       );
     }
+  });
+
+  it("changes embedding keys when the dedicated provider config changes", function () {
+    const setPref = globalThis.Zotero.Prefs.set as (
+      key: string,
+      value: unknown,
+    ) => void;
+    setPref("extensions.zotero.llmforzotero.embeddingProvider", "openai");
+    setPref("extensions.zotero.llmforzotero.embeddingApiBase", "https://api.openai.com/v1");
+    setPref("extensions.zotero.llmforzotero.embeddingApiKey", "sk-first");
+    setPref("extensions.zotero.llmforzotero.embeddingModel", "text-embedding-3-small");
+    const initial = getResolvedEmbeddingConfig();
+
+    setPref("extensions.zotero.llmforzotero.embeddingApiBase", "https://proxy.example/v1");
+    const endpointChanged = getResolvedEmbeddingConfig();
+
+    setPref("extensions.zotero.llmforzotero.embeddingApiBase", "https://api.openai.com/v1");
+    setPref("extensions.zotero.llmforzotero.embeddingApiKey", "sk-second");
+    const keyChanged = getResolvedEmbeddingConfig();
+
+    assert.notEqual(initial.providerKey, endpointChanged.providerKey);
+    assert.notEqual(initial.attemptKey, keyChanged.attemptKey);
   });
 
   it("refreshes codex auth token on 401 and retries once", async function () {

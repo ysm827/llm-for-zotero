@@ -1,7 +1,7 @@
 import {
   callEmbeddings,
   EmbeddingUnsupportedError,
-  getEmbeddingModelName,
+  getResolvedEmbeddingConfig,
   checkEmbeddingAvailability,
   getEmbeddingUnavailableReason,
 } from "../../utils/llmClient";
@@ -26,7 +26,7 @@ import {
 } from "./paperAttribution";
 import { readNoteSnapshot } from "./notes";
 import { pdfTextCache, pdfTextLoadingTasks } from "./state";
-import { readCachedMineruMd, invalidateMineruMd, ensureManifest } from "./mineruCache";
+import { readCachedMineruMd, ensureManifest } from "./mineruCache";
 import type { MineruManifest, ManifestSection } from "./mineruCache";
 import { isMineruEnabled } from "../../utils/mineruConfig";
 import type {
@@ -332,14 +332,39 @@ export async function ensureNoteTextCached(item: Zotero.Item): Promise<void> {
   await task;
 }
 
+/**
+ * Reset embedding failure markers on all cached PdfContexts.
+ * Called when the user changes embedding provider config in preferences,
+ * so subsequent queries re-attempt embeddings with the new settings.
+ */
+export function resetEmbeddingFailedFlags(): void {
+  pdfTextCache.forEach((ctx) => {
+    ctx.embeddingFailureKey = undefined;
+  });
+}
+
 export function invalidateCachedContextText(itemId: number): void {
   if (!Number.isFinite(itemId) || itemId <= 0) return;
   const normalizedItemId = Math.floor(itemId);
   pdfTextCache.delete(normalizedItemId);
   pdfTextLoadingTasks.delete(normalizedItemId);
-  invalidateMineruMd(normalizedItemId).catch((e) => {
-    ztoolkit.log("MinerU cache invalidation failed:", e);
-  });
+  // Clear retrieval candidate cache — cached candidates carry stale chunk
+  // text and scores after a MinerU refresh.  Lazy import to avoid circular
+  // dependency (multiContextPlanner imports from pdfContext).
+  import("./multiContextPlanner")
+    .then(({ clearRetrievalCandidateCache }) =>
+      clearRetrievalCandidateCache(normalizedItemId),
+    )
+    .catch(() => {});
+  // Clear embedding cache — chunks will change when MinerU content is refreshed,
+  // so cached embeddings are stale. Do NOT delete MinerU files themselves:
+  // this function is called right after writeMineruCacheFiles(), so deleting
+  // the MinerU directory would destroy the freshly written content.
+  import("./embeddingCache")
+    .then(({ clearEmbeddingCache }) => clearEmbeddingCache(normalizedItemId))
+    .catch((e) => {
+      ztoolkit.log("Embedding cache invalidation failed:", e);
+    });
 }
 
 // ── Markdown-aware chunking (MinerU only) ─────────────────────────────────────
@@ -1133,12 +1158,11 @@ function cosineSimilarity(a: number[], b: number[]): number {
 
 async function embedTexts(
   texts: string[],
-  overrides?: { apiBase?: string; apiKey?: string },
 ): Promise<number[][]> {
   const all: number[][] = [];
   for (let i = 0; i < texts.length; i += EMBEDDING_BATCH_SIZE) {
     const batch = texts.slice(i, i + EMBEDDING_BATCH_SIZE);
-    const batchEmbeddings = await callEmbeddings(batch, overrides);
+    const batchEmbeddings = await callEmbeddings(batch);
     all.push(...batchEmbeddings);
   }
   return all;
@@ -1146,19 +1170,41 @@ async function embedTexts(
 
 async function ensureEmbeddings(
   pdfContext: PdfContext,
-  overrides?: { apiBase?: string; apiKey?: string },
   itemId?: number,
 ): Promise<boolean> {
-  // Layer 1: In-memory — already loaded
-  if (pdfContext.embeddings && pdfContext.embeddings.length) {
+  let embeddingConfig: ReturnType<typeof getResolvedEmbeddingConfig>;
+  try {
+    embeddingConfig = getResolvedEmbeddingConfig();
+  } catch {
+    return false;
+  }
+  const embeddingModel = embeddingConfig.model;
+  const providerKey = embeddingConfig.providerKey;
+  const embeddingCacheKey = embeddingConfig.cacheKey;
+  const embeddingAttemptKey = embeddingConfig.attemptKey;
+
+  // Previously failed — don't retry until the effective embedding config changes.
+  if (pdfContext.embeddingFailureKey === embeddingAttemptKey) return false;
+
+  // Layer 1: In-memory — already loaded for this provider/model combination
+  if (
+    pdfContext.embeddings &&
+    pdfContext.embeddings.length &&
+    pdfContext.embeddingCacheKey === embeddingCacheKey
+  ) {
     return pdfContext.embeddings.length === pdfContext.chunks.length;
   }
 
   // Dedup concurrent calls: join existing in-flight promise
-  if (pdfContext.embeddingPromise) {
+  if (
+    pdfContext.embeddingPromise &&
+    pdfContext.embeddingPromiseKey === embeddingAttemptKey
+  ) {
     const result = await pdfContext.embeddingPromise;
     if (result) {
       pdfContext.embeddings = result;
+      pdfContext.embeddingCacheKey = embeddingCacheKey;
+      pdfContext.embeddingFailureKey = undefined;
       return result.length === pdfContext.chunks.length;
     }
     return false;
@@ -1166,15 +1212,13 @@ async function ensureEmbeddings(
 
   // Layers 2+3: assign the promise slot FIRST (atomically) so concurrent
   // callers join this promise instead of starting a duplicate API call.
-  const embeddingModel = getEmbeddingModelName();
   const chunkHash = computeChunkHash(pdfContext.chunks);
   const chunkCount = pdfContext.chunks.length;
-
-  pdfContext.embeddingPromise = (async () => {
+  const promise = (async () => {
     // Layer 2: Disk cache — check before calling the API
     if (itemId != null) {
       try {
-        const cached = await loadCachedEmbeddings(itemId, chunkHash, embeddingModel);
+        const cached = await loadCachedEmbeddings(itemId, chunkHash, embeddingModel, providerKey);
         if (cached && cached.length === chunkCount) return cached;
       } catch {
         /* disk cache miss or read error — continue to API */
@@ -1183,7 +1227,7 @@ async function ensureEmbeddings(
 
     // Layer 3: API call
     try {
-      return await embedTexts(pdfContext.chunks, overrides);
+      return await embedTexts(pdfContext.chunks);
     } catch (err) {
       if (err instanceof EmbeddingUnsupportedError) {
         ztoolkit.log(
@@ -1199,23 +1243,34 @@ async function ensureEmbeddings(
       return null;
     }
   })();
+  pdfContext.embeddingPromise = promise;
+  pdfContext.embeddingPromiseKey = embeddingAttemptKey;
 
-  const result = await pdfContext.embeddingPromise;
-  pdfContext.embeddingPromise = undefined;
+  const result = await promise;
+  const ownsPromiseSlot = pdfContext.embeddingPromise === promise;
+  if (ownsPromiseSlot) {
+    pdfContext.embeddingPromise = undefined;
+    pdfContext.embeddingPromiseKey = undefined;
+  }
   if (result) {
     pdfContext.embeddings = result;
+    pdfContext.embeddingCacheKey = embeddingCacheKey;
+    pdfContext.embeddingFailureKey = undefined;
     // Persist to disk cache in background (fire-and-forget)
     if (itemId != null && result.length > 0) {
       const dims = result[0].length;
-      saveCachedEmbeddings(itemId, chunkHash, embeddingModel, dims, result).catch(
+      saveCachedEmbeddings(itemId, chunkHash, embeddingModel, providerKey, dims, result).catch(
         (err) =>
           ztoolkit.log("[Semantic Search] Embedding cache write failed:", err),
       );
     }
     return result.length === chunkCount;
   }
-  // Let subsequent queries retry — the user may fix their config between queries,
-  // and shouldTryEmbeddings() already gates unsupported providers.
+  // Only mark failure if we still own the slot — a newer call with a
+  // different config should not be blocked by this failure.
+  if (ownsPromiseSlot) {
+    pdfContext.embeddingFailureKey = embeddingAttemptKey;
+  }
   return false;
 }
 
@@ -1228,14 +1283,30 @@ async function ensureEmbeddings(
 export function preGenerateEmbeddings(
   pdfContext: PdfContext | undefined,
   itemId: number,
-  apiOverrides?: { apiBase?: string; apiKey?: string },
 ): void {
   if (!pdfContext || !pdfContext.chunks.length) return;
   if (!shouldTryEmbeddings()) return;
-  // Already loaded or in-flight — nothing to do
-  if (pdfContext.embeddings?.length || pdfContext.embeddingPromise) return;
+  let embeddingConfig: ReturnType<typeof getResolvedEmbeddingConfig>;
+  try {
+    embeddingConfig = getResolvedEmbeddingConfig();
+  } catch {
+    return;
+  }
+  // Already loaded or in-flight for this exact embedding config — nothing to do
+  if (
+    pdfContext.embeddings?.length &&
+    pdfContext.embeddingCacheKey === embeddingConfig.cacheKey
+  ) {
+    return;
+  }
+  if (
+    pdfContext.embeddingPromise &&
+    pdfContext.embeddingPromiseKey === embeddingConfig.attemptKey
+  ) {
+    return;
+  }
 
-  ensureEmbeddings(pdfContext, apiOverrides, itemId).catch((err) => {
+  ensureEmbeddings(pdfContext, itemId).catch((err) => {
     if (typeof ztoolkit !== "undefined") {
       ztoolkit.log("[Semantic Search] Background embedding pre-generation failed:", err);
     }
@@ -1354,13 +1425,11 @@ export function buildTruncatedFullPaperContext(
 }
 
 function shouldTryEmbeddings(): boolean {
-  // Respect the user's "Enable semantic search" toggle
+  // Respect the user's "Enable semantic search" toggle (off by default)
   const enabledPref = getPref("enableSemanticSearch");
-  if (enabledPref === false || enabledPref === "false") return false;
+  if (enabledPref !== true && enabledPref !== "true") return false;
 
   // Delegate to the centralized availability check in llmClient.
-  // This correctly handles: separate embedding providers, codex_auth,
-  // Anthropic (supportsEmbeddings=false), and all other providers.
   const available = checkEmbeddingAvailability();
   if (!available && typeof ztoolkit !== "undefined") {
     const reason = getEmbeddingUnavailableReason();
@@ -1530,10 +1599,11 @@ export async function buildPaperRetrievalCandidates(
   paperContext: PaperContextRef,
   pdfContext: PdfContext | undefined,
   question: string,
-  apiOverrides?: { apiBase?: string; apiKey?: string },
   options?: {
     topK?: number;
     mode?: "general" | "evidence";
+    /** Pre-computed query embedding to avoid redundant API calls in multi-paper loops. */
+    precomputedQueryEmbedding?: number[];
   },
 ): Promise<PaperContextCandidate[]> {
   if (!pdfContext) return [];
@@ -1569,13 +1639,13 @@ export async function buildPaperRetrievalCandidates(
   if (question.trim() && shouldTryEmbeddings()) {
     const embeddingsReady = await ensureEmbeddings(
       pdfContext,
-      apiOverrides,
       paperContext.itemId,
     );
     if (embeddingsReady && pdfContext.embeddings) {
       try {
         const queryEmbedding =
-          (await callEmbeddings([question], apiOverrides))[0] || [];
+          options?.precomputedQueryEmbedding ||
+          (await callEmbeddings([question]))[0] || [];
         if (queryEmbedding.length) {
           rawEmbeddingScores = pdfContext.embeddings.map((vec) =>
             cosineSimilarity(queryEmbedding, vec),
