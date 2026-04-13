@@ -161,16 +161,22 @@
             "
           >
             <html:input
-              id="__addonRef__-enable-query-rewrite"
+              id="__addonRef__-enable-semantic-search"
               type="checkbox"
             ></html:input>
-            Rewrite queries for retrieval
+            Semantic Search
           </html:label>
           <html:span style="font-size: 11px; color: var(--fill-secondary, #888); margin-top: 1px; display: block;">
-            Uses a lightweight LLM call to rewrite your question into
-            retrieval-optimized keywords before searching paper content.
-            Improves accuracy for vague queries but adds latency.
+            Uses vector embeddings for meaning-aware search. When disabled,
+            only keyword matching (BM25) is used.
           </html:span>
+        </html:div>
+        <html:div
+          id="__addonRef__-semantic-search-sub-settings"
+          style="display: none; flex-direction: column; gap: 10px;"
+        >
+          <!-- Card rendered dynamically by preferenceScript.ts -->
+          <html:div id="__addonRef__-semantic-search-mount"></html:div>
         </html:div>
 
         <html:div style="display: flex; flex-direction: column; gap: 4px">

@@ -20,6 +20,7 @@ import {
   ReasoningEvent,
   ReasoningLevel as LLMReasoningLevel,
   UsageStats,
+  checkEmbeddingAvailability,
 } from "../../utils/llmClient";
 import { estimateConversationTokens } from "../../utils/modelInputCap";
 import type { ProviderProtocol } from "../../utils/providerProtocol";
@@ -1345,14 +1346,18 @@ async function buildContextPlanForRequest(params: {
   });
 
   if (plan.selectedPaperCount > 0) {
+    const semanticTag =
+      plan.mode === "retrieval" && checkEmbeddingAvailability()
+        ? " + semantic search"
+        : "";
     const modeStatus =
       plan.strategy === "paper-first-full"
         ? "Using full paper text (first turn)"
         : plan.strategy === "paper-followup-retrieval"
-          ? `Using focused retrieval (${plan.selectedChunkCount} chunks)`
+          ? `Retrieval${semanticTag} (${plan.selectedChunkCount} chunks)`
           : plan.mode === "full"
             ? `Using full context (${plan.selectedPaperCount} papers)`
-            : `Using retrieved evidence (${plan.selectedPaperCount} papers, ${plan.selectedChunkCount} chunks)`;
+            : `Retrieval${semanticTag} (${plan.selectedPaperCount} papers, ${plan.selectedChunkCount} chunks)`;
     params.setStatusSafely(modeStatus, "sending");
   }
   ztoolkit.log("LLM: Multi-context plan", {
@@ -2221,7 +2226,7 @@ export async function retryLatestAssistantResponse(
     const retryPdfKeys = derivePdfModePaperKeys(retryPair.userMessage.attachments, item);
 
     // Create AbortController early so the signal is available during context
-    // planning (e.g. for the retrieval query-rewrite LLM call).
+    // planning.
     const AbortControllerCtor = getAbortControllerCtor();
     setAbortController(
       conversationKey,
@@ -3113,7 +3118,7 @@ export async function sendQuestion(opts: import("./types").SendQuestionOptions) 
     const recentPaperContexts = collectRecentPaperContexts(historyForLLM);
 
     // Create AbortController early so the signal is available during context
-    // planning (e.g. for the retrieval query-rewrite LLM call).
+    // planning.
     const AbortControllerCtor = getAbortControllerCtor();
     setAbortController(
       conversationKey,

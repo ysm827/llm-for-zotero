@@ -126,7 +126,6 @@ export type PdfContext = {
   fullLength: number;
   embeddings?: number[][];
   embeddingPromise?: Promise<number[][] | null>;
-  embeddingFailed?: boolean;
   sourceType?: "mineru" | "zotero-worker";
 };
 

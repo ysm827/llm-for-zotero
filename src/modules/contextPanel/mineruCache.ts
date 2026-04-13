@@ -654,6 +654,13 @@ export async function invalidateMineruMd(id: number): Promise<void> {
   await removePath(getMineruItemDir(id));
   // Also remove legacy single-file cache
   await removePath(getLegacyMdPath(id));
+  // Cascade: clear embedding cache since chunks will change
+  try {
+    const { clearEmbeddingCache } = await import("./embeddingCache");
+    await clearEmbeddingCache(id);
+  } catch {
+    /* embedding cache module may not be loaded yet */
+  }
 }
 
 /**

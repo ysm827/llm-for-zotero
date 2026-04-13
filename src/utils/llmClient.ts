@@ -49,9 +49,15 @@ import {
 import {
   getDefaultModelEntry,
   getDefaultProviderGroup,
+  getModelProviderGroups,
   type ModelProviderAuthMode,
 } from "./modelProviders";
-import { isGrokApiBase, providerSupportsResponsesEndpoint } from "./providerPresets";
+import {
+  detectProviderPreset,
+  getProviderPreset,
+  isGrokApiBase,
+  providerSupportsResponsesEndpoint,
+} from "./providerPresets";
 import type { ProviderProtocol } from "./providerProtocol";
 import {
   buildProviderTransportHeaders,
@@ -195,7 +201,7 @@ interface CompletionResponse {
 }
 
 interface EmbeddingResponse {
-  data?: Array<{ embedding?: number[] }>;
+  data?: Array<{ index?: number; embedding?: number[] }>;
 }
 
 // =============================================================================
@@ -288,6 +294,13 @@ function getApiConfig(overrides?: {
       : DEFAULT_SYSTEM_PROMPT,
     providerProtocol,
   };
+}
+
+/**
+ * Returns the currently configured embedding model name.
+ */
+export function getEmbeddingModelName(): string {
+  return getPref("embeddingModel") || DEFAULT_EMBEDDING_MODEL;
 }
 
 type IOUtilsLike = {
@@ -2888,8 +2901,91 @@ export async function callLLMStream(
 }
 
 /**
- * Call embeddings API
+ * Lightweight pre-check: will `callEmbeddings` work with the current config?
+ * Returns `true` if a viable embedding endpoint is available (either a
+ * separate provider or a main provider that supports embeddings).
+ * Does NOT make any network calls.
  */
+export function checkEmbeddingAvailability(): boolean {
+  const embeddingProvider = (getPref("embeddingProvider") || "main").trim();
+  const embeddingApiBase = (getPref("embeddingApiBase") || "").trim();
+
+  // Separate embedding provider configured — always available
+  if (embeddingProvider !== "main" && embeddingApiBase) return true;
+
+  // Main provider — check auth mode and preset support.
+  // getApiConfig() can throw when no API base is configured at all
+  // (fresh install, unconfigured user). Treat that as "unavailable".
+  let config: ReturnType<typeof getApiConfig>;
+  try {
+    config = getApiConfig();
+  } catch {
+    return false;
+  }
+  if (config.authMode === "codex_auth") return false;
+  if (config.authMode === "copilot_auth") return false;
+
+  const presetId = detectProviderPreset(config.apiBase);
+  if (presetId !== "customized") {
+    const preset = getProviderPreset(presetId);
+    if (preset && preset.supportsEmbeddings === false) return false;
+  }
+
+  return Boolean(config.apiBase.trim());
+}
+
+/**
+ * Diagnostic: returns a human-readable reason why embeddings are unavailable.
+ * Used by the preference UI to show actionable guidance.
+ */
+export function getEmbeddingUnavailableReason(): string | null {
+  const embeddingProvider = (getPref("embeddingProvider") || "main").trim();
+  const embeddingApiBase = (getPref("embeddingApiBase") || "").trim();
+
+  if (embeddingProvider !== "main" && embeddingApiBase) return null; // available
+
+  let config: ReturnType<typeof getApiConfig>;
+  try {
+    config = getApiConfig();
+  } catch {
+    return "No API base is configured.";
+  }
+
+  if (config.authMode === "codex_auth") {
+    return "Codex Auth does not provide an embeddings endpoint. Select a separate embedding provider above (e.g. OpenAI, Ollama, Gemini).";
+  }
+  if (config.authMode === "copilot_auth") {
+    return "Copilot Auth does not provide an embeddings endpoint. Select a separate embedding provider above (e.g. OpenAI, Ollama, Gemini).";
+  }
+
+  const presetId = detectProviderPreset(config.apiBase);
+  if (presetId !== "customized") {
+    const preset = getProviderPreset(presetId);
+    if (preset && preset.supportsEmbeddings === false) {
+      return `${preset.label} does not provide an embeddings endpoint. Select a separate embedding provider above (e.g. OpenAI, Ollama, Gemini).`;
+    }
+  }
+
+  return null; // available
+}
+
+/**
+ * Error thrown when the configured provider does not support embeddings.
+ * Callers can check `instanceof EmbeddingUnsupportedError` to distinguish
+ * from network or API errors and show appropriate user guidance.
+ */
+export class EmbeddingUnsupportedError extends Error {
+  providerLabel: string;
+  constructor(providerLabel: string) {
+    super(
+      `Provider "${providerLabel}" does not support embeddings. ` +
+        "Configure a separate embedding provider in Settings → Customization.",
+    );
+    this.name = "EmbeddingUnsupportedError";
+    this.providerLabel = providerLabel;
+  }
+}
+
 export async function callEmbeddings(
   input: string[],
   overrides?: {
@@ -2898,16 +2994,72 @@ export async function callEmbeddings(
     authMode?: ModelProviderAuthMode;
   },
 ): Promise<number[][]> {
-  const { apiBase, apiKey, authMode, embeddingModel } = getApiConfig({
+  const config = getApiConfig({
     apiBase: overrides?.apiBase,
     apiKey: overrides?.apiKey,
     authMode: overrides?.authMode,
   });
-  if (authMode === "codex_auth") {
-    throw new Error(
-      "codex auth currently does not support embeddings in this plugin v1.",
-    );
+
+  // Resolve embedding-specific provider config if set
+  const embeddingApiBase = (getPref("embeddingApiBase") || "").trim();
+  const embeddingApiKey = (getPref("embeddingApiKey") || "").trim();
+  const embeddingProvider = (getPref("embeddingProvider") || "main").trim();
+
+  let apiBase: string;
+  let apiKey: string;
+  const embeddingModel = config.embeddingModel;
+
+  if (embeddingProvider !== "main" && embeddingApiBase) {
+    // User configured a separate embedding provider.
+    apiBase = embeddingApiBase;
+    apiKey = embeddingApiKey;
+
+    // Auto-detect API key from matching provider group (OpenAI / Gemini reuse)
+    if (!apiKey && embeddingProvider !== "custom") {
+      const groups = getModelProviderGroups();
+      for (const group of groups) {
+        if (!group.apiKey.trim() || group.authMode !== "api_key") continue;
+        if (detectProviderPreset(group.apiBase) === embeddingProvider) {
+          apiKey = group.apiKey.trim();
+          break;
+        }
+      }
+    }
+
+    // Fall back to main provider key if compatible
+    if (!apiKey) {
+      const mainKeyUsable =
+        config.authMode !== "codex_auth" && config.authMode !== "copilot_auth";
+      if (mainKeyUsable) apiKey = config.apiKey;
+    }
+
+    if (!apiKey) {
+      throw new Error(
+        `Embedding provider "${embeddingProvider}" requires an API key. ` +
+          "Set it in Settings → Customization → Semantic Search.",
+      );
+    }
+  } else {
+    // Use main chat provider — check if it supports embeddings
+    apiBase = config.apiBase;
+    apiKey = config.apiKey;
+
+    // Detect provider and check embedding support
+    const presetId = detectProviderPreset(apiBase);
+    if (presetId !== "customized") {
+      const preset = getProviderPreset(presetId);
+      if (preset && preset.supportsEmbeddings === false) {
+        throw new EmbeddingUnsupportedError(preset.label);
+      }
+    }
+
+    // codex_auth doesn't support embeddings natively — only proceed
+    // if user has a separate embedding provider configured (handled above)
+    if (config.authMode === "codex_auth") {
+      throw new EmbeddingUnsupportedError("Codex Auth");
+    }
   }
+
   const payload = {
     model: embeddingModel,
     input,
@@ -2926,8 +3078,13 @@ export async function callEmbeddings(
   }
 
   const data = (await res.json()) as EmbeddingResponse;
-  const embeddings = data?.data?.map((item) => item.embedding || []) || [];
-  return embeddings;
+  // Sort by index to guarantee correct alignment with input order —
+  // non-conforming providers may return results out of order, and a
+  // misaligned response would be permanently cached to disk.
+  const sorted = [...(data?.data || [])].sort(
+    (a, b) => (a.index ?? 0) - (b.index ?? 0),
+  );
+  return sorted.map((item) => item.embedding || []);
 }
 
 /**

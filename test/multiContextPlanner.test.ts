@@ -53,7 +53,6 @@ function buildPdfContext(title: string, chunks: string[]): PdfContext {
     docFreq,
     avgChunkLength,
     fullLength: chunks.join("\n\n").length,
-    embeddingFailed: true,
   };
 }
 
@@ -147,11 +146,16 @@ function buildActiveAttachment(itemId: number, contextItemId: number): MockItem 
 describe("multiContextPlanner", function () {
   before(function () {
     originalZotero = (globalThis as typeof globalThis & { Zotero?: unknown }).Zotero;
+    const prefs: Record<string, unknown> = {};
     (globalThis as typeof globalThis & { Zotero?: unknown }).Zotero = {
       Items: {
         get(id: number) {
           return zoteroItems.get(id) || null;
         },
+      },
+      Prefs: {
+        get: (key: string) => prefs[key],
+        set: (key: string, value: unknown) => { prefs[key] = value; },
       },
     } as unknown as typeof Zotero;
   });

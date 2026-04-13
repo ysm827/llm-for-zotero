@@ -40,6 +40,7 @@ import {
   pollCopilotDeviceAuth,
   resolveCopilotAccessToken,
   fetchCopilotModelList,
+  callEmbeddings,
 } from "../utils/llmClient";
 import { joinLocalPath } from "../utils/localPath";
 import {
@@ -602,9 +603,6 @@ export async function registerPrefsScripts(_window: Window | undefined | null) {
   ) as HTMLInputElement | null;
   const enableAgentModeInput = doc.querySelector(
     `#${config.addonRef}-enable-agent-mode`,
-  ) as HTMLInputElement | null;
-  const enableQueryRewriteInput = doc.querySelector(
-    `#${config.addonRef}-enable-query-rewrite`,
   ) as HTMLInputElement | null;
 
   if (!modelSections) return;
@@ -1898,20 +1896,398 @@ export async function registerPrefsScripts(_window: Window | undefined | null) {
     }
   }
 
-  if (enableQueryRewriteInput) {
-    const prefValue = Zotero.Prefs.get(
-      `${config.prefsPrefix}.enableQueryRewrite`,
-      true,
-    );
-    enableQueryRewriteInput.checked =
-      prefValue === true || `${prefValue || ""}`.toLowerCase() === "true";
-    enableQueryRewriteInput.addEventListener("change", () => {
-      Zotero.Prefs.set(
-        `${config.prefsPrefix}.enableQueryRewrite`,
-        enableQueryRewriteInput.checked,
+
+
+  // ── Semantic Search settings ───────────────────────────────────
+  // Follows the same toggle + sub-settings pattern as MinerU.
+
+  const semanticSearchToggle = doc.querySelector(
+    `#${config.addonRef}-enable-semantic-search`,
+  ) as HTMLInputElement | null;
+  const semanticSearchSubSettings = doc.querySelector(
+    `#${config.addonRef}-semantic-search-sub-settings`,
+  ) as HTMLDivElement | null;
+  const semanticSearchMount = doc.querySelector(
+    `#${config.addonRef}-semantic-search-mount`,
+  ) as HTMLDivElement | null;
+
+  if (semanticSearchToggle && semanticSearchSubSettings && semanticSearchMount) {
+    const EMBEDDING_PRESETS: Record<
+      string,
+      {
+        apiBase: string;
+        defaultModel: string;
+        models: { value: string; label: string; pricing: string }[];
+      }
+    > = {
+      openai: {
+        apiBase: "https://api.openai.com/v1",
+        defaultModel: "text-embedding-3-small",
+        models: [
+          { value: "text-embedding-3-small", label: "text-embedding-3-small", pricing: "$0.02 / 1M tokens" },
+          { value: "text-embedding-3-large", label: "text-embedding-3-large", pricing: "$0.13 / 1M tokens" },
+          { value: "text-embedding-ada-002", label: "text-embedding-ada-002 (legacy)", pricing: "$0.10 / 1M tokens" },
+        ],
+      },
+      gemini: {
+        apiBase:
+          "https://generativelanguage.googleapis.com/v1beta/openai",
+        defaultModel: "gemini-embedding-001",
+        models: [
+          { value: "gemini-embedding-001", label: "gemini-embedding-001", pricing: "Free tier available · $0.15 / 1M tokens" },
+          { value: "text-embedding-004", label: "text-embedding-004", pricing: "$0.10 / 1M tokens" },
+        ],
+      },
+    };
+
+    // Find an API key from configured provider groups matching a preset ID
+    const findProviderApiKey = (targetPresetId: string): string => {
+      const groups = getModelProviderGroups();
+      for (const group of groups) {
+        if (!group.apiKey.trim() || group.authMode !== "api_key") continue;
+        if (detectProviderPreset(group.apiBase) === targetPresetId) {
+          return group.apiKey;
+        }
+      }
+      return "";
+    };
+
+    // Normalize legacy embedding provider values to the new three-option set
+    const normalizeEmbeddingProvider = (): string => {
+      const stored = readEmbPref("embeddingProvider");
+      if (stored === "openai" || stored === "gemini" || stored === "custom") {
+        return stored;
+      }
+      if (stored === "ollama") {
+        writeEmbPref("embeddingProvider", "custom");
+        return "custom";
+      }
+      // "main" or empty → default to "gemini" (free tier available)
+      writeEmbPref("embeddingProvider", "gemini");
+      writeEmbPref("embeddingApiBase", EMBEDDING_PRESETS.gemini.apiBase);
+      if (!readEmbPref("embeddingModel")) {
+        writeEmbPref("embeddingModel", EMBEDDING_PRESETS.gemini.defaultModel);
+      }
+      return "gemini";
+    };
+
+    const readEmbPref = (key: string): string =>
+      (Zotero.Prefs.get(`${config.prefsPrefix}.${key}`, true) || "").toString();
+    const writeEmbPref = (key: string, val: string | boolean) =>
+      Zotero.Prefs.set(`${config.prefsPrefix}.${key}`, val, true);
+
+    // Toggle visibility (same pattern as MinerU)
+    const syncSemanticVisibility = () => {
+      semanticSearchSubSettings.style.display = semanticSearchToggle.checked
+        ? "flex"
+        : "none";
+    };
+
+    const enabled =
+      Zotero.Prefs.get(
+        `${config.prefsPrefix}.enableSemanticSearch`,
         true,
-      );
+      ) !== false;
+    semanticSearchToggle.checked = enabled;
+    syncSemanticVisibility();
+
+    semanticSearchToggle.addEventListener("change", () => {
+      writeEmbPref("enableSemanticSearch", semanticSearchToggle.checked);
+      syncSemanticVisibility();
     });
+
+    // Render the embedding config card inside sub-settings
+    const renderEmbeddingCard = () => {
+      semanticSearchMount.innerHTML = "";
+
+      const provider = normalizeEmbeddingProvider();
+      const preset = EMBEDDING_PRESETS[provider];
+      const isCustom = provider === "custom";
+
+      const card = el(doc, "div", CARD_STYLE);
+
+      // Card header
+      const cardHeader = el(doc, "div", CARD_HEADER_STYLE);
+      cardHeader.appendChild(
+        el(doc, "span", "font-weight: 700; font-size: 13px;", t("Embedding Provider")),
+      );
+      card.appendChild(cardHeader);
+
+      // Card body
+      const cardBody = el(doc, "div", CARD_BODY_STYLE);
+
+      // Provider selector
+      const providerWrap = el(
+        doc,
+        "div",
+        "display: flex; flex-direction: column;",
+      );
+      providerWrap.appendChild(el(doc, "label", LABEL_STYLE, t("Provider")));
+      const providerSelect = el(
+        doc,
+        "select",
+        INPUT_STYLE,
+      ) as HTMLSelectElement;
+      const providerOptions: [string, string][] = [
+        ["openai", "OpenAI"],
+        ["gemini", "Google"],
+        ["custom", t("Customized")],
+      ];
+      for (const [val, label] of providerOptions) {
+        const opt = el(doc, "option") as HTMLOptionElement;
+        opt.value = val;
+        opt.textContent = label;
+        providerSelect.appendChild(opt);
+      }
+      providerSelect.value = provider;
+      providerSelect.addEventListener("change", () => {
+        const selected = providerSelect.value;
+        writeEmbPref("embeddingProvider", selected);
+        const p = EMBEDDING_PRESETS[selected];
+        if (p) {
+          writeEmbPref("embeddingApiBase", p.apiBase);
+          writeEmbPref("embeddingModel", p.defaultModel);
+          // Clear dedicated key — runtime will auto-detect from provider groups
+          writeEmbPref("embeddingApiKey", "");
+        }
+        renderEmbeddingCard();
+      });
+      providerWrap.appendChild(providerSelect);
+      cardBody.appendChild(providerWrap);
+
+      // Custom mode: show API URL + API Key fields
+      if (isCustom) {
+        const apiBaseWrap = el(
+          doc,
+          "div",
+          "display: flex; flex-direction: column;",
+        );
+        apiBaseWrap.appendChild(
+          el(doc, "label", LABEL_STYLE, t("API URL")),
+        );
+        const apiBaseInput = el(doc, "input", INPUT_STYLE) as HTMLInputElement;
+        apiBaseInput.type = "text";
+        apiBaseInput.placeholder = "https://api.openai.com/v1";
+        apiBaseInput.value = readEmbPref("embeddingApiBase");
+        apiBaseInput.addEventListener("change", () => {
+          writeEmbPref("embeddingApiBase", apiBaseInput.value.trim());
+        });
+        apiBaseWrap.appendChild(apiBaseInput);
+        cardBody.appendChild(apiBaseWrap);
+
+        const apiKeyWrap = el(
+          doc,
+          "div",
+          "display: flex; flex-direction: column;",
+        );
+        apiKeyWrap.appendChild(
+          el(doc, "label", LABEL_STYLE, t("API Key")),
+        );
+        const apiKeyInput = el(
+          doc,
+          "input",
+          INPUT_STYLE,
+        ) as HTMLInputElement;
+        apiKeyInput.type = "password";
+        apiKeyInput.value = readEmbPref("embeddingApiKey");
+        apiKeyInput.addEventListener("change", () => {
+          writeEmbPref("embeddingApiKey", apiKeyInput.value.trim());
+        });
+        apiKeyWrap.appendChild(apiKeyInput);
+        cardBody.appendChild(apiKeyWrap);
+      }
+
+      // OpenAI / Google: API key status hint (auto-reuse from provider groups)
+      if (!isCustom) {
+        const autoKey = findProviderApiKey(provider);
+        const explicitKey = readEmbPref("embeddingApiKey");
+        if (autoKey || explicitKey) {
+          const providerLabel = provider === "openai" ? "OpenAI" : "Google";
+          const hint =
+            autoKey && !explicitKey
+              ? t("Using API key from your %provider% provider").replace(
+                  "%provider%",
+                  providerLabel,
+                )
+              : t("API key configured");
+          cardBody.appendChild(
+            el(
+              doc,
+              "span",
+              "font-size: 11px; color: green; display: block;",
+              `✓ ${hint}`,
+            ),
+          );
+        } else {
+          // No matching key found — show API key input with guidance
+          const apiKeyWrap = el(
+            doc,
+            "div",
+            "display: flex; flex-direction: column;",
+          );
+          apiKeyWrap.appendChild(
+            el(doc, "label", LABEL_STYLE, t("API Key")),
+          );
+          const apiKeyInput = el(
+            doc,
+            "input",
+            INPUT_STYLE,
+          ) as HTMLInputElement;
+          apiKeyInput.type = "password";
+          apiKeyInput.placeholder = "sk-…";
+          apiKeyInput.value = "";
+          apiKeyInput.addEventListener("change", () => {
+            writeEmbPref("embeddingApiKey", apiKeyInput.value.trim());
+            renderEmbeddingCard();
+          });
+          apiKeyWrap.appendChild(apiKeyInput);
+          const providerLabel = provider === "openai" ? "OpenAI" : "Google";
+          apiKeyWrap.appendChild(
+            el(
+              doc,
+              "span",
+              HELPER_STYLE,
+              t(
+                "No %provider% provider found. Enter an API key for embeddings.",
+              ).replace("%provider%", providerLabel),
+            ),
+          );
+          cardBody.appendChild(apiKeyWrap);
+        }
+      }
+
+      // Model + Test button (same row, consistent with AI provider layout)
+      const modelWrap = el(
+        doc,
+        "div",
+        "display: flex; flex-direction: column;",
+      );
+      modelWrap.appendChild(el(doc, "label", LABEL_STYLE, t("Model")));
+
+      const INLINE_INPUT_STYLE =
+        "flex: 1; min-width: 0; padding: 6px 10px; font-size: 13px;" +
+        " border: 1px solid var(--stroke-secondary, #c8c8c8); border-radius: 6px;" +
+        " box-sizing: border-box; background: Field; color: FieldText;";
+
+      const modelRow = el(
+        doc,
+        "div",
+        "display: flex; align-items: center; gap: 5px;",
+      );
+
+      // Pricing hint (shown below model row for preset providers)
+      const pricingHint = el(doc, "span", HELPER_STYLE);
+
+      const updatePricingHint = (modelValue: string) => {
+        if (!preset) return;
+        const entry = preset.models.find((m) => m.value === modelValue);
+        pricingHint.textContent = entry?.pricing
+          ? `${t("Estimated cost")}: ${entry.pricing}`
+          : "";
+      };
+
+      if (preset) {
+        // Dropdown for known providers
+        const modelSelect = el(
+          doc,
+          "select",
+          INLINE_INPUT_STYLE,
+        ) as HTMLSelectElement;
+        const currentModel =
+          readEmbPref("embeddingModel") || preset.defaultModel;
+        for (const opt of preset.models) {
+          const option = el(doc, "option") as HTMLOptionElement;
+          option.value = opt.value;
+          option.textContent = opt.label;
+          if (opt.value === currentModel) option.selected = true;
+          modelSelect.appendChild(option);
+        }
+        // Preserve a previously set model that's not in the preset list
+        if (
+          !preset.models.some((m) => m.value === currentModel) &&
+          currentModel
+        ) {
+          const customOpt = el(doc, "option") as HTMLOptionElement;
+          customOpt.value = currentModel;
+          customOpt.textContent = currentModel;
+          customOpt.selected = true;
+          modelSelect.appendChild(customOpt);
+        }
+        modelSelect.addEventListener("change", () => {
+          writeEmbPref("embeddingModel", modelSelect.value);
+          updatePricingHint(modelSelect.value);
+        });
+        modelRow.appendChild(modelSelect);
+        updatePricingHint(currentModel);
+      } else {
+        // Text input for custom mode
+        const modelInput = el(
+          doc,
+          "input",
+          INLINE_INPUT_STYLE,
+        ) as HTMLInputElement;
+        modelInput.type = "text";
+        modelInput.placeholder = "text-embedding-3-small";
+        modelInput.value = readEmbPref("embeddingModel");
+        modelInput.addEventListener("change", () => {
+          writeEmbPref("embeddingModel", modelInput.value.trim());
+        });
+        modelRow.appendChild(modelInput);
+      }
+
+      // Test button on same row as model
+      const testBtn = el(
+        doc,
+        "button",
+        OUTLINE_BTN_STYLE,
+        t("Test"),
+      ) as HTMLButtonElement;
+      testBtn.type = "button";
+      modelRow.appendChild(testBtn);
+
+      modelWrap.appendChild(modelRow);
+
+      // Pricing hint (only for preset providers)
+      if (preset) {
+        modelWrap.appendChild(pricingHint);
+      }
+
+      // Test status line (below model row, same pattern as AI provider)
+      const testStatus = el(
+        doc,
+        "span",
+        "font-size: 11.5px; display: none; margin-top: 3px; white-space: pre-wrap; word-break: break-all;",
+      );
+      const runEmbeddingTest = async () => {
+        testBtn.disabled = true;
+        testStatus.style.display = "inline";
+        testStatus.textContent = t("Testing…");
+        testStatus.style.color = "var(--fill-secondary, #888)";
+        try {
+          await callEmbeddings(["test"]);
+          testStatus.textContent = t("✓ Connection successful");
+          testStatus.style.color = "green";
+        } catch (error) {
+          testStatus.textContent = `✗ ${(error as Error).message}`.slice(
+            0,
+            120,
+          );
+          testStatus.style.color = "red";
+        } finally {
+          testBtn.disabled = false;
+        }
+      };
+      testBtn.addEventListener("click", () => void runEmbeddingTest());
+      testBtn.addEventListener("command", () => void runEmbeddingTest());
+      modelWrap.appendChild(testStatus);
+
+      cardBody.appendChild(modelWrap);
+
+      card.appendChild(cardBody);
+      semanticSearchMount.appendChild(card);
+    };
+
+    renderEmbeddingCard();
   }
 
   // ── MinerU settings ─────────────────────────────────────────────

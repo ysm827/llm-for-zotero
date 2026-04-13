@@ -23,7 +23,6 @@ describe("RetrievalService", function () {
       docFreq: {},
       avgChunkLength: 0,
       fullLength: 0,
-      embeddingFailed: true,
     } as PdfContext;
     const abstractCandidate: PaperContextCandidate = {
       paperKey: "1:11",

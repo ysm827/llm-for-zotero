@@ -24,6 +24,8 @@ export type ProviderPreset = {
   matches: (apiBase: string) => boolean;
   /** When true, prefer /v1/responses over /v1/chat/completions when calling the API. */
   supportsResponsesEndpoint?: boolean;
+  /** Whether this provider exposes an OpenAI-compatible /v1/embeddings endpoint. */
+  supportsEmbeddings?: boolean;
 };
 
 type ParsedApiBase = {
@@ -124,6 +126,7 @@ export const PROVIDER_PRESETS: ProviderPreset[] = [
     helperText: "Preset uses OpenAI's official Responses endpoint.",
     matches: makeHostAndPathMatcher(["api.openai.com"], OPENAI_PATHS),
     supportsResponsesEndpoint: true,
+    supportsEmbeddings: true,
   },
   {
     id: "gemini",
@@ -140,6 +143,7 @@ export const PROVIDER_PRESETS: ProviderPreset[] = [
       ["generativelanguage.googleapis.com"],
       GEMINI_PATHS,
     ),
+    supportsEmbeddings: true,
   },
   {
     id: "anthropic",
@@ -149,6 +153,7 @@ export const PROVIDER_PRESETS: ProviderPreset[] = [
     supportedProtocols: ["anthropic_messages", "openai_chat_compat"],
     helperText: "Preset uses Anthropic's native Messages API.",
     matches: makeHostAndPathMatcher(["api.anthropic.com"], ANTHROPIC_PATHS),
+    supportsEmbeddings: false,
   },
   {
     id: "minimax",
@@ -162,6 +167,7 @@ export const PROVIDER_PRESETS: ProviderPreset[] = [
       ["api.minimax.io", "api.minimaxi.com"],
       MINIMAX_PATHS,
     ),
+    supportsEmbeddings: true,
   },
   {
     id: "glm",
@@ -172,6 +178,7 @@ export const PROVIDER_PRESETS: ProviderPreset[] = [
     helperText:
       "Preset uses GLM's Claude-compatible endpoint for agent tool use.",
     matches: makeHostAndPathMatcher(["open.bigmodel.cn"], GLM_PATHS),
+    supportsEmbeddings: true,
   },
   {
     id: "deepseek",
@@ -181,6 +188,7 @@ export const PROVIDER_PRESETS: ProviderPreset[] = [
     supportedProtocols: ["openai_chat_compat"],
     helperText: "Preset uses DeepSeek's official API base (v1).",
     matches: makeHostAndPathMatcher(["api.deepseek.com"], DEEPSEEK_PATHS),
+    supportsEmbeddings: true,
   },
   {
     id: "grok",
@@ -191,6 +199,7 @@ export const PROVIDER_PRESETS: ProviderPreset[] = [
     helperText: "Preset uses xAI's official Responses endpoint.",
     matches: makeHostAndPathMatcher(["api.x.ai"], GROK_PATHS),
     supportsResponsesEndpoint: true,
+    supportsEmbeddings: true,
   },
   {
     id: "qwen",
@@ -203,6 +212,7 @@ export const PROVIDER_PRESETS: ProviderPreset[] = [
       ["dashscope.aliyuncs.com", "dashscope-intl.aliyuncs.com"],
       QWEN_PATHS,
     ),
+    supportsEmbeddings: true,
   },
   {
     id: "kimi",
@@ -215,6 +225,7 @@ export const PROVIDER_PRESETS: ProviderPreset[] = [
       ["api.moonshot.cn", "api.moonshot.ai"],
       KIMI_PATHS,
     ),
+    supportsEmbeddings: true,
   },
   {
     id: "copilot",
@@ -228,6 +239,7 @@ export const PROVIDER_PRESETS: ProviderPreset[] = [
       ["api.githubcopilot.com"],
       COPILOT_PATHS,
     ),
+    supportsEmbeddings: false,
   },
 ];
 

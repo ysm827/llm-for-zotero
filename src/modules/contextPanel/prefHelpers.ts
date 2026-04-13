@@ -51,9 +51,6 @@ export function getAgentModeEnabled(): boolean {
   return getBoolPref("enableAgentMode", false);
 }
 
-export function getQueryRewriteEnabled(): boolean {
-  return getBoolPref("enableQueryRewrite", false);
-}
 
 const LAST_REASONING_LEVEL_PREF_KEY = "lastUsedReasoningLevel";
 const LAST_REASONING_EXPANDED_PREF_KEY = "lastReasoningExpanded";

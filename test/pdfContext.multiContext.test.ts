@@ -49,11 +49,26 @@ function buildPdfContext(chunks: string[]): PdfContext {
     docFreq,
     avgChunkLength,
     fullLength: chunks.join("\n\n").length,
-    embeddingFailed: true,
   };
 }
 
 describe("pdfContext multi-context helpers", function () {
+  let originalZotero: unknown;
+  before(function () {
+    originalZotero = (globalThis as typeof globalThis & { Zotero?: unknown }).Zotero;
+    const prefs: Record<string, unknown> = {};
+    (globalThis as typeof globalThis & { Zotero?: unknown }).Zotero = {
+      Prefs: {
+        get: (key: string) => prefs[key],
+        set: (key: string, value: unknown) => { prefs[key] = value; },
+      },
+    };
+  });
+  after(function () {
+    (globalThis as typeof globalThis & { Zotero?: unknown }).Zotero =
+      originalZotero;
+  });
+
   it("builds retrieval candidates with scores and metadata", async function () {
     const paper: PaperContextRef = {
       itemId: 1,

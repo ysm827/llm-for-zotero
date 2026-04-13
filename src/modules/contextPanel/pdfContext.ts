@@ -1,12 +1,22 @@
-import { callEmbeddings } from "../../utils/llmClient";
+import {
+  callEmbeddings,
+  EmbeddingUnsupportedError,
+  getEmbeddingModelName,
+  checkEmbeddingAvailability,
+  getEmbeddingUnavailableReason,
+} from "../../utils/llmClient";
 import { estimateTextTokens } from "../../utils/modelInputCap";
+import {
+  computeChunkHash,
+  loadCachedEmbeddings,
+  saveCachedEmbeddings,
+} from "./embeddingCache";
 import {
   CHUNK_OVERLAP,
   EMBEDDING_BATCH_SIZE,
   CHUNK_TARGET_LENGTH,
-  HYBRID_WEIGHT_BM25,
-  HYBRID_WEIGHT_EMBEDDING,
   RETRIEVAL_TOP_K_PER_PAPER,
+  RRF_K,
   STOPWORDS,
 } from "./constants";
 import {
@@ -27,6 +37,10 @@ import type {
   PdfChunkMeta,
   PdfChunkKind,
 } from "./types";
+import { config } from "./constants";
+
+const prefKey = (key: string) => `${config.prefsPrefix}.${key}`;
+const getPref = (key: string) => Zotero.Prefs.get(prefKey(key), true);
 
 // ── HTML table → Markdown table conversion ──────────────────────────────────
 // MinerU sometimes emits tables as raw <table> HTML in the markdown.
@@ -205,7 +219,7 @@ async function cachePDFText(item: Zotero.Item) {
         docFreq,
         avgChunkLength,
         fullLength: pdfText.length,
-        embeddingFailed: false,
+
         sourceType,
       });
     } else {
@@ -217,7 +231,7 @@ async function cachePDFText(item: Zotero.Item) {
         docFreq: {},
         avgChunkLength: 0,
         fullLength: 0,
-        embeddingFailed: false,
+
       });
     }
   } catch (e) {
@@ -230,7 +244,7 @@ async function cachePDFText(item: Zotero.Item) {
       docFreq: {},
       avgChunkLength: 0,
       fullLength: 0,
-      embeddingFailed: false,
+
     });
   }
 }
@@ -271,7 +285,7 @@ async function cacheNoteText(item: Zotero.Item) {
         docFreq,
         avgChunkLength,
         fullLength: text.length,
-        embeddingFailed: false,
+
       });
     } else {
       pdfTextCache.set(item.id, {
@@ -282,7 +296,7 @@ async function cacheNoteText(item: Zotero.Item) {
         docFreq: {},
         avgChunkLength: 0,
         fullLength: 0,
-        embeddingFailed: false,
+
       });
     }
   } catch (e) {
@@ -295,7 +309,7 @@ async function cacheNoteText(item: Zotero.Item) {
       docFreq: {},
       avgChunkLength: 0,
       fullLength: 0,
-      embeddingFailed: false,
+
     });
   }
 }
@@ -379,15 +393,23 @@ function splitMarkdownIntoChunks(
         const p = para.trim();
         if (!p) continue;
         if (p.length > targetLength) {
-          // Oversized paragraph: flush and slice with overlap
+          // Oversized paragraph: flush and slice with sentence-aware overlap
           if (subChunk.trim()) { chunks.push(subChunk.trim()); subChunk = ""; }
           let start = 0;
           while (start < p.length) {
-            const end = Math.min(start + targetLength, p.length);
+            const prevStart = start;
+            const rawEnd = Math.min(start + targetLength, p.length);
+            const end =
+              rawEnd < p.length
+                ? findSentenceBoundary(p, rawEnd, 200)
+                : rawEnd;
             const slice = p.slice(start, end).trim();
             if (slice) chunks.push(slice);
-            if (end === p.length) break;
-            start = Math.max(0, end - CHUNK_OVERLAP);
+            if (end >= p.length) break;
+            const rawOverlapStart = Math.max(0, end - CHUNK_OVERLAP);
+            start = findSentenceBoundary(p, rawOverlapStart, 100);
+            // Guard: ensure forward progress to prevent infinite loop
+            if (start <= prevStart) start = prevStart + targetLength;
           }
         } else if (subChunk.length + p.length + 2 <= targetLength) {
           subChunk = subChunk ? `${subChunk}\n\n${p}` : p;
@@ -413,6 +435,42 @@ function splitMarkdownIntoChunks(
   return chunks;
 }
 
+// ── Sentence boundary detection ─────────────────────────────────────────────
+
+/**
+ * Find the nearest sentence boundary (`. `, `? `, `! `, or `\n`) to
+ * {@link targetPos}, searching up to {@link maxDrift} characters in both
+ * directions.  Returns {@link targetPos} unchanged when no boundary is found
+ * within the allowed range.
+ */
+function findSentenceBoundary(
+  text: string,
+  targetPos: number,
+  maxDrift: number,
+): number {
+  const searchStart = Math.max(0, targetPos - maxDrift);
+  const searchEnd = Math.min(text.length, targetPos + maxDrift);
+  const region = text.slice(searchStart, searchEnd);
+
+  // Require uppercase or newline after punctuation+space to avoid splitting
+  // at abbreviations like "Fig. 2", "e.g. the", "Dr. Smith", "et al. showed".
+  const sentenceEnders = /[.!?]\s+(?=[A-Z\n])|[.!?](?=\n)|\n/g;
+  let bestPos = targetPos;
+  let bestDist = maxDrift + 1;
+
+  let match: RegExpExecArray | null;
+  while ((match = sentenceEnders.exec(region)) !== null) {
+    const absPos = searchStart + match.index + match[0].length;
+    const dist = Math.abs(absPos - targetPos);
+    if (dist < bestDist) {
+      bestDist = dist;
+      bestPos = absPos;
+    }
+  }
+
+  return bestDist <= maxDrift ? bestPos : targetPos;
+}
+
 // ── Plain-text chunking (PDFWorker, notes) ────────────────────────────────────
 
 function splitIntoChunks(text: string, targetLength: number): string[] {
@@ -436,11 +494,19 @@ function splitIntoChunks(text: string, targetLength: number): string[] {
       pushCurrent();
       let start = 0;
       while (start < p.length) {
-        const end = Math.min(start + targetLength, p.length);
+        const prevStart = start;
+        const rawEnd = Math.min(start + targetLength, p.length);
+        const end =
+          rawEnd < p.length
+            ? findSentenceBoundary(p, rawEnd, 200)
+            : rawEnd;
         const slice = p.slice(start, end).trim();
         if (slice) chunks.push(slice);
-        if (end === p.length) break;
-        start = Math.max(0, end - CHUNK_OVERLAP);
+        if (end >= p.length) break;
+        const rawOverlapStart = Math.max(0, end - CHUNK_OVERLAP);
+        start = findSentenceBoundary(p, rawOverlapStart, 100);
+        // Guard: ensure forward progress to prevent infinite loop
+        if (start <= prevStart) start = prevStart + targetLength;
       }
       continue;
     }
@@ -964,8 +1030,29 @@ export function formatSuggestedEvidenceCitation(
 }
 
 function tokenizeText(text: string): string[] {
-  const tokens = text.toLowerCase().match(/[a-z0-9]+/g) || [];
-  return tokens.filter((t) => t.length >= 3 && !STOPWORDS.has(t));
+  const lower = text.toLowerCase();
+
+  // Unicode-aware word tokens (Latin, Cyrillic, accented, etc.)
+  const wordTokens = (lower.match(/[\p{L}\p{N}]+/gu) || []).filter(
+    (t) => t.length >= 2 && !STOPWORDS.has(t),
+  );
+
+  // CJK character bigrams (Chinese, Japanese Kanji, Korean Hanja)
+  const cjkChars =
+    lower.match(/[\u4E00-\u9FFF\u3400-\u4DBF\uF900-\uFAFF]/g) || [];
+  const cjkBigrams: string[] = [];
+  for (let i = 0; i < cjkChars.length - 1; i++) {
+    cjkBigrams.push(cjkChars[i] + cjkChars[i + 1]);
+  }
+
+  // Japanese Hiragana/Katakana bigrams
+  const kanaChars = lower.match(/[\u3040-\u309F\u30A0-\u30FF]/g) || [];
+  const kanaBigrams: string[] = [];
+  for (let i = 0; i < kanaChars.length - 1; i++) {
+    kanaBigrams.push(kanaChars[i] + kanaChars[i + 1]);
+  }
+
+  return [...wordTokens, ...cjkBigrams, ...kanaBigrams];
 }
 
 function buildChunkIndex(chunks: string[]): {
@@ -1043,17 +1130,6 @@ function cosineSimilarity(a: number[], b: number[]): number {
   return dot / (Math.sqrt(normA) * Math.sqrt(normB));
 }
 
-function normalizeScores(scores: number[]): number[] {
-  if (!scores.length) return [];
-  let min = scores[0];
-  let max = scores[0];
-  for (const s of scores) {
-    if (s < min) min = s;
-    if (s > max) max = s;
-  }
-  if (max === min) return scores.map(() => 0);
-  return scores.map((s) => (s - min) / (max - min));
-}
 
 async function embedTexts(
   texts: string[],
@@ -1071,12 +1147,14 @@ async function embedTexts(
 async function ensureEmbeddings(
   pdfContext: PdfContext,
   overrides?: { apiBase?: string; apiKey?: string },
+  itemId?: number,
 ): Promise<boolean> {
-  if (pdfContext.embeddingFailed) return false;
+  // Layer 1: In-memory — already loaded
   if (pdfContext.embeddings && pdfContext.embeddings.length) {
     return pdfContext.embeddings.length === pdfContext.chunks.length;
   }
 
+  // Dedup concurrent calls: join existing in-flight promise
   if (pdfContext.embeddingPromise) {
     const result = await pdfContext.embeddingPromise;
     if (result) {
@@ -1086,12 +1164,38 @@ async function ensureEmbeddings(
     return false;
   }
 
+  // Layers 2+3: assign the promise slot FIRST (atomically) so concurrent
+  // callers join this promise instead of starting a duplicate API call.
+  const embeddingModel = getEmbeddingModelName();
+  const chunkHash = computeChunkHash(pdfContext.chunks);
+  const chunkCount = pdfContext.chunks.length;
+
   pdfContext.embeddingPromise = (async () => {
+    // Layer 2: Disk cache — check before calling the API
+    if (itemId != null) {
+      try {
+        const cached = await loadCachedEmbeddings(itemId, chunkHash, embeddingModel);
+        if (cached && cached.length === chunkCount) return cached;
+      } catch {
+        /* disk cache miss or read error — continue to API */
+      }
+    }
+
+    // Layer 3: API call
     try {
-      const embeddings = await embedTexts(pdfContext.chunks, overrides);
-      return embeddings;
+      return await embedTexts(pdfContext.chunks, overrides);
     } catch (err) {
-      ztoolkit.log("Embedding generation failed:", err);
+      if (err instanceof EmbeddingUnsupportedError) {
+        ztoolkit.log(
+          `[Semantic Search] Provider "${(err as EmbeddingUnsupportedError).providerLabel}" does not support embeddings. ` +
+            "Configure a separate embedding provider in Settings → Customization. Falling back to keyword search.",
+        );
+      } else {
+        ztoolkit.log(
+          "[Semantic Search] Embedding generation failed:",
+          err,
+        );
+      }
       return null;
     }
   })();
@@ -1100,10 +1204,42 @@ async function ensureEmbeddings(
   pdfContext.embeddingPromise = undefined;
   if (result) {
     pdfContext.embeddings = result;
-    return result.length === pdfContext.chunks.length;
+    // Persist to disk cache in background (fire-and-forget)
+    if (itemId != null && result.length > 0) {
+      const dims = result[0].length;
+      saveCachedEmbeddings(itemId, chunkHash, embeddingModel, dims, result).catch(
+        (err) =>
+          ztoolkit.log("[Semantic Search] Embedding cache write failed:", err),
+      );
+    }
+    return result.length === chunkCount;
   }
-  pdfContext.embeddingFailed = true;
+  // Let subsequent queries retry — the user may fix their config between queries,
+  // and shouldTryEmbeddings() already gates unsupported providers.
   return false;
+}
+
+/**
+ * Pre-generate embeddings for a paper in the background.
+ * Called from the multi-context planner so embeddings are cached even when
+ * the system uses full-text mode (which skips the retrieval pipeline).
+ * Fire-and-forget — callers should NOT await this.
+ */
+export function preGenerateEmbeddings(
+  pdfContext: PdfContext | undefined,
+  itemId: number,
+  apiOverrides?: { apiBase?: string; apiKey?: string },
+): void {
+  if (!pdfContext || !pdfContext.chunks.length) return;
+  if (!shouldTryEmbeddings()) return;
+  // Already loaded or in-flight — nothing to do
+  if (pdfContext.embeddings?.length || pdfContext.embeddingPromise) return;
+
+  ensureEmbeddings(pdfContext, apiOverrides, itemId).catch((err) => {
+    if (typeof ztoolkit !== "undefined") {
+      ztoolkit.log("[Semantic Search] Background embedding pre-generation failed:", err);
+    }
+  });
 }
 
 export function buildPaperKey(ref: PaperContextRef): string {
@@ -1217,25 +1353,148 @@ export function buildTruncatedFullPaperContext(
   };
 }
 
-function shouldTryEmbeddings(overrides?: {
-  apiBase?: string;
-  apiKey?: string;
-}): boolean {
-  if (!overrides) return false;
-  return Boolean(
-    (overrides.apiBase || "").trim() || (overrides.apiKey || "").trim(),
-  );
+function shouldTryEmbeddings(): boolean {
+  // Respect the user's "Enable semantic search" toggle
+  const enabledPref = getPref("enableSemanticSearch");
+  if (enabledPref === false || enabledPref === "false") return false;
+
+  // Delegate to the centralized availability check in llmClient.
+  // This correctly handles: separate embedding providers, codex_auth,
+  // Anthropic (supportsEmbeddings=false), and all other providers.
+  const available = checkEmbeddingAvailability();
+  if (!available && typeof ztoolkit !== "undefined") {
+    const reason = getEmbeddingUnavailableReason();
+    if (reason) {
+      ztoolkit.log(`[Semantic Search] Embeddings unavailable: ${reason}`);
+    }
+  }
+  return available;
 }
 
-function queryMentionsFiguresOrTables(question: string): boolean {
-  return /\b(?:figure|fig\.?|table|caption)\b/i.test(question);
+// ── Intent-driven evidence heuristics ────────────────────────────────────────
+
+type QueryIntent =
+  | "factual"
+  | "conceptual"
+  | "methodological"
+  | "comparative"
+  | "citation"
+  | "visual"
+  | "general";
+
+function detectQueryIntent(question: string): QueryIntent {
+  if (
+    /\b(?:method|protocol|procedure|algorithm|implementation|pipeline|training|hyperparameter|setup|dataset)\b/i.test(
+      question,
+    )
+  )
+    return "methodological";
+  if (
+    /\b(?:figure|fig\.?|table|chart|plot|diagram|caption|image)\b/i.test(
+      question,
+    )
+  )
+    return "visual";
+  if (
+    /\b(?:compar|differ|versus|vs\.?|contrast|similar|distinguish)\b/i.test(
+      question,
+    )
+  )
+    return "comparative";
+  if (
+    /\b(?:cit(?:e|ation|ed)|refer(?:ence|red)|bibliograph)\b/i.test(question)
+  )
+    return "citation";
+  if (
+    /\b(?:how many|sample size|number of|percentage|ratio|count|statistic)\b/i.test(
+      question,
+    )
+  )
+    return "factual";
+  if (
+    /\b(?:mechanism|pathway|relationship|role of|function of|why does|how does)\b/i.test(
+      question,
+    )
+  )
+    return "conceptual";
+  return "general";
 }
 
-function queryLooksMethodFocused(question: string): boolean {
-  return /\b(?:method|methods|methodology|training|implementation|algorithm|setup|dataset|protocol|procedure|hyperparameter)\b/i.test(
-    question,
-  );
-}
+/** Section boost profiles keyed by query intent. */
+const SECTION_BOOST_PROFILES: Record<
+  QueryIntent,
+  Partial<Record<PdfChunkKind, number>>
+> = {
+  general: {
+    abstract: 0.9,
+    results: 1.2,
+    discussion: 0.95,
+    conclusion: 0.8,
+    introduction: 0.2,
+    methods: -0.2,
+    "figure-caption": -1.1,
+    "table-caption": -1.1,
+    appendix: -1.6,
+    references: -2.4,
+    body: 0.1,
+  },
+  factual: {
+    results: 1.5,
+    methods: 0.8,
+    abstract: 0.5,
+    discussion: 0.4,
+    "figure-caption": -0.8,
+    "table-caption": -0.8,
+    appendix: -1.4,
+    references: -2.4,
+  },
+  conceptual: {
+    discussion: 1.4,
+    abstract: 1.0,
+    results: 0.8,
+    introduction: 0.6,
+    "figure-caption": -0.8,
+    "table-caption": -0.8,
+    appendix: -1.4,
+    references: -2.4,
+  },
+  methodological: {
+    methods: 1.5,
+    abstract: 0.4,
+    results: 0.3,
+    appendix: 0.2,
+    "figure-caption": -0.5,
+    "table-caption": -0.5,
+    references: -2.0,
+  },
+  comparative: {
+    results: 1.4,
+    discussion: 1.2,
+    abstract: 0.6,
+    methods: 0.2,
+    "figure-caption": -0.5,
+    "table-caption": -0.5,
+    appendix: -1.2,
+    references: -2.0,
+  },
+  citation: {
+    references: 1.0,
+    introduction: 0.8,
+    discussion: 0.6,
+    abstract: 0.3,
+    "figure-caption": -0.8,
+    "table-caption": -0.8,
+    appendix: -0.5,
+  },
+  visual: {
+    "figure-caption": 0.8,
+    "table-caption": 0.8,
+    results: 0.6,
+    methods: 0.2,
+    appendix: -1.0,
+    references: -2.0,
+  },
+};
 
 function scoreEvidenceHeuristics(params: {
   candidate: PaperContextCandidate;
@@ -1244,46 +1503,10 @@ function scoreEvidenceHeuristics(params: {
   const { candidate, question } = params;
   const chunkText = normalizeEvidenceText(candidate.chunkText);
   const wordCount = chunkText ? chunkText.split(/\s+/).length : 0;
-  const wantsVisuals = queryMentionsFiguresOrTables(question);
-  const wantsMethods = queryLooksMethodFocused(question);
-  let score = 0;
 
-  switch (candidate.chunkKind) {
-    case "abstract":
-      score += 0.9;
-      break;
-    case "results":
-      score += 1.2;
-      break;
-    case "discussion":
-      score += 0.95;
-      break;
-    case "conclusion":
-      score += 0.8;
-      break;
-    case "methods":
-      score += wantsMethods ? 0.2 : -0.2;
-      break;
-    case "introduction":
-      score += 0.2;
-      break;
-    case "figure-caption":
-    case "table-caption":
-      score += wantsVisuals ? -0.1 : -1.1;
-      break;
-    case "appendix":
-      score -= 1.6;
-      break;
-    case "references":
-      score -= 2.4;
-      break;
-    case "body":
-      score += 0.1;
-      break;
-    default:
-      score -= 0.1;
-      break;
-  }
+  const intent = detectQueryIntent(question);
+  const profile = SECTION_BOOST_PROFILES[intent];
+  let score = profile[candidate.chunkKind as PdfChunkKind] ?? -0.1;
 
   if (wordCount > 0 && wordCount < 7) {
     score -= 0.7;
@@ -1330,20 +1553,40 @@ export async function buildPaperRetrievalCandidates(
   const bm25Scores = chunkStats.map((chunk) =>
     scoreChunkBM25(chunk, terms, docFreq, chunks.length, avgChunkLength || 1),
   );
-  const bm25Norm = normalizeScores(bm25Scores);
 
-  let embedNorm: number[] | null = null;
-  if (question.trim() && shouldTryEmbeddings(apiOverrides)) {
-    const embeddingsReady = await ensureEmbeddings(pdfContext, apiOverrides);
+  // Compute BM25 ranks (1-based, descending by score)
+  const bm25Ranked = chunkStats
+    .map((_, i) => i)
+    .sort((a, b) => bm25Scores[b] - bm25Scores[a]);
+  const bm25Rank = new Array<number>(chunkStats.length);
+  bm25Ranked.forEach((idx, rank) => {
+    bm25Rank[idx] = rank + 1;
+  });
+
+  // Compute embedding ranks if available
+  let embedRank: number[] | null = null;
+  let rawEmbeddingScores: number[] | null = null;
+  if (question.trim() && shouldTryEmbeddings()) {
+    const embeddingsReady = await ensureEmbeddings(
+      pdfContext,
+      apiOverrides,
+      paperContext.itemId,
+    );
     if (embeddingsReady && pdfContext.embeddings) {
       try {
         const queryEmbedding =
           (await callEmbeddings([question], apiOverrides))[0] || [];
         if (queryEmbedding.length) {
-          const embeddingScores = pdfContext.embeddings.map((vec) =>
+          rawEmbeddingScores = pdfContext.embeddings.map((vec) =>
             cosineSimilarity(queryEmbedding, vec),
           );
-          embedNorm = normalizeScores(embeddingScores);
+          const embedRanked = chunkStats
+            .map((_, i) => i)
+            .sort((a, b) => rawEmbeddingScores![b] - rawEmbeddingScores![a]);
+          embedRank = new Array<number>(chunkStats.length);
+          embedRanked.forEach((idx, rank) => {
+            embedRank![idx] = rank + 1;
+          });
         }
       } catch (err) {
         ztoolkit.log("Query embedding failed:", err);
@@ -1351,14 +1594,16 @@ export async function buildPaperRetrievalCandidates(
     }
   }
 
-  const bm25Weight = embedNorm ? HYBRID_WEIGHT_BM25 : 1;
-  const embedWeight = embedNorm ? HYBRID_WEIGHT_EMBEDDING : 0;
+  // Reciprocal Rank Fusion (RRF) — rank-based fusion that avoids
+  // normalization sensitivity and fixed weight tuning.
   const retrievalMode = options?.mode || "general";
 
   const scored = chunkStats.map((chunk, idx) => {
-    const bm25Score = bm25Norm[idx] || 0;
-    const embeddingScore = embedNorm ? embedNorm[idx] || 0 : 0;
-    const hybridScore = bm25Score * bm25Weight + embeddingScore * embedWeight;
+    const bm25Score = bm25Scores[idx] || 0;
+    const embeddingScore = rawEmbeddingScores ? rawEmbeddingScores[idx] || 0 : 0;
+    const hybridScore = embedRank
+      ? 1 / (RRF_K + bm25Rank[idx]) + 1 / (RRF_K + embedRank[idx])
+      : 1 / (RRF_K + bm25Rank[idx]);
     const meta = chunkMeta[chunk.index];
     const candidate: PaperContextCandidate = {
       paperKey: buildPaperKey(paperContext),
