@@ -1639,7 +1639,7 @@ export async function buildPaperRetrievalCandidates(
   if (question.trim() && shouldTryEmbeddings()) {
     const embeddingsReady = await ensureEmbeddings(
       pdfContext,
-      paperContext.itemId,
+      paperContext.contextItemId,
     );
     if (embeddingsReady && pdfContext.embeddings) {
       try {

@@ -816,7 +816,7 @@ export async function resolveMultiContextPlan(params: {
       // Pre-generate embeddings in the background so they are cached for
       // future retrieval queries (e.g. multi-paper or long conversations).
       for (const paper of pinnedPapers) {
-        preGenerateEmbeddings(paper.pdfContext, paper.paperContext.itemId);
+        preGenerateEmbeddings(paper.pdfContext, paper.paperContext.contextItemId);
       }
 
       // Include remaining @-referenced (unpinned) papers via retrieval if
@@ -907,7 +907,7 @@ export async function resolveMultiContextPlan(params: {
 
     // Pre-generate embeddings for full-text papers in background
     for (const paper of fullPreferredPapers) {
-      preGenerateEmbeddings(paper.pdfContext, paper.paperContext.itemId);
+      preGenerateEmbeddings(paper.pdfContext, paper.paperContext.contextItemId);
     }
 
     if (
