@@ -1,5 +1,14 @@
+import { version as addonVersion } from "../../package.json";
+import {
+  describeMineruZipInspectionFailure,
+  inspectMineruZipBytes,
+  type MinerUZipFile,
+  type MinerUZipInspectionResult,
+} from "./mineruZip";
+
 const MINERU_DIRECT_API_BASE = "https://mineru.net/api/v4";
-const MINERU_PROXY_API_BASE = "https://llm-for-zotero.ylwwayne.workers.dev/api/v4";
+const MINERU_PROXY_API_BASE =
+  "https://llm-for-zotero.ylwwayne.workers.dev/api/v4";
 
 /**
  * When the user provides their own API key, call mineru.net directly.
@@ -17,10 +26,7 @@ const POLL_INTERVAL_MS = 3000;
 const POLL_TIMEOUT_MS = 10 * 60 * 1000;
 const REQUEST_TIMEOUT_MS = 60000;
 
-export type MinerUExtractedFile = {
-  relativePath: string;
-  data: Uint8Array;
-};
+export type MinerUExtractedFile = MinerUZipFile;
 
 export type MinerUResult = {
   mdContent: string;
@@ -55,8 +61,14 @@ function raceAbort<T>(promise: Promise<T>, signal?: AbortSignal): Promise<T> {
     const onAbort = () => reject(new MineruCancelledError());
     signal.addEventListener("abort", onAbort, { once: true });
     promise.then(
-      (v) => { signal.removeEventListener("abort", onAbort); resolve(v); },
-      (e) => { signal.removeEventListener("abort", onAbort); reject(e); },
+      (v) => {
+        signal.removeEventListener("abort", onAbort);
+        resolve(v);
+      },
+      (e) => {
+        signal.removeEventListener("abort", onAbort);
+        reject(e);
+      },
     );
   });
 }
@@ -70,6 +82,39 @@ type OSFileLike = {
   read?: (path: string) => Promise<Uint8Array | ArrayBuffer>;
 };
 
+type DownloadTransport = "fetch" | "zotero-http" | "curl";
+
+type BinaryDownloadAttempt = {
+  transport: DownloadTransport;
+  status: number | null;
+  contentType: string | null;
+  byteLength: number | null;
+  error: string | null;
+};
+
+type BinaryDownloadResult = {
+  bytes: Uint8Array | null;
+  attempts: BinaryDownloadAttempt[];
+};
+
+type CurlDownloadResult = {
+  bytes: Uint8Array | null;
+  attempt: BinaryDownloadAttempt;
+};
+
+type MineruZipExtractionResult =
+  | {
+      ok: true;
+      mdContent: string;
+      files: MinerUExtractedFile[];
+    }
+  | {
+      ok: false;
+      message: string;
+      download: BinaryDownloadResult;
+      zipInspection?: MinerUZipInspectionResult;
+    };
+
 function getIOUtils(): IOUtilsLike | undefined {
   return (globalThis as unknown as { IOUtils?: IOUtilsLike }).IOUtils;
 }
@@ -80,9 +125,19 @@ function getOSFile(): OSFileLike | undefined {
 
 function sleep(ms: number, signal?: AbortSignal): Promise<void> {
   return new Promise((resolve, reject) => {
-    if (signal?.aborted) { reject(new MineruCancelledError()); return; }
+    if (signal?.aborted) {
+      reject(new MineruCancelledError());
+      return;
+    }
     const timer = setTimeout(resolve, ms);
-    signal?.addEventListener("abort", () => { clearTimeout(timer); reject(new MineruCancelledError()); }, { once: true });
+    signal?.addEventListener(
+      "abort",
+      () => {
+        clearTimeout(timer);
+        reject(new MineruCancelledError());
+      },
+      { once: true },
+    );
   });
 }
 
@@ -114,13 +169,28 @@ async function downloadViaCurl(url: string): Promise<Uint8Array | null> {
   // Use system curl to download binary data, bypassing Firefox ESR's TLS stack
   // which cannot connect to Alibaba Cloud OSS.
   try {
-    const Cc = (globalThis as { Components?: { classes?: Record<string, { createInstance: (iface: unknown) => unknown }> } }).Components?.classes;
-    const Ci = (globalThis as { Components?: { interfaces?: Record<string, unknown> } }).Components?.interfaces;
+    const Cc = (
+      globalThis as {
+        Components?: {
+          classes?: Record<
+            string,
+            { createInstance: (iface: unknown) => unknown }
+          >;
+        };
+      }
+    ).Components?.classes;
+    const Ci = (
+      globalThis as { Components?: { interfaces?: Record<string, unknown> } }
+    ).Components?.interfaces;
     if (!Cc || !Ci) return null;
 
-    const dirService = (Cc["@mozilla.org/file/directory_service;1"] as unknown as {
-      getService?: (iface: unknown) => { get?: (prop: string, iface: unknown) => { path?: string } };
-    })?.getService?.(Ci.nsIProperties as unknown);
+    const dirService = (
+      Cc["@mozilla.org/file/directory_service;1"] as unknown as {
+        getService?: (iface: unknown) => {
+          get?: (prop: string, iface: unknown) => { path?: string };
+        };
+      }
+    )?.getService?.(Ci.nsIProperties as unknown);
     const tempDir = dirService?.get?.("TmpD", Ci.nsIFile as unknown);
     if (!tempDir?.path) {
       ztoolkit.log("MinerU download [curl]: cannot resolve temp directory");
@@ -128,7 +198,17 @@ async function downloadViaCurl(url: string): Promise<Uint8Array | null> {
     }
 
     const outPath = `${tempDir.path}${tempDir.path.includes("\\") ? "\\" : "/"}mineru_dl_${Date.now()}.bin`;
-    const exitCode = await runCurl(["-s", "-f", "-o", outPath, "--max-time", "300", "-L", "--url", url]);
+    const exitCode = await runCurl([
+      "-s",
+      "-f",
+      "-o",
+      outPath,
+      "--max-time",
+      "300",
+      "-L",
+      "--url",
+      url,
+    ]);
 
     if (exitCode !== 0) {
       ztoolkit.log(`MinerU download [curl]: failed exit=${exitCode}`);
@@ -142,19 +222,29 @@ async function downloadViaCurl(url: string): Promise<Uint8Array | null> {
       if (io?.read) {
         const data = await io.read(outPath);
         try {
-          const ioFull = (globalThis as unknown as {
-            IOUtils?: { remove?: (path: string) => Promise<void> };
-          }).IOUtils;
+          const ioFull = (
+            globalThis as unknown as {
+              IOUtils?: { remove?: (path: string) => Promise<void> };
+            }
+          ).IOUtils;
           await ioFull?.remove?.(outPath);
-        } catch { /* ignore */ }
-        return data instanceof Uint8Array ? data : new Uint8Array(data as ArrayBuffer);
+        } catch {
+          /* ignore */
+        }
+        return data instanceof Uint8Array
+          ? data
+          : new Uint8Array(data as ArrayBuffer);
       }
       const osFile = getOSFile();
       if (osFile?.read) {
         const data = await osFile.read(outPath);
-        return data instanceof Uint8Array ? data : new Uint8Array(data as ArrayBuffer);
+        return data instanceof Uint8Array
+          ? data
+          : new Uint8Array(data as ArrayBuffer);
       }
-    } catch { /* ignore */ }
+    } catch {
+      /* ignore */
+    }
     return null;
   } catch (e) {
     ztoolkit.log(`MinerU download [curl] threw: ${(e as Error).message}`);
@@ -162,18 +252,146 @@ async function downloadViaCurl(url: string): Promise<Uint8Array | null> {
   }
 }
 
-async function httpGetBinary(url: string): Promise<Uint8Array | null> {
+function getResponseHeader(xhr: unknown, headerName: string): string | null {
+  const getter = (
+    xhr as { getResponseHeader?: (name: string) => string | null }
+  )?.getResponseHeader;
+  if (typeof getter !== "function") return null;
+  try {
+    return getter.call(xhr, headerName);
+  } catch {
+    return null;
+  }
+}
+
+function getCurrentPlatform(): string {
+  try {
+    const zotero = Zotero as unknown as {
+      isWin?: boolean;
+      isMac?: boolean;
+      isLinux?: boolean;
+      platform?: string;
+    };
+    if (zotero.isWin) return "windows";
+    if (zotero.isMac) return "macos";
+    if (zotero.isLinux) return "linux";
+    if (typeof zotero.platform === "string" && zotero.platform.trim()) {
+      return zotero.platform.trim();
+    }
+  } catch {
+    /* ignore */
+  }
+  return "unknown";
+}
+
+function getZoteroVersion(): string {
+  try {
+    const version = (Zotero as unknown as { version?: string }).version;
+    if (typeof version === "string" && version.trim()) return version.trim();
+  } catch {
+    /* ignore */
+  }
+  return "unknown";
+}
+
+function getFinalDownloadAttempt(
+  result: BinaryDownloadResult,
+): BinaryDownloadAttempt | null {
+  if (!result.attempts.length) return null;
+  return result.attempts[result.attempts.length - 1];
+}
+
+function buildDownloadFailureMessage(result: BinaryDownloadResult): string {
+  const attempt = getFinalDownloadAttempt(result);
+  if (!attempt) return "Failed to download ZIP result";
+  if (attempt.status !== null) {
+    return `Failed to download ZIP result: HTTP ${attempt.status} via ${attempt.transport}`;
+  }
+  return `Failed to download ZIP result via ${attempt.transport}`;
+}
+
+function logMineruZipFailure(
+  download: BinaryDownloadResult,
+  zipInspection?: MinerUZipInspectionResult,
+): void {
+  const finalAttempt = getFinalDownloadAttempt(download);
+  const payload = {
+    platform: getCurrentPlatform(),
+    zoteroVersion: getZoteroVersion(),
+    addonVersion,
+    transport: finalAttempt?.transport ?? null,
+    httpStatus: finalAttempt?.status ?? null,
+    contentType: finalAttempt?.contentType ?? null,
+    byteLength: zipInspection?.byteLength ?? finalAttempt?.byteLength ?? null,
+    zipSignature: zipInspection?.zipSignature ?? null,
+    firstBytesHex: zipInspection?.firstBytesHex ?? null,
+    attempts: download.attempts.map((attempt) => ({
+      transport: attempt.transport,
+      status: attempt.status,
+      contentType: attempt.contentType,
+      byteLength: attempt.byteLength,
+      error: attempt.error,
+    })),
+    entryCount: zipInspection?.entryNames.length ?? 0,
+    entryPreview: zipInspection?.entryNames.slice(0, 8) ?? [],
+    zipError:
+      zipInspection && !zipInspection.ok ? (zipInspection.error ?? null) : null,
+  };
+  ztoolkit.log(`MinerU ZIP debug: ${JSON.stringify(payload)}`);
+}
+
+async function downloadViaCurlWithMetadata(
+  url: string,
+): Promise<CurlDownloadResult> {
+  const bytes = await downloadViaCurl(url);
+  return {
+    bytes,
+    attempt: {
+      transport: "curl",
+      status: null,
+      contentType: null,
+      byteLength: bytes?.length ?? null,
+      error: bytes ? null : "curl download failed",
+    },
+  };
+}
+
+async function httpGetBinary(url: string): Promise<BinaryDownloadResult> {
+  const attempts: BinaryDownloadAttempt[] = [];
+
   // Try fetch first (works for cloud storage/CDN URLs with CORS),
   // fall back to Zotero.HTTP.request, then curl.
   try {
     const fetchFn = ztoolkit.getGlobal("fetch") as typeof fetch;
     const resp = await fetchFn(url);
     if (resp.ok) {
-      return new Uint8Array(await resp.arrayBuffer());
+      const bytes = new Uint8Array(await resp.arrayBuffer());
+      attempts.push({
+        transport: "fetch",
+        status: resp.status,
+        contentType: resp.headers.get("content-type"),
+        byteLength: bytes.length,
+        error: null,
+      });
+      return { bytes, attempts };
     }
-  } catch {
-    /* fall through */
+    attempts.push({
+      transport: "fetch",
+      status: resp.status,
+      contentType: resp.headers.get("content-type"),
+      byteLength: null,
+      error: `HTTP ${resp.status}`,
+    });
+  } catch (e) {
+    attempts.push({
+      transport: "fetch",
+      status: null,
+      contentType: null,
+      byteLength: null,
+      error: (e as Error).message || "fetch failed",
+    });
   }
+
   try {
     const xhr = await Zotero.HTTP.request("GET", url, {
       responseType: "arraybuffer",
@@ -182,15 +400,40 @@ async function httpGetBinary(url: string): Promise<Uint8Array | null> {
       errorDelayMax: 0,
     });
     if (xhr.status >= 200 && xhr.status < 300 && xhr.response) {
-      return new Uint8Array(xhr.response as ArrayBuffer);
+      const bytes = new Uint8Array(xhr.response as ArrayBuffer);
+      attempts.push({
+        transport: "zotero-http",
+        status: xhr.status,
+        contentType: getResponseHeader(xhr, "Content-Type"),
+        byteLength: bytes.length,
+        error: null,
+      });
+      return { bytes, attempts };
     }
-  } catch {
-    /* fall through */
+    attempts.push({
+      transport: "zotero-http",
+      status: xhr.status,
+      contentType: getResponseHeader(xhr, "Content-Type"),
+      byteLength: null,
+      error: `HTTP ${xhr.status}`,
+    });
+  } catch (e) {
+    attempts.push({
+      transport: "zotero-http",
+      status: null,
+      contentType: null,
+      byteLength: null,
+      error: (e as Error).message || "Zotero.HTTP failed",
+    });
   }
+
   // Attempt 3: curl (bypasses Firefox ESR TLS issues with Alibaba Cloud OSS)
-  const curlBytes = await downloadViaCurl(url);
-  if (curlBytes) return curlBytes;
-  return null;
+  const curlResult = await downloadViaCurlWithMetadata(url);
+  attempts.push(curlResult.attempt);
+  return {
+    bytes: curlResult.bytes,
+    attempts,
+  };
 }
 
 // ── File reading ──────────────────────────────────────────────────────────────
@@ -224,164 +467,61 @@ async function readPdfBytes(pdfPath: string): Promise<Uint8Array | null> {
   return null;
 }
 
-// ── ZIP extraction ────────────────────────────────────────────────────────────
-
-function findEOCD(zipBytes: Uint8Array): number {
-  const minOffset = Math.max(0, zipBytes.length - 65557);
-  for (let i = zipBytes.length - 22; i >= minOffset; i--) {
-    if (
-      zipBytes[i] === 0x50 &&
-      zipBytes[i + 1] === 0x4b &&
-      zipBytes[i + 2] === 0x05 &&
-      zipBytes[i + 3] === 0x06
-    ) {
-      return i;
-    }
-  }
-  return -1;
-}
-
-async function decompressDeflateRaw(data: Uint8Array): Promise<Uint8Array> {
-  const DecompStream =
-    (globalThis as { DecompressionStream?: typeof DecompressionStream })
-      .DecompressionStream ??
-    (ztoolkit.getGlobal("DecompressionStream") as
-      | typeof DecompressionStream
-      | undefined);
-  if (!DecompStream) {
-    throw new Error("DecompressionStream unavailable");
-  }
-  const ds = new DecompStream("deflate-raw");
-  const writer = ds.writable.getWriter();
-  const reader = ds.readable.getReader() as {
-    read: () => Promise<{ done: boolean; value?: ArrayBuffer }>;
-  };
-  writer.write(data);
-  writer.close();
-
-  const chunks: Uint8Array[] = [];
-  for (;;) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    chunks.push(new Uint8Array(value as ArrayBuffer));
-  }
-  let totalLen = 0;
-  for (const c of chunks) totalLen += c.length;
-  const result = new Uint8Array(totalLen);
-  let off = 0;
-  for (const c of chunks) {
-    result.set(c, off);
-    off += c.length;
-  }
-  return result;
-}
-
-async function extractAllFromZip(
-  zipBytes: Uint8Array,
-): Promise<{ mdContent: string | null; files: MinerUExtractedFile[] }> {
-  const eocdOffset = findEOCD(zipBytes);
-  if (eocdOffset < 0) return { mdContent: null, files: [] };
-
-  const view = new DataView(
-    zipBytes.buffer,
-    zipBytes.byteOffset,
-    zipBytes.byteLength,
-  );
-  const cdOffset = view.getUint32(eocdOffset + 16, true);
-  const cdEntries = view.getUint16(eocdOffset + 10, true);
-
-  const files: MinerUExtractedFile[] = [];
-  let mdContent: string | null = null;
-  let offset = cdOffset;
-
-  for (let i = 0; i < cdEntries; i++) {
-    if (offset + 46 > zipBytes.length) break;
-    const sig = view.getUint32(offset, true);
-    if (sig !== 0x02014b50) break;
-
-    const compressionMethod = view.getUint16(offset + 10, true);
-    const compressedSize = view.getUint32(offset + 20, true);
-    const fileNameLength = view.getUint16(offset + 28, true);
-    const extraFieldLength = view.getUint16(offset + 30, true);
-    const commentLength = view.getUint16(offset + 32, true);
-    const localHeaderOffset = view.getUint32(offset + 42, true);
-
-    const fileNameBytes = zipBytes.subarray(
-      offset + 46,
-      offset + 46 + fileNameLength,
-    );
-    const fileName = new TextDecoder().decode(fileNameBytes);
-
-    // Skip directories and macOS metadata
-    if (!fileName.endsWith("/") && !fileName.startsWith("__MACOSX/")) {
-      const localNameLen = view.getUint16(localHeaderOffset + 26, true);
-      const localExtraLen = view.getUint16(localHeaderOffset + 28, true);
-      const dataStart = localHeaderOffset + 30 + localNameLen + localExtraLen;
-      const compressedData = zipBytes.subarray(
-        dataStart,
-        dataStart + compressedSize,
-      );
-
-      let fileData: Uint8Array | null = null;
-      if (compressionMethod === 0) {
-        fileData = new Uint8Array(compressedData);
-      } else if (compressionMethod === 8) {
-        try {
-          fileData = await decompressDeflateRaw(compressedData);
-        } catch (e) {
-          ztoolkit.log(
-            `MinerU: failed to decompress ${fileName}: ${(e as Error).message}`,
-          );
-        }
-      } else {
-        ztoolkit.log(
-          `MinerU: unsupported ZIP compression method ${compressionMethod} for ${fileName}`,
-        );
-      }
-
-      if (fileData) {
-        files.push({ relativePath: fileName, data: fileData });
-        if (fileName.endsWith(".md") && !mdContent) {
-          mdContent = new TextDecoder("utf-8").decode(fileData);
-        }
-      }
-    }
-
-    offset += 46 + fileNameLength + extraFieldLength + commentLength;
-  }
-
-  return { mdContent, files };
-}
-
 async function downloadAndExtractZip(
   zipUrl: string,
   report: (s: string) => void,
-): Promise<{ mdContent: string | null; files: MinerUExtractedFile[] } | null> {
+): Promise<MineruZipExtractionResult> {
   report("Downloading results…");
-  const zipBytes = await httpGetBinary(zipUrl);
-  if (!zipBytes) {
-    report("Failed to download ZIP result");
-    return null;
+  const downloadResult = await httpGetBinary(zipUrl);
+  if (!downloadResult.bytes) {
+    return {
+      ok: false,
+      message: buildDownloadFailureMessage(downloadResult),
+      download: downloadResult,
+    };
   }
+
   report("Extracting files…");
-  return extractAllFromZip(zipBytes);
+  const zipInspection = inspectMineruZipBytes(downloadResult.bytes);
+  if (!zipInspection.ok) {
+    return {
+      ok: false,
+      message: describeMineruZipInspectionFailure(zipInspection),
+      download: downloadResult,
+      zipInspection,
+    };
+  }
+
+  return {
+    ok: true,
+    mdContent: zipInspection.mdContent,
+    files: zipInspection.files,
+  };
 }
 
 // ── Presigned URL upload workflow ──────────────────────────────────────────────
 
 function getCurlPath(): string | null {
-  const xulRuntime = (globalThis as {
-    Components?: {
-      classes?: Record<string, { getService?: (iface: unknown) => { OS?: string } }>;
-      interfaces?: Record<string, unknown>;
-    };
-  }).Components;
+  const xulRuntime = (
+    globalThis as {
+      Components?: {
+        classes?: Record<
+          string,
+          { getService?: (iface: unknown) => { OS?: string } }
+        >;
+        interfaces?: Record<string, unknown>;
+      };
+    }
+  ).Components;
   let osName = "";
   try {
-    const xr = xulRuntime?.classes?.["@mozilla.org/xre/app-info;1"]
-      ?.getService?.(xulRuntime?.interfaces?.nsIXULRuntime as unknown);
+    const xr = xulRuntime?.classes?.[
+      "@mozilla.org/xre/app-info;1"
+    ]?.getService?.(xulRuntime?.interfaces?.nsIXULRuntime as unknown);
     osName = (xr?.OS || "").toLowerCase();
-  } catch { /* ignore */ }
+  } catch {
+    /* ignore */
+  }
 
   if (osName === "winnt") return "C:\\Windows\\System32\\curl.exe";
   if (osName === "darwin") return "/usr/bin/curl";
@@ -389,9 +529,12 @@ function getCurlPath(): string | null {
 
   // Fallback: try platform string from Zotero
   try {
-    const platform = (Zotero as unknown as { platform?: string }).platform || "";
+    const platform =
+      (Zotero as unknown as { platform?: string }).platform || "";
     if (/win/i.test(platform)) return "C:\\Windows\\System32\\curl.exe";
-  } catch { /* ignore */ }
+  } catch {
+    /* ignore */
+  }
 
   return "/usr/bin/curl";
 }
@@ -403,17 +546,25 @@ function getSubprocess(): any | null {
     const CU = (globalThis as any).ChromeUtils;
     if (CU?.importESModule) {
       try {
-        const mod = CU.importESModule("resource://gre/modules/Subprocess.sys.mjs");
+        const mod = CU.importESModule(
+          "resource://gre/modules/Subprocess.sys.mjs",
+        );
         return mod.Subprocess || mod.default || mod;
-      } catch { /* fallback */ }
+      } catch {
+        /* fallback */
+      }
     }
     if (CU?.import) {
       try {
         const mod = CU.import("resource://gre/modules/Subprocess.jsm");
         return mod.Subprocess || mod;
-      } catch { /* fallback */ }
+      } catch {
+        /* fallback */
+      }
     }
-  } catch { /* ignore */ }
+  } catch {
+    /* ignore */
+  }
   return null;
 }
 
@@ -438,7 +589,13 @@ async function runCurl(args: string[], timeoutMs = 300000): Promise<number> {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const drain = async (pipe: any) => {
         if (!pipe?.readString) return;
-        try { while (await pipe.readString()) { /* discard */ } } catch { /* pipe closed */ }
+        try {
+          while (await pipe.readString()) {
+            /* discard */
+          }
+        } catch {
+          /* pipe closed */
+        }
       };
       const resultPromise = (async () => {
         await Promise.all([drain(proc.stdout), drain(proc.stderr)]);
@@ -447,38 +604,65 @@ async function runCurl(args: string[], timeoutMs = 300000): Promise<number> {
       })();
       const race = await Promise.race([
         resultPromise,
-        new Promise<"timeout">(r => setTimeout(() => r("timeout"), timeoutMs)),
+        new Promise<"timeout">((r) =>
+          setTimeout(() => r("timeout"), timeoutMs),
+        ),
       ]);
       if (race === "timeout") {
-        try { proc.kill(); } catch { /* ignore */ }
+        try {
+          proc.kill();
+        } catch {
+          /* ignore */
+        }
         return -1;
       }
       return race;
     } catch (e) {
-      ztoolkit.log(`runCurl Subprocess.call failed: ${(e as Error).message}, falling back to nsIProcess`);
+      ztoolkit.log(
+        `runCurl Subprocess.call failed: ${(e as Error).message}, falling back to nsIProcess`,
+      );
     }
   }
 
   // Fallback: nsIProcess (shows console on Windows, but works everywhere)
   try {
-    const Cc = (globalThis as { Components?: { classes?: Record<string, { createInstance: (iface: unknown) => unknown }> } }).Components?.classes;
-    const Ci = (globalThis as { Components?: { interfaces?: Record<string, unknown> } }).Components?.interfaces;
+    const Cc = (
+      globalThis as {
+        Components?: {
+          classes?: Record<
+            string,
+            { createInstance: (iface: unknown) => unknown }
+          >;
+        };
+      }
+    ).Components?.classes;
+    const Ci = (
+      globalThis as { Components?: { interfaces?: Record<string, unknown> } }
+    ).Components?.interfaces;
     if (!Cc || !Ci) return -1;
 
-    const localFile = Cc["@mozilla.org/file/local;1"]?.createInstance(Ci.nsIFile as unknown) as {
-      initWithPath?: (path: string) => void;
-      exists?: () => boolean;
-    } | undefined;
+    const localFile = Cc["@mozilla.org/file/local;1"]?.createInstance(
+      Ci.nsIFile as unknown,
+    ) as
+      | {
+          initWithPath?: (path: string) => void;
+          exists?: () => boolean;
+        }
+      | undefined;
     if (!localFile?.initWithPath) return -1;
     localFile.initWithPath(curlPath);
     if (localFile.exists && !localFile.exists()) return -1;
 
-    const process = Cc["@mozilla.org/process/util;1"]?.createInstance(Ci.nsIProcess as unknown) as {
-      init?: (executable: unknown) => void;
-      run?: (blocking: boolean, args: string[], count: number) => void;
-      runAsync?: (args: string[], count: number, observer: unknown) => void;
-      exitValue?: number;
-    } | undefined;
+    const process = Cc["@mozilla.org/process/util;1"]?.createInstance(
+      Ci.nsIProcess as unknown,
+    ) as
+      | {
+          init?: (executable: unknown) => void;
+          run?: (blocking: boolean, args: string[], count: number) => void;
+          runAsync?: (args: string[], count: number, observer: unknown) => void;
+          exitValue?: number;
+        }
+      | undefined;
     if (!process?.init) return -1;
     process.init(localFile);
 
@@ -490,7 +674,9 @@ async function runCurl(args: string[], timeoutMs = 300000): Promise<number> {
     return new Promise<number>((resolve) => {
       const observer = {
         observe(_subject: unknown, topic: string) {
-          resolve(topic === "process-finished" ? (process.exitValue ?? -1) : -1);
+          resolve(
+            topic === "process-finished" ? (process.exitValue ?? -1) : -1,
+          );
         },
         QueryInterface: () => observer,
       };
@@ -512,8 +698,19 @@ async function uploadViaCurl(
   //
   // We copy the PDF to a temp file with an ASCII-only name to avoid
   // curl read errors from unicode characters in the original path (exit 26).
-  const Cc = (globalThis as { Components?: { classes?: Record<string, { createInstance: (iface: unknown) => unknown }> } }).Components?.classes;
-  const Ci = (globalThis as { Components?: { interfaces?: Record<string, unknown> } }).Components?.interfaces;
+  const Cc = (
+    globalThis as {
+      Components?: {
+        classes?: Record<
+          string,
+          { createInstance: (iface: unknown) => unknown }
+        >;
+      };
+    }
+  ).Components?.classes;
+  const Ci = (
+    globalThis as { Components?: { interfaces?: Record<string, unknown> } }
+  ).Components?.interfaces;
   if (!Cc || !Ci) {
     ztoolkit.log("MinerU upload [curl]: Components unavailable");
     return { status: 0 };
@@ -523,9 +720,13 @@ async function uploadViaCurl(
   let uploadPath = pdfPath;
   let tempUploadPath: string | null = null;
   try {
-    const dirService = (Cc["@mozilla.org/file/directory_service;1"] as unknown as {
-      getService?: (iface: unknown) => { get?: (prop: string, iface: unknown) => { path?: string } };
-    })?.getService?.(Ci.nsIProperties as unknown);
+    const dirService = (
+      Cc["@mozilla.org/file/directory_service;1"] as unknown as {
+        getService?: (iface: unknown) => {
+          get?: (prop: string, iface: unknown) => { path?: string };
+        };
+      }
+    )?.getService?.(Ci.nsIProperties as unknown);
     const tempDir = dirService?.get?.("TmpD", Ci.nsIFile as unknown);
     if (tempDir?.path) {
       const sep = tempDir.path.includes("\\") ? "\\" : "/";
@@ -536,28 +737,47 @@ async function uploadViaCurl(
         uploadPath = tempUploadPath;
       } else {
         const osFile = getOSFile();
-        if ((osFile as { writeAtomic?: (path: string, data: Uint8Array) => Promise<void> })?.writeAtomic) {
-          await (osFile as { writeAtomic: (path: string, data: Uint8Array) => Promise<void> }).writeAtomic(tempUploadPath, pdfBytes);
+        if (
+          (
+            osFile as {
+              writeAtomic?: (path: string, data: Uint8Array) => Promise<void>;
+            }
+          )?.writeAtomic
+        ) {
+          await (
+            osFile as {
+              writeAtomic: (path: string, data: Uint8Array) => Promise<void>;
+            }
+          ).writeAtomic(tempUploadPath, pdfBytes);
           uploadPath = tempUploadPath;
         }
       }
     }
   } catch (e) {
-    ztoolkit.log(`MinerU upload [curl]: temp file write failed: ${(e as Error).message}, using original path`);
+    ztoolkit.log(
+      `MinerU upload [curl]: temp file write failed: ${(e as Error).message}, using original path`,
+    );
   }
 
   const cleanupTemp = () => {
     if (tempUploadPath && uploadPath === tempUploadPath) {
       try {
-        const ioFull = (globalThis as unknown as {
-          IOUtils?: { remove?: (path: string) => Promise<void> };
-        }).IOUtils;
+        const ioFull = (
+          globalThis as unknown as {
+            IOUtils?: { remove?: (path: string) => Promise<void> };
+          }
+        ).IOUtils;
         ioFull?.remove?.(tempUploadPath);
-      } catch { /* ignore */ }
+      } catch {
+        /* ignore */
+      }
     }
   };
 
-  const exitCode = await runCurl(["-s", "-f", "-T", uploadPath, "--max-time", "180", "--url", url], 200000);
+  const exitCode = await runCurl(
+    ["-s", "-f", "-T", uploadPath, "--max-time", "180", "--url", url],
+    200000,
+  );
   cleanupTemp();
 
   if (exitCode === 0) {
@@ -578,7 +798,11 @@ async function httpPutBinary(
   throwIfAborted(signal);
 
   const urlHost = (() => {
-    try { return new URL(url).host; } catch { return "unknown"; }
+    try {
+      return new URL(url).host;
+    } catch {
+      return "unknown";
+    }
   })();
 
   // Attempt 1: curl (uses system TLS stack, works for Alibaba Cloud OSS)
@@ -591,8 +815,12 @@ async function httpPutBinary(
   // Attempt 2: fetch (with timeout)
   try {
     const fetchFn = ztoolkit.getGlobal("fetch") as typeof fetch;
-    const AbortCtrl = (globalThis as { AbortController?: typeof AbortController }).AbortController
-      ?? ztoolkit.getGlobal("AbortController") as typeof AbortController | undefined;
+    const AbortCtrl =
+      (globalThis as { AbortController?: typeof AbortController })
+        .AbortController ??
+      (ztoolkit.getGlobal("AbortController") as
+        | typeof AbortController
+        | undefined);
     let fetchSignal: AbortSignal | undefined;
     let timer: ReturnType<typeof setTimeout> | undefined;
     if (AbortCtrl) {
@@ -609,11 +837,15 @@ async function httpPutBinary(
       signal: fetchSignal,
     });
     if (timer) clearTimeout(timer);
-    ztoolkit.log(`MinerU upload [fetch]: status=${resp.status} host=${urlHost}`);
+    ztoolkit.log(
+      `MinerU upload [fetch]: status=${resp.status} host=${urlHost}`,
+    );
     return { status: resp.status };
   } catch (e) {
     if (signal?.aborted) throw new MineruCancelledError();
-    ztoolkit.log(`MinerU upload [fetch] threw: ${(e as Error).message} host=${urlHost}`);
+    ztoolkit.log(
+      `MinerU upload [fetch] threw: ${(e as Error).message} host=${urlHost}`,
+    );
   }
 
   throwIfAborted(signal);
@@ -627,11 +859,15 @@ async function httpPutBinary(
       timeout: REQUEST_TIMEOUT_MS * 2,
       errorDelayMax: 0,
     });
-    ztoolkit.log(`MinerU upload [Zotero.HTTP]: status=${xhr.status} host=${urlHost}`);
+    ztoolkit.log(
+      `MinerU upload [Zotero.HTTP]: status=${xhr.status} host=${urlHost}`,
+    );
     if (xhr.status > 0) return { status: xhr.status };
   } catch (e) {
     if (signal?.aborted) throw new MineruCancelledError();
-    ztoolkit.log(`MinerU upload [Zotero.HTTP] threw: ${(e as Error).message} host=${urlHost}`);
+    ztoolkit.log(
+      `MinerU upload [Zotero.HTTP] threw: ${(e as Error).message} host=${urlHost}`,
+    );
   }
 
   return { status: 0 };
@@ -679,8 +915,10 @@ async function parsePdfViaUpload(
     throw new MineruRateLimitError("MinerU daily quota exceeded (HTTP 429)");
   }
   if (batchResult.status < 200 || batchResult.status >= 300) {
-    const respMsg = typeof (batchResult.data as { msg?: string })?.msg === "string"
-      ? (batchResult.data as { msg: string }).msg : "";
+    const respMsg =
+      typeof (batchResult.data as { msg?: string })?.msg === "string"
+        ? (batchResult.data as { msg: string }).msg
+        : "";
     if (/rate.?limit|quota|exceeded|limit.*reached/i.test(respMsg)) {
       throw new MineruRateLimitError(`MinerU rate limit: ${respMsg}`);
     }
@@ -705,17 +943,18 @@ async function parsePdfViaUpload(
   // and adding it would cause Alibaba OSS to return 403.
   // Race the entire upload chain against the abort signal so pause/stop
   // takes effect immediately, even while curl is blocked.
-  const uploadResult = await raceAbort(httpPutBinary(
-    fileUrls[0],
-    {},
-    pdfPath,
-    pdfBytes,
+  const uploadResult = await raceAbort(
+    httpPutBinary(fileUrls[0], {}, pdfPath, pdfBytes, signal),
     signal,
-  ), signal);
+  );
 
   if (uploadResult.status < 200 || uploadResult.status >= 300) {
     const uploadHost = (() => {
-      try { return new URL(fileUrls[0]).host; } catch { return fileUrls[0].slice(0, 80); }
+      try {
+        return new URL(fileUrls[0]).host;
+      } catch {
+        return fileUrls[0].slice(0, 80);
+      }
     })();
     report(`Upload failed: HTTP ${uploadResult.status} to ${uploadHost}`);
     return null;
@@ -746,19 +985,25 @@ async function parsePdfViaUpload(
     } | null;
     const extractResult = pollData?.data?.extract_result?.[0];
     if (!extractResult) {
-      ztoolkit.log(`MinerU: poll response has no extract_result: ${JSON.stringify(pollResult.data).slice(0, 200)}`);
+      ztoolkit.log(
+        `MinerU: poll response has no extract_result: ${JSON.stringify(pollResult.data).slice(0, 200)}`,
+      );
       continue;
     }
 
     ztoolkit.log(`MinerU: poll state="${extractResult.state}"`);
 
     if (extractResult.state === "done" && extractResult.full_zip_url) {
-      const extracted = await downloadAndExtractZip(extractResult.full_zip_url, report);
-      if (extracted?.mdContent) {
+      const extracted = await downloadAndExtractZip(
+        extractResult.full_zip_url,
+        report,
+      );
+      if (extracted.ok) {
         report(`Done (${extracted.files.length} files extracted)`);
         return { mdContent: extracted.mdContent, files: extracted.files };
       }
-      report("Failed to extract markdown from ZIP");
+      report(extracted.message);
+      logMineruZipFailure(extracted.download, extracted.zipInspection);
       return null;
     }
 
@@ -803,7 +1048,10 @@ async function testOssViaCurl(ossUrl: string): Promise<boolean> {
   // -s: silent, -o /dev/null: discard body, --max-time 10: timeout
   // No -f: we want exit 0 even on 403 (proves connectivity)
   const devNull = (getCurlPath() || "").includes("\\") ? "NUL" : "/dev/null";
-  const exitCode = await runCurl(["-s", "-o", devNull, "--max-time", "10", "--head", "--url", ossUrl], 15000);
+  const exitCode = await runCurl(
+    ["-s", "-o", devNull, "--max-time", "10", "--head", "--url", ossUrl],
+    15000,
+  );
   return exitCode === 0;
 }
 
@@ -826,8 +1074,12 @@ export async function testMineruConnection(apiKey: string): Promise<void> {
   // Attempt 1: fetch with timeout
   try {
     const fetchFn = ztoolkit.getGlobal("fetch") as typeof fetch;
-    const AbortCtrl = (globalThis as { AbortController?: typeof AbortController }).AbortController
-      ?? ztoolkit.getGlobal("AbortController") as typeof AbortController | undefined;
+    const AbortCtrl =
+      (globalThis as { AbortController?: typeof AbortController })
+        .AbortController ??
+      (ztoolkit.getGlobal("AbortController") as
+        | typeof AbortController
+        | undefined);
     let signal: AbortSignal | undefined;
     let timer: ReturnType<typeof setTimeout> | undefined;
     if (AbortCtrl) {
@@ -839,7 +1091,9 @@ export async function testMineruConnection(apiKey: string): Promise<void> {
     if (timer) clearTimeout(timer);
     // Any HTTP status (even 403) means the connection succeeded
     ossReachable = resp.status > 0;
-  } catch { /* fall through */ }
+  } catch {
+    /* fall through */
+  }
 
   // Attempt 2: Zotero.HTTP
   if (!ossReachable) {
@@ -849,7 +1103,9 @@ export async function testMineruConnection(apiKey: string): Promise<void> {
         timeout: 10000,
       });
       ossReachable = xhr.status > 0;
-    } catch { /* fall through */ }
+    } catch {
+      /* fall through */
+    }
   }
 
   // Attempt 3: curl (the actual upload/download path uses curl, so test that too)
@@ -860,7 +1116,7 @@ export async function testMineruConnection(apiKey: string): Promise<void> {
   if (!ossReachable) {
     throw new Error(
       "API key is valid, but cannot reach Alibaba Cloud OSS (mineru.oss-cn-shanghai.aliyuncs.com). " +
-      "This may be caused by your network environment. MinerU parsing will likely fail.",
+        "This may be caused by your network environment. MinerU parsing will likely fail.",
     );
   }
 }
@@ -875,6 +1131,8 @@ export async function testProxyConnection(): Promise<void> {
     {},
   );
   if (result.status === 401 || result.status === 403) {
-    throw new Error("Proxy authentication failed — please provide your own API key");
+    throw new Error(
+      "Proxy authentication failed — please provide your own API key",
+    );
   }
 }
