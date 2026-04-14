@@ -31,11 +31,10 @@ describe("mineruZip", function () {
     const globalScope = globalThis as typeof globalThis & {
       DecompressionStream?: unknown;
     };
-    const hadProperty = Object.prototype.hasOwnProperty.call(
+    const savedDescriptor = Object.getOwnPropertyDescriptor(
       globalScope,
       "DecompressionStream",
     );
-    const original = globalScope.DecompressionStream;
 
     Object.defineProperty(globalScope, "DecompressionStream", {
       value: undefined,
@@ -56,12 +55,8 @@ describe("mineruZip", function () {
         ["full.md", "images/fig1.png"],
       );
     } finally {
-      if (hadProperty) {
-        Object.defineProperty(globalScope, "DecompressionStream", {
-          value: original,
-          configurable: true,
-          writable: true,
-        });
+      if (savedDescriptor) {
+        Object.defineProperty(globalScope, "DecompressionStream", savedDescriptor);
       } else {
         delete globalScope.DecompressionStream;
       }
@@ -103,6 +98,39 @@ describe("mineruZip", function () {
       describeMineruZipInspectionFailure(result),
       "Downloaded result is not a ZIP archive",
     );
+  });
+
+  it("reports empty Markdown as a failure", function () {
+    const zipBytes = zipSync({
+      "full.md": strToU8(""),
+      "images/figure-1.png": new Uint8Array([1, 2, 3]),
+    });
+
+    const result = inspectMineruZipBytes(zipBytes);
+    assert.isFalse(result.ok);
+    if (result.ok) {
+      throw new Error("Expected ZIP inspection to fail for empty markdown");
+    }
+
+    assert.equal(result.reason, "md_empty");
+    assert.match(
+      describeMineruZipInspectionFailure(result),
+      /empty/i,
+    );
+  });
+
+  it("reports whitespace-only Markdown as a failure", function () {
+    const zipBytes = zipSync({
+      "full.md": strToU8("   \n  \n  "),
+    });
+
+    const result = inspectMineruZipBytes(zipBytes);
+    assert.isFalse(result.ok);
+    if (result.ok) {
+      throw new Error("Expected ZIP inspection to fail for whitespace-only markdown");
+    }
+
+    assert.equal(result.reason, "md_empty");
   });
 
   it("reports ZIPs that do not contain Markdown", function () {

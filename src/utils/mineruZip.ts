@@ -8,7 +8,8 @@ export type MinerUZipFile = {
 export type MinerUZipInspectionFailureReason =
   | "not_zip"
   | "zip_extract_failed"
-  | "md_missing";
+  | "md_missing"
+  | "md_empty";
 
 type MinerUZipInspectionBase = {
   byteLength: number;
@@ -113,9 +114,22 @@ export function inspectMineruZipBytes(
       };
     }
 
+    const mdContent = new TextDecoder("utf-8").decode(mdFile.data);
+    if (!mdContent.trim()) {
+      return {
+        ok: false,
+        reason: "md_empty",
+        files,
+        entryNames,
+        byteLength,
+        firstBytesHex,
+        zipSignature,
+      };
+    }
+
     return {
       ok: true,
-      mdContent: new TextDecoder("utf-8").decode(mdFile.data),
+      mdContent,
       files,
       entryNames,
       byteLength,
@@ -146,6 +160,8 @@ export function describeMineruZipInspectionFailure(
       return "Downloaded result is not a ZIP archive";
     case "md_missing":
       return "ZIP extracted, but no Markdown file was found";
+    case "md_empty":
+      return "ZIP extracted, but the Markdown file is empty (possibly image-only PDF)";
     case "zip_extract_failed":
       return result.error
         ? `Failed to extract ZIP entries: ${result.error}`
