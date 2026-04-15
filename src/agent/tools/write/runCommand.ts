@@ -78,8 +78,8 @@ async function executeCommand(params: {
         const tempDir = (globalThis as any).Services?.dirsvc
           ?.get("TmpD", Components?.interfaces?.nsIFile)?.path
           || "C:\\Windows\\Temp";
-        const tempOut = `${tempDir}\\zotero-llm-cmd-output.txt`;
-        const wrappedCommand = `${command} > "${tempOut}" 2>&1`;
+        const tempOut = `${tempDir}\\zotero-llm-cmd-${Date.now()}-${Math.random().toString(36).slice(2, 8)}.txt`;
+        const wrappedCommand = `( ${command} ) > "${tempOut}" 2>&1`;
 
         const proc = await Subprocess.call({
           command: shell,
@@ -113,7 +113,8 @@ async function executeCommand(params: {
         let stdout = "";
         try {
           const IOUtils = (globalThis as any).IOUtils;
-          stdout = await IOUtils.readUTF8(tempOut);
+          const data = await IOUtils.read(tempOut);
+          stdout = new TextDecoder("utf-8").decode(data instanceof Uint8Array ? data : new Uint8Array(data));
           await IOUtils.remove(tempOut, { ignoreAbsent: true });
         } catch { /* temp file missing or unreadable */ }
 
