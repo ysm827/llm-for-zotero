@@ -5,6 +5,7 @@ import {
 import { normalizePositiveInt } from "./normalizers";
 import {
   getLastUsedPaperConversationKey,
+  buildPaperStateKey,
 } from "./prefHelpers";
 import { activePaperConversationByPaper } from "./state";
 import type { ActiveNoteSession, GlobalPortalItem, PaperPortalItem } from "./types";
@@ -293,9 +294,6 @@ export function resolveConversationBaseItem(
   return targetItem?.isRegularItem?.() ? targetItem : null;
 }
 
-export function buildPaperStateKey(libraryID: number, paperItemID: number): string {
-  return `${Math.floor(libraryID)}:${Math.floor(paperItemID)}`;
-}
 
 function resolveLibraryIdFromItem(
   targetItem: Zotero.Item | null | undefined,

@@ -14,9 +14,8 @@ import {
   resolveConversationBaseItem,
   createGlobalPortalItem,
   createPaperPortalItem,
-  buildPaperStateKey,
 } from "./portalScope";
-import { getLockedGlobalConversationKey } from "./prefHelpers";
+import { getLockedGlobalConversationKey, buildPaperStateKey } from "./prefHelpers";
 import { applyPanelFontScale } from "./prefHelpers";
 import { buildUI } from "./buildUI";
 import { setupHandlers, type SetupHandlersHooks } from "./setupHandlers";

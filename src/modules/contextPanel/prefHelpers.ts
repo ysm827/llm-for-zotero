@@ -66,7 +66,7 @@ const REASONING_LEVEL_SELECTIONS = new Set<ReasoningLevelSelection>([
   "xhigh",
 ]);
 
-function buildPaperConversationMapKey(
+export function buildPaperStateKey(
   libraryID: number,
   paperItemID: number,
 ): string {
@@ -151,7 +151,7 @@ export function getLastUsedPaperConversationKey(
   if (!Number.isFinite(libraryID) || libraryID <= 0) return null;
   if (!Number.isFinite(paperItemID) || paperItemID <= 0) return null;
   const map = getLastPaperConversationMap();
-  const key = buildPaperConversationMapKey(libraryID, paperItemID);
+  const key = buildPaperStateKey(libraryID, paperItemID);
   const value = Number(map[key]);
   if (!Number.isFinite(value) || value <= 0) return null;
   return Math.floor(value);
@@ -166,7 +166,7 @@ export function setLastUsedPaperConversationKey(
   if (!Number.isFinite(paperItemID) || paperItemID <= 0) return;
   if (!Number.isFinite(conversationKey) || conversationKey <= 0) return;
   const map = getLastPaperConversationMap();
-  const key = buildPaperConversationMapKey(libraryID, paperItemID);
+  const key = buildPaperStateKey(libraryID, paperItemID);
   map[key] = Math.floor(conversationKey);
   setLastPaperConversationMap(map);
 }
@@ -178,7 +178,7 @@ export function removeLastUsedPaperConversationKey(
   if (!Number.isFinite(libraryID) || libraryID <= 0) return;
   if (!Number.isFinite(paperItemID) || paperItemID <= 0) return;
   const map = getLastPaperConversationMap();
-  const key = buildPaperConversationMapKey(libraryID, paperItemID);
+  const key = buildPaperStateKey(libraryID, paperItemID);
   if (!(key in map)) return;
   delete map[key];
   setLastPaperConversationMap(map);

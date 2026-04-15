@@ -114,6 +114,7 @@ import {
   removeLastUsedPaperConversationKey,
   getLockedGlobalConversationKey,
   setLockedGlobalConversationKey,
+  buildPaperStateKey,
 } from "./prefHelpers";
 import {
   sendQuestion,
@@ -358,8 +359,6 @@ export function setupHandlers(
   const resolvedInitialState = resolveInitialPanelItemState(initialItem);
   let item = resolvedInitialState.item;
   let basePaperItem = resolvedInitialState.basePaperItem;
-  const buildPaperStateKey = (libraryID: number, paperItemID: number): string =>
-    `${Math.floor(libraryID)}:${Math.floor(paperItemID)}`;
   const resolveLibraryIdFromItem = (
     targetItem: Zotero.Item | null | undefined,
   ): number => {
