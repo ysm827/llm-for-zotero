@@ -3128,6 +3128,9 @@ export async function sendQuestion(opts: import("./types").SendQuestionOptions) 
       await persistAssistantOnce();
       restoreRequestUIIdle(body, conversationKey, thisRequestId);
       setStatusSafely(errMsg, "error");
+    } finally {
+      setAbortController(conversationKey, null);
+      setPendingRequestId(conversationKey, 0);
     }
     return;
   }
