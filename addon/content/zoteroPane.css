@@ -4196,6 +4196,128 @@ label.llm-search-results-item:hover {
   flex: 1;
 }
 
+/* Mode toggle tabs at the top of a multi-mode paper_result_list (e.g.
+   Recommendations / References / Citations on discover_related). */
+.llm-search-mode-tabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  padding: 4px;
+  margin-bottom: 8px;
+  border-radius: var(--llm-action-surface-radius);
+  background: var(--llm-action-surface-bg);
+  border: var(--llm-action-surface-border);
+}
+
+.llm-search-mode-tab {
+  all: unset;
+  box-sizing: border-box;
+  cursor: pointer;
+  flex: 1 1 auto;
+  text-align: center;
+  min-height: 28px;
+  padding: 5px 10px;
+  border-radius: 8px;
+  font-size: var(--llm-fs-11);
+  font-weight: 500;
+  color: var(--fill-secondary);
+}
+
+.llm-search-mode-tab:hover {
+  background: color-mix(in srgb, var(--fill-quaternary) 60%, transparent);
+  color: var(--fill-primary);
+}
+
+.llm-search-mode-tab-active {
+  background: var(--color-accent, #3584e4);
+  color: #fff;
+}
+
+.llm-search-mode-tab-active:hover {
+  background: var(--color-accent, #3584e4);
+  color: #fff;
+  opacity: 0.9;
+}
+
+.llm-search-mode-tab:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+/* "Select all" single-checkbox (replaces the Select all / Deselect all
+   button pair at the top of paper_result_list). */
+.llm-search-select-all {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  cursor: pointer;
+  user-select: none;
+  font-size: var(--llm-fs-11);
+  color: var(--fill-secondary);
+  padding: 4px 8px 4px 2px;
+}
+
+.llm-search-select-all:hover {
+  color: var(--fill-primary);
+}
+
+.llm-search-select-all-checkbox {
+  margin: 0;
+  flex: 0 0 auto;
+}
+
+.llm-search-select-all-checkbox:disabled + .llm-search-select-all-text {
+  opacity: 0.55;
+}
+
+/* "Load more" button shown at the bottom of the list when the field has
+   `loadMoreActionId`. Clicking it resolves the card with the load_more
+   action, which the driving action handles by fetching an expanded result
+   set and re-invoking requestConfirmation. */
+.llm-search-load-more-wrap {
+  display: flex;
+  justify-content: center;
+  padding: 10px 4px 2px;
+}
+
+.llm-search-load-more-btn {
+  all: unset;
+  box-sizing: border-box;
+  cursor: pointer;
+  padding: 6px 18px;
+  border-radius: 999px;
+  font-size: var(--llm-fs-11);
+  font-weight: 500;
+  color: var(--fill-secondary);
+  border: 1px solid
+    color-mix(in srgb, var(--stroke-secondary) 80%, transparent);
+  background: var(--llm-action-surface-bg);
+}
+
+.llm-search-load-more-btn:hover {
+  color: var(--fill-primary);
+  border-color: var(--color-accent, #3584e4);
+  background: color-mix(in srgb, var(--color-accent, #3584e4) 10%, transparent);
+}
+
+.llm-search-load-more-btn:disabled {
+  opacity: 0.55;
+  cursor: wait;
+}
+
+/* Shown when the active mode has no results. */
+.llm-search-results-empty {
+  padding: 14px 16px;
+  border: 1px dashed
+    color-mix(in srgb, var(--stroke-secondary) 60%, transparent);
+  border-radius: var(--llm-action-surface-radius);
+  background: var(--llm-action-surface-bg);
+  font-size: var(--llm-fs-11);
+  color: var(--fill-tertiary);
+  font-style: italic;
+  text-align: center;
+}
+
 .llm-search-sort-group {
   display: flex;
   align-items: center;
@@ -5336,15 +5458,14 @@ label.llm-search-results-item:hover {
   border-radius: var(--llm-action-surface-radius);
   border: var(--llm-action-surface-border);
   background: var(--llm-action-surface-bg-strong);
-  /* Bound the card within the chat panel. Without this, long review lists
-     (e.g. discover_related returning 20 papers) blow the card past the
-     viewport. `max-height: 100%` anchors it to the messages container's
-     height; the card's own overflow-y:auto handles internal scrolling. */
-  max-height: 100%;
-  overflow-y: auto;
-  overflow-x: hidden;
-  overscroll-behavior: contain;
-  min-height: 0;
+  /* IMPORTANT: no max-height, min-height, or overflow here.
+     `.llm-messages` is a flex column with overflow-y:auto — it handles all
+     scrolling natively. Every time I've tried to constrain the card itself
+     (max-height: 70vh, max-height: 100%, min-height: 0), I've broken a
+     different layout (card blows out of window; card barely visible; card
+     squeezed by sibling flex pressure). Leave it at natural size and let
+     the messages container scroll. */
+  flex: 0 0 auto;
 }
 
 /* ── Action progress indicator (in-thread "working" card) ─────────────── */

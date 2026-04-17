@@ -46,7 +46,9 @@ export const discoverRelatedAction: AgentAction<DiscoverRelatedInput, DiscoverRe
       },
       limit: {
         type: "number",
-        description: "Max number of related papers to retrieve. Default: 10.",
+        description:
+          "Max number of related papers to retrieve per mode. Default: 20. " +
+          "Invoke as `/discover_related 30` (or any number) to override.",
       },
     },
   },
@@ -57,7 +59,7 @@ export const discoverRelatedAction: AgentAction<DiscoverRelatedInput, DiscoverRe
   ): Promise<ActionResult<DiscoverRelatedOutput>> {
     const STEPS = 3;
     let step = 0;
-    const mode = input.mode || "recommendations";
+    const defaultMode = input.mode || "recommendations";
 
     // Step 1: get seed item metadata
     ctx.onProgress({
@@ -95,38 +97,17 @@ export const discoverRelatedAction: AgentAction<DiscoverRelatedInput, DiscoverRe
       summary: seedTitle,
     });
 
-    // Step 2: search for related papers online
+    // Step 2: fetch all three discovery modes in parallel so the review card
+    // can offer a Recommendations / References / Citations toggle without
+    // additional round-trips when the user switches.
     ctx.onProgress({
       type: "step_start",
-      step: `Finding ${mode}`,
+      step: "Finding related papers",
       index: ++step,
       total: STEPS,
     });
 
-    const searchResult = await callTool(
-      "search_literature_online",
-      {
-        mode,
-        itemId: input.itemId,
-        doi: seedDoi,
-        source: input.source || "openalex",
-        limit: input.limit || 10,
-        libraryID: ctx.libraryID,
-      },
-      ctx,
-      `Finding ${mode} for "${seedTitle}"`,
-    );
-
-    if (!searchResult.ok) {
-      return {
-        ok: false,
-        error: `Search failed: ${JSON.stringify(searchResult.content)}`,
-      };
-    }
-
-    const searchContent = searchResult.content as Record<string, unknown>;
-    const rawResults = Array.isArray(searchContent.results) ? searchContent.results : [];
-
+    type SearchMode = "recommendations" | "references" | "citations";
     type PaperRow = {
       id: string;
       title: string;
@@ -134,61 +115,126 @@ export const discoverRelatedAction: AgentAction<DiscoverRelatedInput, DiscoverRe
       badges?: string[];
       href?: string;
       importIdentifier?: string;
+      year?: number;
+      citationCount?: number;
+      checked?: boolean;
     };
 
-    const paperRows: PaperRow[] = rawResults
-      .filter((r): r is Record<string, unknown> => !!r && typeof r === "object")
-      .map((r, i) => {
-        const title = typeof r.title === "string" ? r.title : `Result ${i + 1}`;
-        const authors = Array.isArray(r.authors)
-          ? r.authors.filter((a): a is string => typeof a === "string").slice(0, 3).join(", ")
-          : "";
-        const year = r.year ? String(r.year) : "";
-        const subtitle = [year, authors].filter(Boolean).join(" · ") || undefined;
-        const doi =
-          typeof r.doi === "string" && r.doi.trim()
-            ? r.doi.trim().replace(/^https?:\/\/doi\.org\//i, "")
-            : null;
-        const arxivMatch =
-          typeof r.sourceUrl === "string"
-            ? /arxiv\.org\/abs\/([\d.]+)/i.exec(r.sourceUrl)?.[1]
-            : null;
-        const importIdentifier = doi?.startsWith("10.")
-          ? doi
-          : arxivMatch
-            ? `arxiv:${arxivMatch}`
-            : undefined;
-        const badges: string[] = [];
-        if (typeof r.citationCount === "number") badges.push(`${r.citationCount} citations`);
-        if (doi) badges.push(`DOI: ${doi}`);
-        return {
-          id: `paper-${i + 1}`,
-          title,
-          subtitle,
-          badges: badges.length ? badges : undefined,
-          href: typeof r.openAccessUrl === "string" ? r.openAccessUrl : undefined,
-          importIdentifier,
-          // Numeric year / citation count drive the client-side Sort buttons
-          // in the review card (renderPaperResultListField). Without these,
-          // hasSortableData is false and the "Sort: relevance / date /
-          // citations" toolbar group is hidden.
-          year: typeof r.year === "number" ? r.year : undefined,
-          citationCount:
-            typeof r.citationCount === "number" ? r.citationCount : undefined,
-        };
-      });
+    const initialLimit = input.limit || 20;
+    const loadMoreIncrement = 20;
+    const source = input.source || "openalex";
+
+    const fetchMode = async (
+      mode: SearchMode,
+      limit: number,
+    ): Promise<PaperRow[]> => {
+      const result = await callTool(
+        "search_literature_online",
+        {
+          mode,
+          itemId: input.itemId,
+          doi: seedDoi,
+          source,
+          limit,
+          libraryID: ctx.libraryID,
+        },
+        ctx,
+        `Finding ${mode} for "${seedTitle}"`,
+      );
+      if (!result.ok) return [];
+      const content = result.content as Record<string, unknown>;
+      const raw = Array.isArray(content.results) ? content.results : [];
+      return raw
+        .filter((r): r is Record<string, unknown> => !!r && typeof r === "object")
+        .map((r, i) => buildPaperRow(r, i, mode));
+    };
+
+    const buildPaperRow = (
+      r: Record<string, unknown>,
+      i: number,
+      mode: SearchMode,
+    ): PaperRow => {
+      const title = typeof r.title === "string" ? r.title : `Result ${i + 1}`;
+      const authors = Array.isArray(r.authors)
+        ? r.authors
+            .filter((a): a is string => typeof a === "string")
+            .slice(0, 3)
+            .join(", ")
+        : "";
+      const year = r.year ? String(r.year) : "";
+      const subtitle = [year, authors].filter(Boolean).join(" · ") || undefined;
+      const doi =
+        typeof r.doi === "string" && r.doi.trim()
+          ? r.doi.trim().replace(/^https?:\/\/doi\.org\//i, "")
+          : null;
+      const arxivMatch =
+        typeof r.sourceUrl === "string"
+          ? /arxiv\.org\/abs\/([\d.]+)/i.exec(r.sourceUrl)?.[1]
+          : null;
+      const importIdentifier = doi?.startsWith("10.")
+        ? doi
+        : arxivMatch
+          ? `arxiv:${arxivMatch}`
+          : undefined;
+      const badges: string[] = [];
+      if (typeof r.citationCount === "number") badges.push(`${r.citationCount} citations`);
+      if (doi) badges.push(`DOI: ${doi}`);
+      return {
+        // Mode-scoped ID avoids collision when the same paper shows up under
+        // multiple modes (e.g. a cited paper that's also a recommendation).
+        id: `${mode}-${i + 1}`,
+        title,
+        subtitle,
+        badges: badges.length ? badges : undefined,
+        href: typeof r.openAccessUrl === "string" ? r.openAccessUrl : undefined,
+        importIdentifier,
+        year: typeof r.year === "number" ? r.year : undefined,
+        citationCount:
+          typeof r.citationCount === "number" ? r.citationCount : undefined,
+      };
+    };
+
+    // Fetch-and-review loop. Each iteration: fetch all three modes at the
+    // current limit, show the review card, wait for the user. If they click
+    // "Load more", bump the limit and re-enter the loop. Prior selections
+    // (checkbox state) are preserved by reading them out of the resolution
+    // data and re-marking the new row set before the next requestConfirmation.
+    let currentLimit = initialLimit;
+    let priorSelections = new Set<string>();
+    let lastActiveModeId: string = defaultMode;
+    let rec: PaperRow[] = [];
+    let ref: PaperRow[] = [];
+    let cit: PaperRow[] = [];
+    let allRows: PaperRow[] = [];
+    let totalDiscovered = 0;
+    let resolution: Awaited<ReturnType<typeof ctx.requestConfirmation>>;
+
+    const fetchAllModes = async (limit: number) => {
+      const [recSettled, refSettled, citSettled] = await Promise.allSettled([
+        fetchMode("recommendations", limit),
+        fetchMode("references", limit),
+        fetchMode("citations", limit),
+      ]);
+      rec = recSettled.status === "fulfilled" ? recSettled.value : [];
+      ref = refSettled.status === "fulfilled" ? refSettled.value : [];
+      cit = citSettled.status === "fulfilled" ? citSettled.value : [];
+      allRows = [...rec, ...ref, ...cit];
+      totalDiscovered = allRows.length;
+    };
+
+    await fetchAllModes(currentLimit);
 
     ctx.onProgress({
       type: "step_done",
-      step: `Finding ${mode}`,
-      summary: `Found ${paperRows.length} result${paperRows.length === 1 ? "" : "s"}`,
+      step: "Finding related papers",
+      summary: `Recommendations: ${rec.length} · References: ${ref.length} · Citations: ${cit.length}`,
     });
 
-    if (!paperRows.length) {
+    if (totalDiscovered === 0) {
       return { ok: true, output: { seedTitle, discovered: 0, imported: 0 } };
     }
 
-    // Step 3: HITL paper selection + import
+    // Step 3: HITL paper selection + import (with optional Load more loop)
     ctx.onProgress({
       type: "step_start",
       step: "Reviewing and importing papers",
@@ -196,53 +242,126 @@ export const discoverRelatedAction: AgentAction<DiscoverRelatedInput, DiscoverRe
       total: STEPS,
     });
 
-    const requestId = `discover-related-${Date.now()}`;
-    const modeLabel =
-      mode === "recommendations"
-        ? "Recommended papers"
-        : mode === "references"
-          ? "References"
-          : "Citing papers";
+    // Hard cap on load_more iterations so a misbehaving UI can't spin the
+    // action forever.
+    const maxLoadMoreIterations = 10;
 
-    const reviewCard = {
-      toolName: "discover_related",
-      mode: "review" as const,
-      title: `${modeLabel} for "${seedTitle}"`,
-      description: "Select the papers you want to import into your Zotero library.",
-      confirmLabel: "Import selected",
-      cancelLabel: "Cancel",
-      actions: [
-        { id: "import", label: "Import selected", style: "primary" as const },
-        { id: "cancel", label: "Cancel", style: "secondary" as const },
-      ],
-      defaultActionId: "import",
-      cancelActionId: "cancel",
-      fields: [
-        {
-          type: "paper_result_list" as const,
-          id: "selectedPaperIds",
-          // Label intentionally omitted — the outer card title already says
-          // "Recommended papers for …" and repeating it creates visual
-          // redundancy above the toolbar row.
-          label: "",
-          rows: paperRows.map((p) => ({ ...p, checked: true })),
-          minSelectedByAction: [{ actionId: "import", min: 1 }],
-        },
-      ],
-    };
+    for (let iter = 0; iter < maxLoadMoreIterations; iter += 1) {
+      const requestId = `discover-related-${Date.now()}-${iter}`;
 
-    const resolution = await ctx.requestConfirmation(requestId, reviewCard);
+      // Apply prior selections: a row is pre-checked if either (a) it's a
+      // fresh recommendations row on the first pass, or (b) its ID is in
+      // priorSelections from a previous iteration.
+      const markRows = (rows: PaperRow[], freshDefault: boolean) =>
+        rows.map((p) => ({
+          ...p,
+          checked: priorSelections.has(p.id)
+            ? true
+            : iter === 0
+              ? freshDefault
+              : false,
+        }));
 
-    if (!resolution.approved || resolution.actionId === "cancel") {
-      return { ok: true, output: { seedTitle, discovered: paperRows.length, imported: 0 } };
+      const reviewCard = {
+        toolName: "discover_related",
+        mode: "review" as const,
+        title: `Related papers for "${seedTitle}"`,
+        description:
+          "Toggle between recommendations, references, and citations. Select the papers you want to import.",
+        confirmLabel: "Import selected",
+        cancelLabel: "Cancel",
+        actions: [
+          { id: "import", label: "Import selected", style: "primary" as const },
+          { id: "cancel", label: "Cancel", style: "secondary" as const },
+        ],
+        defaultActionId: "import",
+        cancelActionId: "cancel",
+        fields: [
+          {
+            type: "paper_result_list" as const,
+            id: "selectedPaperIds",
+            label: "",
+            rows: markRows(rec, true),
+            modes: [
+              {
+                id: "recommendations",
+                label: "Recommendations",
+                rows: markRows(rec, true),
+                emptyMessage:
+                  "No recommendations available for this paper on OpenAlex.",
+              },
+              {
+                id: "references",
+                label: "References",
+                rows: markRows(ref, false),
+                emptyMessage:
+                  "No reference list is available for this paper on OpenAlex.",
+              },
+              {
+                id: "citations",
+                label: "Citations",
+                rows: markRows(cit, false),
+                emptyMessage:
+                  "This paper has no citing works on OpenAlex yet.",
+              },
+            ],
+            defaultModeId: lastActiveModeId,
+            loadMoreActionId: "load_more",
+            loadMoreLabel: `Load ${loadMoreIncrement} more`,
+            minSelectedByAction: [{ actionId: "import", min: 1 }],
+          },
+        ],
+      };
+
+      resolution = await ctx.requestConfirmation(requestId, reviewCard);
+
+      if (resolution.actionId === "load_more") {
+        // Preserve current selections + active mode for the next iteration.
+        const data = (resolution.data || {}) as Record<string, unknown>;
+        const ids = Array.isArray(data.selectedPaperIds)
+          ? (data.selectedPaperIds as unknown[]).filter(
+              (x): x is string => typeof x === "string",
+            )
+          : [];
+        priorSelections = new Set(ids);
+        const activeModeFromUi = data.__activeModeId__;
+        if (typeof activeModeFromUi === "string") {
+          lastActiveModeId = activeModeFromUi;
+        }
+        currentLimit += loadMoreIncrement;
+
+        ctx.onProgress({
+          type: "step_start",
+          step: "Loading more related papers",
+          index: step,
+          total: STEPS,
+        });
+        await fetchAllModes(currentLimit);
+        ctx.onProgress({
+          type: "step_done",
+          step: "Loading more related papers",
+          summary: `Recommendations: ${rec.length} · References: ${ref.length} · Citations: ${cit.length}`,
+        });
+        continue; // re-issue the review card with the expanded row set
+      }
+
+      // Either import or cancel — exit the loop and handle below.
+      break;
     }
 
-    const data = (resolution.data || {}) as Record<string, unknown>;
-    const selectedIds = Array.isArray(data.selectedPaperIds)
-      ? (data.selectedPaperIds as string[])
-      : paperRows.map((p) => p.id);
+    if (!resolution! || !resolution.approved || resolution.actionId === "cancel") {
+      return {
+        ok: true,
+        output: { seedTitle, discovered: totalDiscovered, imported: 0 },
+      };
+    }
 
-    const selectedPapers = paperRows.filter((p) => selectedIds.includes(p.id));
+    const finalData = (resolution.data || {}) as Record<string, unknown>;
+    const selectedIds = Array.isArray(finalData.selectedPaperIds)
+      ? (finalData.selectedPaperIds as string[])
+      : rec.map((p) => p.id);
+
+    const selectedPapers = allRows.filter((p) => selectedIds.includes(p.id));
     const identifiers = Array.from(
       new Set(
         selectedPapers
@@ -252,7 +371,10 @@ export const discoverRelatedAction: AgentAction<DiscoverRelatedInput, DiscoverRe
     );
 
     if (!identifiers.length) {
-      return { ok: true, output: { seedTitle, discovered: paperRows.length, imported: 0 } };
+      return {
+        ok: true,
+        output: { seedTitle, discovered: totalDiscovered, imported: 0 },
+      };
     }
 
     const importResult = await callTool(
@@ -283,7 +405,7 @@ export const discoverRelatedAction: AgentAction<DiscoverRelatedInput, DiscoverRe
       ok: true,
       output: {
         seedTitle,
-        discovered: paperRows.length,
+        discovered: totalDiscovered,
         imported: importedCount,
       },
     };

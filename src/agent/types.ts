@@ -152,6 +152,42 @@ export type AgentPendingField =
         year?: number;
         citationCount?: number;
       }>;
+      /**
+       * Optional multi-mode view. When present, the renderer shows a toggle
+       * group above the list (e.g. Recommendations / References / Citations)
+       * and swaps the visible rows per selected mode. Selections persist
+       * across mode switches — the submitted value is the union of checked
+       * row IDs across all modes.
+       *
+       * When omitted, the card renders the flat `rows` list (legacy).
+       */
+      modes?: Array<{
+        id: string;
+        label: string;
+        rows: Array<{
+          id: string;
+          title: string;
+          subtitle?: string;
+          body?: string;
+          badges?: string[];
+          href?: string;
+          importIdentifier?: string;
+          checked?: boolean;
+          year?: number;
+          citationCount?: number;
+        }>;
+        emptyMessage?: string;
+      }>;
+      defaultModeId?: string;
+      /**
+       * When set, the renderer shows a "Load more" button at the bottom of
+       * the list. Clicking it resolves the confirmation with this actionId
+       * plus the current selection, letting the action fetch an expanded
+       * result set and re-invoke requestConfirmation with the larger list.
+       * The action is responsible for the re-fetch loop.
+       */
+      loadMoreActionId?: string;
+      loadMoreLabel?: string;
       minSelectedByAction?: Array<{
         actionId: string;
         min: number;

@@ -906,6 +906,7 @@ function renderResultCardList(
 function renderPaperResultListField(
   doc: Document,
   field: Extract<AgentPendingField, { type: "paper_result_list" }>,
+  requestId?: string,
 ): {
   element: HTMLDivElement;
   accessor: {
@@ -916,109 +917,162 @@ function renderPaperResultListField(
     bindValidity: (callback: () => void) => void;
   };
 } {
+  type FieldRow = (typeof field.rows)[number];
+  type SortKey = "relevance" | "date" | "citations";
+
   const container = doc.createElement("div");
   container.className = "llm-search-results";
 
+  // Resolve the mode list. Legacy cards without `modes` get a single implicit
+  // mode built from the flat `rows`. In legacy mode, rows default to checked
+  // unless explicitly `checked: false` (prior behavior); in multi-mode cards
+  // the caller is expected to opt each row in with `checked: true`.
+  const modes: Array<{
+    id: string;
+    label: string;
+    rows: FieldRow[];
+    emptyMessage?: string;
+  }> = field.modes?.length
+    ? field.modes.map((m) => ({
+        id: m.id,
+        label: m.label,
+        rows: m.rows,
+        emptyMessage: m.emptyMessage,
+      }))
+    : [
+        {
+          id: "__default__",
+          label: "",
+          rows: field.rows.map((r) => ({
+            ...r,
+            checked: r.checked !== false,
+          })),
+        },
+      ];
+
+  const defaultMode =
+    modes.find((m) => m.id === field.defaultModeId) || modes[0];
+  let activeModeId = defaultMode.id;
+  const getActiveMode = () =>
+    modes.find((m) => m.id === activeModeId) || modes[0];
+
+  // Selection state survives mode switches. Seed with any row flagged
+  // `checked: true` across all modes — callers opt in explicitly (e.g.
+  // discoverRelated pre-checks only the recommendations mode's rows).
+  const selectedIds = new Set<string>();
+  for (const mode of modes) {
+    for (const row of mode.rows) {
+      if (row.checked === true) selectedIds.add(row.id);
+    }
+  }
+
+  // Per-mode sort key (each mode remembers its own sort).
+  const sortByMode = new Map<string, SortKey>();
+
+  const listeners: Array<() => void> = [];
+  const emitValidityChange = () => {
+    for (const listener of listeners) listener();
+  };
+
+  // ── Mode toggle (only when the card exposes >1 mode) ────────────────────
+  let modeTabsEl: HTMLDivElement | null = null;
+  if (modes.length > 1) {
+    modeTabsEl = doc.createElement("div");
+    modeTabsEl.className = "llm-search-mode-tabs";
+    for (const mode of modes) {
+      const tab = doc.createElement("button");
+      tab.type = "button";
+      tab.className = "llm-search-mode-tab";
+      tab.dataset.modeId = mode.id;
+      tab.textContent = mode.label;
+      if (mode.id === activeModeId) tab.classList.add("llm-search-mode-tab-active");
+      tab.addEventListener("click", () => {
+        if (activeModeId === mode.id) return;
+        activeModeId = mode.id;
+        renderActiveMode();
+        syncModeTabs();
+        emitValidityChange();
+      });
+      modeTabsEl.appendChild(tab);
+    }
+    container.appendChild(modeTabsEl);
+  }
+  const syncModeTabs = () => {
+    if (!modeTabsEl) return;
+    for (const tab of Array.from(modeTabsEl.children) as HTMLButtonElement[]) {
+      tab.classList.toggle(
+        "llm-search-mode-tab-active",
+        tab.dataset.modeId === activeModeId,
+      );
+    }
+  };
+
+  // ── Toolbar (select-all checkbox on the left, sort group on the right) ──
   const toolbar = doc.createElement("div");
   toolbar.className = "llm-agent-hitl-checklist-toolbar";
   container.appendChild(toolbar);
 
-  const list = doc.createElement("div");
-  list.className = "llm-search-results-list";
-  container.appendChild(list);
+  const selectAllLabel = doc.createElement("label");
+  selectAllLabel.className = "llm-search-select-all";
+  const selectAllCheckbox = doc.createElement("input");
+  selectAllCheckbox.type = "checkbox";
+  selectAllCheckbox.className = "llm-search-select-all-checkbox";
+  const selectAllText = doc.createElement("span");
+  selectAllText.className = "llm-search-select-all-text";
+  selectAllText.textContent = "Select all";
+  selectAllLabel.append(selectAllCheckbox, selectAllText);
+  toolbar.appendChild(selectAllLabel);
 
-  const listeners: Array<() => void> = [];
-  const emitValidityChange = () => {
-    for (const listener of listeners) {
-      listener();
-    }
-  };
-  const checkboxes: HTMLInputElement[] = [];
-  let selectAllButton: HTMLButtonElement | null = null;
-  let deselectAllButton: HTMLButtonElement | null = null;
-
-  selectAllButton = doc.createElement("button");
-  selectAllButton.type = "button";
-  selectAllButton.className = "llm-agent-hitl-btn llm-agent-hitl-btn-alt";
-  selectAllButton.textContent = "Select all";
-  selectAllButton.addEventListener("click", () => {
-    for (const checkbox of checkboxes) {
-      checkbox.checked = true;
-    }
-    emitValidityChange();
-  });
-  toolbar.appendChild(selectAllButton);
-
-  deselectAllButton = doc.createElement("button");
-  deselectAllButton.type = "button";
-  deselectAllButton.className = "llm-agent-hitl-btn llm-agent-hitl-btn-secondary";
-  deselectAllButton.textContent = "Deselect all";
-  deselectAllButton.addEventListener("click", () => {
-    for (const checkbox of checkboxes) {
-      checkbox.checked = false;
-    }
-    emitValidityChange();
-  });
-  toolbar.appendChild(deselectAllButton);
-
-  // Sort buttons — re-order results client-side
-  const hasSortableData =
-    field.rows.some((r) => typeof r.year === "number") ||
-    field.rows.some((r) => typeof r.citationCount === "number");
-  if (hasSortableData) {
+  // Sort group — shown only when at least one mode has sortable data.
+  const anyModeHasSortableData = modes.some((m) =>
+    m.rows.some(
+      (r) => typeof r.year === "number" || typeof r.citationCount === "number",
+    ),
+  );
+  let sortGroupEl: HTMLSpanElement | null = null;
+  const sortButtons: Record<string, HTMLButtonElement> = {};
+  if (anyModeHasSortableData) {
     const sortSep = doc.createElement("span");
     sortSep.className = "llm-search-sort-separator";
     toolbar.appendChild(sortSep);
 
-    const sortGroup = doc.createElement("span");
-    sortGroup.className = "llm-search-sort-group";
+    sortGroupEl = doc.createElement("span");
+    sortGroupEl.className = "llm-search-sort-group";
 
     const sortLabel = doc.createElement("span");
     sortLabel.className = "llm-search-sort-label";
     sortLabel.textContent = "Sort:";
-    sortGroup.appendChild(sortLabel);
-
-    type SortKey = "relevance" | "date" | "citations";
-    const sortButtons: Record<string, HTMLButtonElement> = {};
-    const rowElements: HTMLElement[] = [];
-    // Filled after rows are created below
-
-    const applySort = (key: SortKey) => {
-      // Update active state
-      for (const [k, btn] of Object.entries(sortButtons)) {
-        btn.classList.toggle("llm-search-sort-active", k === key);
-      }
-      // Build index-order pairs
-      const indices = field.rows.map((_, i) => i);
-      if (key === "date") {
-        indices.sort((a, b) => (field.rows[b].year || 0) - (field.rows[a].year || 0));
-      } else if (key === "citations") {
-        indices.sort(
-          (a, b) => (field.rows[b].citationCount || 0) - (field.rows[a].citationCount || 0),
-        );
-      }
-      // Re-order DOM elements (preserves checkbox state)
-      for (const idx of indices) {
-        if (rowElements[idx]) list.appendChild(rowElements[idx]);
-      }
-    };
+    sortGroupEl.appendChild(sortLabel);
 
     for (const key of ["relevance", "date", "citations"] as SortKey[]) {
       const btn = doc.createElement("button");
       btn.type = "button";
-      btn.className = "llm-search-sort-btn" + (key === "relevance" ? " llm-search-sort-active" : "");
-      btn.textContent = key === "relevance" ? "Relevance" : key === "date" ? "Date" : "Citations";
-      btn.addEventListener("click", () => applySort(key));
-      sortGroup.appendChild(btn);
+      btn.className = "llm-search-sort-btn";
+      btn.textContent =
+        key === "relevance" ? "Relevance" : key === "date" ? "Date" : "Citations";
+      btn.addEventListener("click", () => {
+        sortByMode.set(activeModeId, key);
+        renderActiveMode();
+      });
+      sortGroupEl.appendChild(btn);
       sortButtons[key] = btn;
     }
-
-    toolbar.appendChild(sortGroup);
-    // rowElements will be populated as rows are rendered below, then accessible to applySort
-    (container as any)._sortRowElements = rowElements;
+    toolbar.appendChild(sortGroupEl);
   }
 
-  for (const rowData of field.rows) {
+  // ── List container (rows re-rendered when mode or sort changes) ─────────
+  const list = doc.createElement("div");
+  list.className = "llm-search-results-list";
+  container.appendChild(list);
+
+  const emptyState = doc.createElement("div");
+  emptyState.className = "llm-search-results-empty";
+  emptyState.style.display = "none";
+  container.appendChild(emptyState);
+
+  const rowCheckboxes: HTMLInputElement[] = [];
+
+  const renderRow = (rowData: FieldRow): HTMLElement => {
     const row = doc.createElement("label");
     row.className = "llm-search-results-item";
 
@@ -1027,11 +1081,16 @@ function renderPaperResultListField(
     const checkbox = doc.createElement("input");
     checkbox.type = "checkbox";
     checkbox.className = "llm-search-results-checkbox";
-    checkbox.checked = rowData.checked !== false;
-    checkbox.addEventListener("change", emitValidityChange);
+    checkbox.checked = selectedIds.has(rowData.id);
+    checkbox.addEventListener("change", () => {
+      if (checkbox.checked) selectedIds.add(rowData.id);
+      else selectedIds.delete(rowData.id);
+      syncSelectAllCheckbox();
+      emitValidityChange();
+    });
     checkboxWrap.appendChild(checkbox);
     row.appendChild(checkboxWrap);
-    checkboxes.push(checkbox);
+    rowCheckboxes.push(checkbox);
 
     const content = doc.createElement("div");
     content.className = "llm-search-results-content";
@@ -1052,8 +1111,9 @@ function renderPaperResultListField(
       openBtn.addEventListener("click", (event) => {
         event.preventDefault();
         try {
-          const launch = (Zotero as unknown as { launchURL?: (url: string) => void })
-            .launchURL;
+          const launch = (
+            Zotero as unknown as { launchURL?: (url: string) => void }
+          ).launchURL;
           if (typeof launch === "function") launch(rowData.href!);
         } catch {
           /* ignore */
@@ -1090,16 +1150,121 @@ function renderPaperResultListField(
     }
 
     row.appendChild(content);
-    list.appendChild(row);
-    // Track row elements for sort re-ordering
-    const sortRowElements = (container as any)._sortRowElements as HTMLElement[] | undefined;
-    if (sortRowElements) sortRowElements.push(row);
+    return row;
+  };
+
+  const syncSortButtonsActive = () => {
+    const key = sortByMode.get(activeModeId) || "relevance";
+    for (const [k, btn] of Object.entries(sortButtons)) {
+      btn.classList.toggle("llm-search-sort-active", k === key);
+    }
+  };
+
+  const syncSelectAllCheckbox = () => {
+    const rows = getActiveMode().rows;
+    if (!rows.length) {
+      selectAllCheckbox.checked = false;
+      selectAllCheckbox.indeterminate = false;
+      return;
+    }
+    const selectedCount = rows.filter((r) => selectedIds.has(r.id)).length;
+    if (selectedCount === 0) {
+      selectAllCheckbox.checked = false;
+      selectAllCheckbox.indeterminate = false;
+    } else if (selectedCount === rows.length) {
+      selectAllCheckbox.checked = true;
+      selectAllCheckbox.indeterminate = false;
+    } else {
+      selectAllCheckbox.checked = false;
+      selectAllCheckbox.indeterminate = true;
+    }
+  };
+
+  selectAllCheckbox.addEventListener("change", () => {
+    const rows = getActiveMode().rows;
+    if (selectAllCheckbox.checked) {
+      for (const r of rows) selectedIds.add(r.id);
+    } else {
+      for (const r of rows) selectedIds.delete(r.id);
+    }
+    // Update visible checkboxes to match.
+    for (let i = 0; i < rowCheckboxes.length; i += 1) {
+      rowCheckboxes[i].checked = selectedIds.has(rows[i].id);
+    }
+    selectAllCheckbox.indeterminate = false;
+    emitValidityChange();
+  });
+
+  const renderActiveMode = () => {
+    const mode = getActiveMode();
+    list.replaceChildren();
+    rowCheckboxes.length = 0;
+
+    // Sort a copy so the original arrays aren't mutated.
+    const key = sortByMode.get(mode.id) || "relevance";
+    const rowsForRender = mode.rows.slice();
+    if (key === "date") {
+      rowsForRender.sort((a, b) => (b.year || 0) - (a.year || 0));
+    } else if (key === "citations") {
+      rowsForRender.sort(
+        (a, b) => (b.citationCount || 0) - (a.citationCount || 0),
+      );
+    }
+    // Keep the mode.rows array (used by the select-all logic) in the same
+    // order so checkbox index aligns with getActiveMode().rows[i].
+    mode.rows = rowsForRender;
+
+    if (!rowsForRender.length) {
+      emptyState.style.display = "";
+      emptyState.textContent =
+        mode.emptyMessage || "No results available for this mode.";
+      selectAllCheckbox.disabled = true;
+    } else {
+      emptyState.style.display = "none";
+      selectAllCheckbox.disabled = false;
+      for (const rowData of rowsForRender) {
+        list.appendChild(renderRow(rowData));
+      }
+    }
+    syncSortButtonsActive();
+    syncSelectAllCheckbox();
+  };
+
+  // Initial paint.
+  renderActiveMode();
+
+  // ── Load more button (optional) ────────────────────────────────────────
+  let loadMoreButton: HTMLButtonElement | null = null;
+  if (field.loadMoreActionId && requestId) {
+    const loadMoreWrap = doc.createElement("div");
+    loadMoreWrap.className = "llm-search-load-more-wrap";
+    loadMoreButton = doc.createElement("button");
+    loadMoreButton.type = "button";
+    loadMoreButton.className = "llm-search-load-more-btn";
+    loadMoreButton.textContent = field.loadMoreLabel || "Load more";
+    loadMoreButton.addEventListener("click", () => {
+      if (!loadMoreButton) return;
+      loadMoreButton.disabled = true;
+      loadMoreButton.textContent = "Loading…";
+      // Resolve the current confirmation with the load_more actionId.
+      // The action will re-fetch with a larger limit and re-invoke
+      // requestConfirmation — producing a fresh card with the expanded
+      // result set and the prior selections preserved (via the data
+      // payload below).
+      getAgentRuntime().resolveConfirmation(requestId, {
+        approved: true,
+        actionId: field.loadMoreActionId as string,
+        data: {
+          [field.id]: Array.from(selectedIds),
+          __activeModeId__: activeModeId,
+        },
+      });
+    });
+    loadMoreWrap.appendChild(loadMoreButton);
+    container.appendChild(loadMoreWrap);
   }
 
-  const getSelectedIds = () =>
-    field.rows
-      .filter((_row, index) => checkboxes[index]?.checked)
-      .map((row) => row.id);
+  const getSelectedIds = () => Array.from(selectedIds);
 
   return {
     element: container,
@@ -1107,15 +1272,19 @@ function renderPaperResultListField(
       id: field.id,
       getValue: () => getSelectedIds(),
       setDisabled: (disabled) => {
-        for (const checkbox of checkboxes) {
-          checkbox.disabled = disabled;
+        for (const checkbox of rowCheckboxes) checkbox.disabled = disabled;
+        selectAllCheckbox.disabled = disabled;
+        if (modeTabsEl) {
+          for (const tab of Array.from(
+            modeTabsEl.children,
+          ) as HTMLButtonElement[]) {
+            tab.disabled = disabled;
+          }
         }
-        if (selectAllButton) {
-          selectAllButton.disabled = disabled;
+        if (sortGroupEl) {
+          for (const btn of Object.values(sortButtons)) btn.disabled = disabled;
         }
-        if (deselectAllButton) {
-          deselectAllButton.disabled = disabled;
-        }
+        if (loadMoreButton) loadMoreButton.disabled = disabled;
       },
       isValid: () => getSelectedIds().length > 0,
       bindValidity: (callback) => {
@@ -1542,7 +1711,11 @@ export function renderPendingActionCard(
         label.textContent = field.label;
         fieldContainer.appendChild(label);
       }
-      const rendered = renderPaperResultListField(doc, field);
+      const rendered = renderPaperResultListField(
+        doc,
+        field,
+        pending.requestId,
+      );
       fieldContainer.appendChild(rendered.element);
       fieldAccessors.push({
         field,
