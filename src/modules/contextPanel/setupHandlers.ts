@@ -7822,6 +7822,22 @@ export function setupHandlers(
   };
 
   /** Prepends filtered agent actions into the slash menu (agent mode only). */
+  /**
+   * Extracts the first sentence of a description for compact slash-menu
+   * display. Falls back to the first ~80 chars if no sentence boundary is
+   * found. Preserves the full text as a tooltip (set by the caller).
+   */
+  const firstSentence = (text: string): string => {
+    const normalized = text.replace(/\s+/g, " ").trim();
+    if (!normalized) return "";
+    // Match up to and including the first sentence-terminating punctuation
+    // followed by a space or end-of-string.
+    const match = /^(.+?[.!?])(?:\s|$)/.exec(normalized);
+    if (match) return match[1];
+    if (normalized.length <= 80) return normalized;
+    return `${normalized.slice(0, 77).trimEnd()}...`;
+  };
+
   const renderAgentActionsInSlashMenu = (query: string = "") => {
     clearAgentSlashItems();
     const chatMode: "paper" | "library" = isGlobalMode() ? "library" : "paper";
@@ -7875,7 +7891,16 @@ export function setupHandlers(
       const titleEl = ownerDoc.createElement("span");
       titleEl.className = "llm-action-picker-title";
       titleEl.textContent = action.name;
-      btn.append(titleEl);
+      // Inline description matching the skills menu pattern — single-line
+      // ellipsized via .llm-action-picker-description CSS; hover reveals
+      // the full description via btn.title. We show just the first sentence
+      // because action.description is typically a multi-sentence
+      // paragraph written for the LLM, and single-line truncation on the
+      // full text often cuts mid-word or reveals nothing meaningful.
+      const descEl = ownerDoc.createElement("span");
+      descEl.className = "llm-action-picker-description";
+      descEl.textContent = firstSentence(action.description);
+      btn.append(titleEl, descEl);
       btn.addEventListener("click", (e: Event) => {
         e.preventDefault();
         e.stopPropagation();
