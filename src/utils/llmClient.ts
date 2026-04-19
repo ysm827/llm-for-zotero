@@ -67,6 +67,10 @@ import {
 } from "./providerTransport";
 import { parseDataUrl } from "../agent/model/shared";
 import {
+  getOrCreateCodexAppServerProcess,
+  waitForCodexAppServerTurnCompletion,
+} from "./codexAppServerProcess";
+import {
   applyModelInputTokenCap,
   estimateConversationTokens,
   getModelInputTokenLimit,
@@ -2784,6 +2788,108 @@ async function callNativeProtocol(params: {
   return data.candidates?.[0]?.content?.parts?.map((p) => p.text || "").join("") ?? JSON.stringify(data);
 }
 
+function formatCodexAppServerMessageContent(content: MessageContent): string {
+  if (typeof content === "string") return content.trim();
+  const lines: string[] = [];
+  let imageCount = 0;
+  for (const part of content) {
+    if (part.type === "text") {
+      const text = part.text.trim();
+      if (text) lines.push(text);
+      continue;
+    }
+    if (part.type === "image_url") {
+      imageCount += 1;
+    }
+  }
+  if (imageCount > 0) {
+    lines.push(`[Image input omitted: ${imageCount} image(s)]`);
+  }
+  return lines.join("\n\n");
+}
+
+function buildCodexAppServerChatInput(messages: ChatMessage[]): Array<{
+  type: "text";
+  text: string;
+}> {
+  return messages.map((message) => {
+    const label =
+      message.role === "system"
+        ? "System"
+        : message.role === "assistant"
+          ? "Assistant"
+          : "User";
+    const content = formatCodexAppServerMessageContent(message.content);
+    return {
+      type: "text",
+      text: `${label}:\n${content || "[Empty message]"}`,
+    };
+  });
+}
+
+function extractCodexAppServerThreadId(
+  result: unknown,
+): string {
+  if (!result || typeof result !== "object") return "";
+  const typed = result as { id?: unknown; thread?: { id?: unknown } };
+  if (typeof typed.id === "string" && typed.id.trim()) return typed.id.trim();
+  if (
+    typed.thread &&
+    typeof typed.thread.id === "string" &&
+    typed.thread.id.trim()
+  ) {
+    return typed.thread.id.trim();
+  }
+  return "";
+}
+
+function extractCodexAppServerTurnId(
+  result: unknown,
+): string {
+  if (!result || typeof result !== "object") return "";
+  const typed = result as { id?: unknown; turn?: { id?: unknown } };
+  if (typeof typed.id === "string" && typed.id.trim()) return typed.id.trim();
+  if (
+    typed.turn &&
+    typeof typed.turn.id === "string" &&
+    typed.turn.id.trim()
+  ) {
+    return typed.turn.id.trim();
+  }
+  return "";
+}
+
+async function callCodexAppServerChat(params: {
+  model: string;
+  messages: ChatMessage[];
+  signal?: AbortSignal;
+  onDelta?: (delta: string) => void;
+}): Promise<string> {
+  const proc = await getOrCreateCodexAppServerProcess("codex_app_server_chat");
+  const threadResult = await proc.sendRequest("thread/start", {
+    model: params.model,
+    approvalPolicy: "never",
+  });
+  const threadId = extractCodexAppServerThreadId(threadResult);
+  if (!threadId) {
+    throw new Error("Codex app-server did not return a thread ID");
+  }
+  const turnResult = await proc.sendRequest("turn/start", {
+    threadId,
+    input: buildCodexAppServerChatInput(params.messages),
+  });
+  const turnId = extractCodexAppServerTurnId(turnResult);
+  if (!turnId) {
+    throw new Error("Codex app-server did not return a turn ID");
+  }
+  return waitForCodexAppServerTurnCompletion({
+    proc,
+    turnId,
+    onTextDelta: params.onDelta,
+    signal: params.signal,
+  });
+}
+
 /**
  * Call LLM API (non-streaming)
  */
@@ -2799,7 +2905,7 @@ export async function callLLM(params: ChatParams): Promise<string> {
       signal: params.signal,
     });
   }
-  if (authMode === "codex_auth") {
+  if (authMode === "codex_auth" || authMode === "codex_app_server") {
     let output = "";
     const streamed = await callLLMStream(
       params,
@@ -2898,6 +3004,19 @@ export async function callLLMStream(
       signal: params.signal,
       onDelta,
       onUsage,
+    });
+  }
+  if (authMode === "codex_app_server") {
+    if (Array.isArray(params.attachments) && params.attachments.length) {
+      throw new Error(
+        "codex app server currently does not support file attachments in the normal chat transport.",
+      );
+    }
+    return callCodexAppServerChat({
+      model,
+      messages,
+      signal: params.signal,
+      onDelta,
     });
   }
   const auth = await resolveRequestAuthState({

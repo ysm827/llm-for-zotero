@@ -11,6 +11,10 @@ import {
 } from "./providerTransport";
 import { createAgentModelAdapter } from "../agent/model/factory";
 import type { AgentRuntimeRequest } from "../agent/types";
+import {
+  getOrCreateCodexAppServerProcess,
+  waitForCodexAppServerTurnCompletion,
+} from "./codexAppServerProcess";
 
 function extractTextFromCodexSSE(raw: string): string {
   const lines = raw.split(/\r?\n/);
@@ -221,6 +225,32 @@ export function getProviderConnectionCapabilityLabel(params: {
       fileInputs: capabilities.fileInputs,
     }),
   );
+}
+
+export async function runCodexAppServerConnectionTest(params: {
+  modelName: string;
+}): Promise<{ reply: string; capabilityLabel: string }> {
+  const proc = await getOrCreateCodexAppServerProcess("codex_app_server");
+
+  const threadResp = await proc.sendRequest("thread/start", {
+    model: params.modelName || undefined,
+    approvalPolicy: "never",
+  }) as { thread: { id: string } };
+
+  const turnResp = await proc.sendRequest("turn/start", {
+    threadId: threadResp.thread.id,
+    input: [{ type: "text", text: "Say OK" }],
+  }) as { turn: { id: string } };
+
+  const reply = await waitForCodexAppServerTurnCompletion({
+    proc,
+    turnId: turnResp.turn.id,
+  });
+
+  const capabilityLabel = describeAgentCapabilityClass(
+    getAgentCapabilityClass({ toolCalls: false, fileInputs: false }),
+  );
+  return { reply: reply.trim() || "OK", capabilityLabel };
 }
 
 export async function runProviderConnectionTest(params: {

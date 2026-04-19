@@ -48,7 +48,7 @@ type EffectiveRequestConfigShape = {
   model: string;
   apiBase: string;
   apiKey: string;
-  authMode: "api_key" | "codex_auth" | "webchat"; // [webchat]
+  authMode: "api_key" | "codex_auth" | "codex_app_server" | "webchat"; // [webchat]
   providerProtocol?:
     | "codex_responses"
     | "responses_api"

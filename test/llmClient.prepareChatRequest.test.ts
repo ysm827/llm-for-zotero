@@ -206,6 +206,140 @@ describe("llmClient prepareChatRequest", function () {
     assert.equal(prepared.authMode, "codex_auth");
   });
 
+  it("routes codex app server chat requests through the local app-server transport", async function () {
+    const originalChromeUtils = (globalThis as typeof globalThis & {
+      ChromeUtils?: unknown;
+    }).ChromeUtils;
+    const originalCodexPath = globalThis.process?.env?.CODEX_PATH;
+
+    class MockStdout {
+      private pending: Array<(value: string) => void> = [];
+      private queue: string[] = [];
+
+      readString(): Promise<string> {
+        if (this.queue.length) {
+          return Promise.resolve(this.queue.shift() || "");
+        }
+        return new Promise((resolve) => {
+          this.pending.push(resolve);
+        });
+      }
+
+      push(value: string) {
+        const next = this.pending.shift();
+        if (next) {
+          next(value);
+          return;
+        }
+        this.queue.push(value);
+      }
+    }
+
+    const stdout = new MockStdout();
+    let lastTurnInput = "";
+
+    try {
+      if (globalThis.process?.env) {
+        globalThis.process.env.CODEX_PATH = "/mock/codex";
+      }
+
+      (
+        globalThis as typeof globalThis & {
+          ChromeUtils?: {
+            importESModule: (
+              path: string,
+            ) => { Subprocess: { call: (params: { arguments?: string[] }) => Promise<unknown> } };
+          };
+        }
+      ).ChromeUtils = {
+        importESModule: (path: string) => {
+          assert.include(path, "Subprocess");
+          return {
+            Subprocess: {
+              call: async (_params: { arguments?: string[] }) => ({
+                stdout,
+                stdin: {
+                  write: (chunk: string) => {
+                    for (const line of chunk.split("\n")) {
+                      if (!line.trim()) continue;
+                      const message = JSON.parse(line) as {
+                        id?: number;
+                        method?: string;
+                        params?: { input?: string };
+                      };
+                      if (message.method === "initialize") {
+                        stdout.push(
+                          `${JSON.stringify({ id: message.id, result: {} })}\n`,
+                        );
+                        continue;
+                      }
+                      if (message.method === "thread/start") {
+                        stdout.push(
+                          `${JSON.stringify({ id: message.id, result: { id: "thread-1" } })}\n`,
+                        );
+                        continue;
+                      }
+                      if (message.method === "turn/start") {
+                        lastTurnInput = message.params?.input || "";
+                        stdout.push(
+                          `${JSON.stringify({ id: message.id, result: { id: "turn-1" } })}\n`,
+                        );
+                        queueMicrotask(() => {
+                          stdout.push(
+                            `${JSON.stringify({ method: "item/agentMessage/delta", params: { turnId: "turn-1", delta: "Hello" } })}\n`,
+                          );
+                          stdout.push(
+                            `${JSON.stringify({ method: "turn/completed", params: { turnId: "turn-1", status: "completed" } })}\n`,
+                          );
+                        });
+                      }
+                    }
+                  },
+                },
+                kill: () => undefined,
+              }),
+            },
+          };
+        },
+      };
+
+      const chunks: string[] = [];
+      const output = await callLLMStream(
+        {
+          prompt: "What changed?",
+          history: [
+            { role: "user", content: "Earlier question." },
+            { role: "assistant", content: "Earlier answer." },
+          ],
+          model: "gpt-5.4",
+          authMode: "codex_app_server",
+          apiBase: "https://chatgpt.com/backend-api/codex/responses",
+        },
+        (delta) => {
+          chunks.push(delta);
+        },
+      );
+
+      assert.equal(output, "Hello");
+      assert.deepEqual(chunks, ["Hello"]);
+      assert.include(lastTurnInput, "System:");
+      assert.include(lastTurnInput, "User:\nEarlier question.");
+      assert.include(lastTurnInput, "Assistant:\nEarlier answer.");
+      assert.include(lastTurnInput, "User:\nWhat changed?");
+    } finally {
+      if (globalThis.process?.env) {
+        if (typeof originalCodexPath === "string") {
+          globalThis.process.env.CODEX_PATH = originalCodexPath;
+        } else {
+          delete globalThis.process.env.CODEX_PATH;
+        }
+      }
+      (
+        globalThis as typeof globalThis & { ChromeUtils?: unknown }
+      ).ChromeUtils = originalChromeUtils;
+    }
+  });
+
   it("throws when no dedicated embedding provider is configured", async function () {
     const setPref = globalThis.Zotero.Prefs.set as (
       key: string,

@@ -34,7 +34,7 @@ import {
   getProviderProtocolSpec,
   type ProviderProtocol,
 } from "../utils/providerProtocol";
-import { runProviderConnectionTest } from "../utils/providerConnectionTest";
+import { runProviderConnectionTest, runCodexAppServerConnectionTest } from "../utils/providerConnectionTest";
 import {
   startCopilotDeviceFlow,
   pollCopilotDeviceAuth,
@@ -146,7 +146,7 @@ function getProtocolOptions(
   presetId: ProviderPresetId,
 ): ProviderProtocol[] {
   if (authMode === "webchat") return ["web_sync"]; // [webchat]
-  if (authMode === "codex_auth") return ["codex_responses"];
+  if (authMode === "codex_auth" || authMode === "codex_app_server") return ["codex_responses"];
   if (authMode === "copilot_auth")
     return ["openai_chat_compat", "responses_api"];
   if (presetId !== "customized") {
@@ -164,7 +164,7 @@ function resolveSelectedProtocol(
   presetId: ProviderPresetId,
 ): ProviderProtocol {
   const fallback =
-    group.authMode === "codex_auth"
+    group.authMode === "codex_auth" || group.authMode === "codex_app_server"
       ? "codex_responses"
       : presetId === "customized"
         ? "openai_chat_compat"
@@ -246,6 +246,7 @@ function hasEmptyModel(group: ModelProviderGroup): boolean {
 function normalizeAuthMode(value: unknown): ModelProviderAuthMode {
   if (value === "webchat") return "webchat"; // [webchat]
   if (value === "codex_auth") return "codex_auth";
+  if (value === "codex_app_server") return "codex_app_server";
   if (value === "copilot_auth") return "copilot_auth";
   return "api_key";
 }
@@ -708,6 +709,9 @@ export async function registerPrefsScripts(_window: Window | undefined | null) {
       const codexOption = el(doc, "option") as HTMLOptionElement;
       codexOption.value = "codex_auth";
       codexOption.textContent = t("Codex Auth");
+      const codexAppServerOption = el(doc, "option") as HTMLOptionElement;
+      codexAppServerOption.value = "codex_app_server";
+      codexAppServerOption.textContent = t("Codex App Server");
       const copilotOption = el(doc, "option") as HTMLOptionElement;
       copilotOption.value = "copilot_auth";
       copilotOption.textContent = t("GitHub Copilot");
@@ -718,6 +722,7 @@ export async function registerPrefsScripts(_window: Window | undefined | null) {
       authModeSelect.append(
         apiKeyOption,
         codexOption,
+        codexAppServerOption,
         copilotOption,
         webchatOption,
       );
@@ -732,7 +737,7 @@ export async function registerPrefsScripts(_window: Window | undefined | null) {
           if (!group.models[0]?.model || !webchatModelNames.includes(group.models[0].model)) {
             group.models = [{ ...group.models[0], model: "chatgpt.com" }];
           }
-        } else if (nextAuthMode === "codex_auth") {
+        } else if (nextAuthMode === "codex_auth" || nextAuthMode === "codex_app_server") {
           group.providerProtocol = "codex_responses";
         } else if (nextAuthMode === "copilot_auth") {
           group.providerProtocol = "openai_chat_compat";
@@ -743,7 +748,7 @@ export async function registerPrefsScripts(_window: Window | undefined | null) {
           group.providerProtocol =
             selectedPreset?.defaultProtocol || "openai_chat_compat";
         }
-        if (nextAuthMode === "codex_auth" && !group.apiBase.trim()) {
+        if ((nextAuthMode === "codex_auth") && !group.apiBase.trim()) {
           group.apiBase = DEFAULT_CODEX_API_BASE;
         }
         if (nextAuthMode === "copilot_auth" && !group.apiBase.trim()) {
@@ -762,7 +767,9 @@ export async function registerPrefsScripts(_window: Window | undefined | null) {
             ? t(COPILOT_API_HELPER_TEXT)
             : group.authMode === "codex_auth"
               ? t("codex auth reuses local `codex login` credentials from ~/.codex/auth.json")
-              : "";
+              : group.authMode === "codex_app_server"
+                ? t("App Server mode spawns the local codex CLI and routes turns through it. Run `codex login` first.")
+                : "";
       authModeWrap.append(
         authModeLabel,
         authModeSelect,
@@ -770,7 +777,7 @@ export async function registerPrefsScripts(_window: Window | undefined | null) {
       );
 
       const selectedPresetId: ProviderPresetId =
-        group.authMode === "codex_auth" || group.authMode === "copilot_auth"
+        group.authMode === "codex_auth" || group.authMode === "codex_app_server" || group.authMode === "copilot_auth"
           ? "customized"
           : (group.presetIdOverride ?? detectProviderPreset(group.apiBase));
       const selectedPreset =
@@ -779,6 +786,7 @@ export async function registerPrefsScripts(_window: Window | undefined | null) {
           : getProviderPreset(selectedPresetId);
       const isCustomizedPreset =
         group.authMode !== "codex_auth" &&
+        group.authMode !== "codex_app_server" &&
         group.authMode !== "copilot_auth" &&
         selectedPresetId === "customized";
       group.providerProtocol = resolveSelectedProtocol(group, selectedPresetId);
@@ -791,6 +799,7 @@ export async function registerPrefsScripts(_window: Window | undefined | null) {
       );
       if (
         group.authMode !== "codex_auth" &&
+        group.authMode !== "codex_app_server" &&
         group.authMode !== "copilot_auth"
       ) {
         const providerPresetLabel = el(
@@ -905,14 +914,17 @@ export async function registerPrefsScripts(_window: Window | undefined | null) {
       apiUrlInput.placeholder =
         group.authMode === "codex_auth"
           ? DEFAULT_CODEX_API_BASE
-          : group.authMode === "copilot_auth"
-            ? DEFAULT_COPILOT_API_BASE
-            : selectedPreset?.defaultApiBase || "https://api.openai.com/v1";
-      apiUrlInput.value = group.apiBase;
+          : group.authMode === "codex_app_server"
+            ? "(not used — codex app-server manages transport)"
+            : group.authMode === "copilot_auth"
+              ? DEFAULT_COPILOT_API_BASE
+              : selectedPreset?.defaultApiBase || "https://api.openai.com/v1";
+      apiUrlInput.value = group.authMode === "codex_app_server" ? "" : group.apiBase;
       apiUrlInput.readOnly =
-        group.authMode !== "codex_auth" &&
+        group.authMode === "codex_app_server" ||
+        (group.authMode !== "codex_auth" &&
         group.authMode !== "copilot_auth" &&
-        !isCustomizedPreset;
+        !isCustomizedPreset);
       apiUrlInput.style.opacity = apiUrlInput.readOnly ? "0.85" : "1";
       apiUrlInput.style.cursor = apiUrlInput.readOnly ? "default" : "text";
       apiUrlInput.style.pointerEvents = apiUrlInput.readOnly ? "none" : "auto";
@@ -930,9 +942,11 @@ export async function registerPrefsScripts(_window: Window | undefined | null) {
         HELPER_STYLE,
         group.authMode === "codex_auth"
           ? t(CODEX_API_HELPER_TEXT)
-          : group.authMode === "copilot_auth"
-            ? t(COPILOT_API_HELPER_TEXT)
-            : getPresetSelectHelperText(selectedPresetId),
+          : group.authMode === "codex_app_server"
+            ? t("Transport is handled by the codex subprocess; no API URL is needed.")
+            : group.authMode === "copilot_auth"
+              ? t(COPILOT_API_HELPER_TEXT)
+              : getPresetSelectHelperText(selectedPresetId),
       );
       apiUrlWrap.append(apiUrlLabel, apiUrlInput, apiUrlHelper);
 
@@ -957,6 +971,7 @@ export async function registerPrefsScripts(_window: Window | undefined | null) {
       apiKeyWrap.append(apiKeyLabel, apiKeyInput);
       if (
         group.authMode === "codex_auth" ||
+        group.authMode === "codex_app_server" ||
         group.authMode === "copilot_auth"
       ) {
         apiKeyWrap.style.display = "none";
@@ -1607,6 +1622,15 @@ export async function registerPrefsScripts(_window: Window | undefined | null) {
                   ? DEFAULT_COPILOT_API_BASE
                   : "")
             ).replace(/\/$/, "");
+            if (authMode === "codex_app_server") {
+              const modelName = (modelEntry.model || profile.defaultModel || "").trim();
+              const result = await runCodexAppServerConnectionTest({ modelName });
+              statusLine.textContent =
+                `${t("✓ Success — model says: ")}"${result.reply}"\n` +
+                `${t("Agent capability: ")}${result.capabilityLabel}`;
+              statusLine.style.color = "green";
+              return;
+            }
             const apiKey =
               authMode === "codex_auth"
                 ? await readCodexAccessToken()

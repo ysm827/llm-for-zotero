@@ -1209,7 +1209,7 @@ export type EffectiveRequestConfig = {
   model: string;
   apiBase: string;
   apiKey: string;
-  authMode: "api_key" | "codex_auth" | "webchat"; // [webchat]
+  authMode: "api_key" | "codex_auth" | "codex_app_server" | "webchat"; // [webchat]
   providerProtocol?: ProviderProtocol;
   modelEntryId?: string;
   modelProviderLabel?: string;
@@ -1251,7 +1251,8 @@ function resolveEffectiveRequestConfig(params: {
   const authMode =
     params.authMode ||
     (fallbackEntry?.authMode === "webchat" ? "webchat" :
-     fallbackEntry?.authMode === "codex_auth" ? "codex_auth" : "api_key");
+     fallbackEntry?.authMode === "codex_auth" ? "codex_auth" :
+     fallbackEntry?.authMode === "codex_app_server" ? "codex_app_server" : "api_key");
   const reasoning =
     params.reasoning ||
     getSelectedReasoningForItem(params.item.id, model, apiBase);
