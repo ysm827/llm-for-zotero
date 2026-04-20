@@ -144,12 +144,7 @@ function getProviderProfile(index: number): ProviderProfile {
   };
 }
 
-type AgentBackendMode = "disabled" | "claude_bridge";
 type AgentPermissionMode = "safe" | "yolo";
-
-function normalizeAgentBackendMode(value: unknown): AgentBackendMode {
-  return value === "claude_bridge" ? "claude_bridge" : "disabled";
-}
 
 function normalizeAgentPermissionMode(value: unknown): AgentPermissionMode {
   return value === "yolo" ? "yolo" : "safe";
@@ -1821,7 +1816,6 @@ export async function registerPrefsScripts(_window: Window | undefined | null) {
   }
 
   if (agentBackendModeSelect) {
-    const key = `${config.prefsPrefix}.agentBackendMode`;
     const applyAgentBackendUi = (enabled: boolean) => {
       agentBackendModeSelect.value = enabled ? "claude_bridge" : "disabled";
       if (agentBridgeSettingsWrap) {
@@ -1830,10 +1824,9 @@ export async function registerPrefsScripts(_window: Window | undefined | null) {
     };
     applyAgentBackendUi(isClaudeCodeModeEnabled());
     agentBackendModeSelect.addEventListener("change", () => {
-      const enabled = normalizeAgentBackendMode(agentBackendModeSelect.value) === "claude_bridge";
+      const enabled = agentBackendModeSelect.value === "claude_bridge";
       applyAgentBackendUi(enabled);
       setClaudeCodeModeEnabled(enabled);
-      Zotero.Prefs.set(key, enabled ? "claude_bridge" : "disabled", true);
       if (!enabled) {
         setConversationSystemPref("upstream");
       }
