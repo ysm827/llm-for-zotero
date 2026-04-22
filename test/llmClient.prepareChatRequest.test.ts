@@ -274,6 +274,7 @@ describe("llmClient prepareChatRequest", function () {
                         continue;
                       }
                       if (message.method === "thread/start") {
+                        assert.equal(message.params?.ephemeral, true);
                         stdout.push(
                           `${JSON.stringify({ id: message.id, result: { id: "thread-1" } })}\n`,
                         );

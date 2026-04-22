@@ -99,6 +99,7 @@ export class CodexAppServerAdapter implements AgentModelAdapter {
           if (isFirstTurn) {
             const threadResp = await proc.sendRequest("thread/start", {
               model: request.model,
+              ephemeral: true,
               approvalPolicy: "never",
               dynamicTools: params.tools.map((tool) => ({
                 name: tool.name,

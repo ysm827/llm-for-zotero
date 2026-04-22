@@ -2903,6 +2903,7 @@ async function callCodexAppServerChat(params: {
   return proc.runTurnExclusive(async () => {
     const threadResult = await proc.sendRequest("thread/start", {
       model: params.model,
+      ephemeral: true,
       approvalPolicy: "never",
     });
     const threadId = extractCodexAppServerThreadId(threadResult);

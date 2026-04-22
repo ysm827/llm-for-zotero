@@ -244,6 +244,7 @@ export async function runCodexAppServerConnectionTest(params: {
     const reply = await proc.runTurnExclusive(async () => {
       const threadResp = await proc.sendRequest("thread/start", {
         model: params.modelName || undefined,
+        ephemeral: true,
         approvalPolicy: "never",
       });
       const threadId = extractCodexAppServerThreadId(threadResp);
