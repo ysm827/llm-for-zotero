@@ -3294,8 +3294,48 @@ export async function sendQuestion(opts: import("./types").SendQuestionOptions) 
   // Show cancel, hide send
   setRequestUIBusy(body, ui, initialConversationKey, "Preparing request...");
 
+  const shownQuestion = displayQuestion || question;
+  const provisionalConversationKey = initialConversationKey;
+  if (!chatHistory.has(provisionalConversationKey)) {
+    chatHistory.set(provisionalConversationKey, []);
+  }
+  const provisionalHistory = chatHistory.get(provisionalConversationKey)!;
+  const optimisticUserMessage: Message = {
+    role: "user",
+    text: shownQuestion,
+    timestamp: Date.now(),
+    runMode: runtimeMode,
+    agentRunId: agentRunId || undefined,
+  };
+  const optimisticAssistantMessage: Message = {
+    role: "assistant",
+    text: "",
+    timestamp: Date.now(),
+    runMode: runtimeMode,
+    agentRunId: agentRunId || undefined,
+    modelName: model,
+    streaming: true,
+    waitingAnimationStartedAt: Date.now(),
+    reasoningOpen: isReasoningExpandedByDefault(),
+  };
+  provisionalHistory.push(optimisticUserMessage, optimisticAssistantMessage);
+  const optimisticHelpers = createPanelUpdateHelpers(
+    body,
+    item,
+    provisionalConversationKey,
+    ui,
+  );
+  optimisticHelpers.setStatusSafely("Checking the request against the attached context.", "sending");
+  optimisticHelpers.refreshChatSafely();
+
   await ensureConversationLoaded(item);
   const conversationKey = getConversationKey(item);
+  if (conversationKey !== provisionalConversationKey) {
+    const oldHistory = chatHistory.get(provisionalConversationKey) || [];
+    if (oldHistory.length >= 2) {
+      oldHistory.splice(Math.max(0, oldHistory.length - 2), 2);
+    }
+  }
 
   // Add user message with attached selected text / screenshots metadata
   if (!chatHistory.has(conversationKey)) {
@@ -3312,7 +3352,6 @@ export async function sendQuestion(opts: import("./types").SendQuestionOptions) 
     reasoning,
     advanced,
   });
-  const shownQuestion = displayQuestion || question;
   const selectedTextsForMessage = normalizeSelectedTexts(selectedTexts);
   const selectedTextSourcesForMessage = normalizeSelectedTextSources(
     selectedTextSources,
@@ -3354,7 +3393,7 @@ export async function sendQuestion(opts: import("./types").SendQuestionOptions) 
   const userMessage: Message = {
     role: "user",
     text: userMessageText,
-    timestamp: Date.now(),
+    timestamp: optimisticUserMessage.timestamp,
     runMode: runtimeMode,
     agentRunId: agentRunId || undefined,
     selectedText: selectedTextForMessage || undefined,
@@ -3391,7 +3430,7 @@ export async function sendQuestion(opts: import("./types").SendQuestionOptions) 
     attachments: attachments?.length ? attachments : undefined,
   };
   history.push(userMessage);
-  await persistConversationMessage(conversationKey, {
+  void persistConversationMessage(conversationKey, {
     role: "user",
     text: userMessage.text,
     timestamp: userMessage.timestamp,
@@ -3408,20 +3447,20 @@ export async function sendQuestion(opts: import("./types").SendQuestionOptions) 
   });
 
   const assistantMessage: Message = {
-    role: "assistant",
-    text: "",
-    timestamp: Date.now(),
+    ...optimisticAssistantMessage,
+    timestamp: optimisticAssistantMessage.timestamp,
     runMode: runtimeMode,
     agentRunId: agentRunId || undefined,
     modelName: effectiveRequestConfig.model,
     modelEntryId: effectiveRequestConfig.modelEntryId,
     modelProviderLabel: effectiveRequestConfig.modelProviderLabel,
-    streaming: true,
     waitingAnimationStartedAt:
-      effectiveRequestConfig.modelProviderLabel === "Claude Code" ? Date.now() : undefined,
+      effectiveRequestConfig.modelProviderLabel === "Claude Code"
+        ? optimisticAssistantMessage.waitingAnimationStartedAt || Date.now()
+        : undefined,
     reasoningOpen: isReasoningExpandedByDefault(),
   };
-  history.push(assistantMessage);
+  history[history.length - 1] = assistantMessage;
   if (history.length > PERSISTED_HISTORY_LIMIT) {
     history.splice(0, history.length - PERSISTED_HISTORY_LIMIT);
   }
@@ -4615,8 +4654,9 @@ export function refreshChat(body: Element, item?: Zotero.Item | null) {
           : null;
       const isClaudeStreamingConversation = isClaudeConversationSystemActive();
       const agentRunId = msg.agentRunId?.trim();
-      const traceEvents = agentRunId
-        ? getCachedAgentRunEvents(agentRunId)
+      const cachedTraceEvents = agentRunId ? getCachedAgentRunEvents(agentRunId) : [];
+      const traceEvents = cachedTraceEvents.length
+        ? cachedTraceEvents
         : msg.pendingAgentTraceEvents || [];
       const agentTraceEl =
         msg.runMode === "agent"
@@ -4752,7 +4792,11 @@ export function refreshChat(body: Element, item?: Zotero.Item | null) {
         );
         modelHeader.appendChild(modelName);
 
-        if (!hasAnswerText && msg.streaming && isClaudeStreamingConversation) {
+        if (
+          !hasAnswerText &&
+          msg.streaming &&
+          isClaudeStreamingConversation
+        ) {
           const roseLoader = doc.createElement("span") as HTMLSpanElement;
           roseLoader.className = "llm-rose-loader llm-rose-loader-inline";
           mountClaudeRoseThreeLoader(

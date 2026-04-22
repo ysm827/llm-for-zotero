@@ -17,3 +17,6 @@ logs
 
 # Ignore all contents inside a folder
 .claude/
+
+# Local design notes
+/docs/claude-session-isolation-design.md

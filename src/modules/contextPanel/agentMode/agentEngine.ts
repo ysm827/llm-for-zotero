@@ -14,13 +14,21 @@ import type {
 } from "../../../agent/types";
 
 function buildPendingAgentTraceEvents(): AgentRunEventRecord[] {
+  const now = Date.now();
   return [
     {
       runId: "pending",
       seq: 1,
       eventType: "status",
-      payload: { type: "status", text: "Starting Claude runtime" },
-      createdAt: Date.now(),
+      payload: { type: "status", text: "Checking the request against the attached context." },
+      createdAt: now,
+    },
+    {
+      runId: "pending",
+      seq: 2,
+      eventType: "status",
+      payload: { type: "status", text: "Request and attached context received" },
+      createdAt: now + 1,
     },
   ];
 }
@@ -411,6 +419,7 @@ export async function sendAgentTurn(
   const queueRefresh = deps.createQueuedRefresh(refreshChatSafely);
   const scheduleQueueDrain =
     (body as any).__llmScheduleClaudeQueueDrain as (() => void) | undefined;
+  setStatusSafely("Checking the request against the attached context.", "sending");
   refreshChatSafely();
 
   await deps.ensureConversationLoaded(item);
@@ -542,7 +551,6 @@ export async function sendAgentTurn(
       signal: deps.currentAbortController(conversationKey)?.signal,
       onStart: async (runId) => {
         assistantMessage.agentRunId = runId;
-        assistantMessage.pendingAgentTraceEvents = undefined;
         userMessage.agentRunId = runId;
         deps.agentRunTraceCache.set(runId, []);
         refreshChatSafely();
@@ -741,11 +749,15 @@ export async function sendAgentTurn(
       return;
     }
     const errMsg = (err as Error).message || "Error";
-    assistantMessage.text = `Error: ${errMsg}`;
+    const userFacingError =
+      errMsg.includes("[ede_diagnostic]") && errMsg.includes("last_content_type=none")
+        ? "The model returned an empty reply. Please retry."
+        : errMsg;
+    assistantMessage.text = `Error: ${userFacingError}`;
     assistantMessage.streaming = false;
     refreshChatSafely();
     await persistAssistantOnce();
-    setStatusSafely(`Error: ${errMsg.slice(0, 40)}`, "error");
+    setStatusSafely(`Error: ${userFacingError.slice(0, 40)}`, "error");
   } finally {
     deps.restoreRequestUIIdle(body, conversationKey, thisRequestId);
     deps.setCurrentAbortController(conversationKey, null);
@@ -927,7 +939,6 @@ export async function retryAgentTurn(
       signal: deps.currentAbortController(conversationKey)?.signal,
       onStart: async (runId) => {
         assistantMessage.agentRunId = runId;
-        assistantMessage.pendingAgentTraceEvents = undefined;
         retryPair.userMessage.agentRunId = runId;
         deps.agentRunTraceCache.set(runId, []);
         refreshChatSafely();
@@ -1122,11 +1133,15 @@ export async function retryAgentTurn(
       return;
     }
     const errMsg = (err as Error).message || "Error";
-    assistantMessage.text = `Error: ${errMsg}`;
+    const userFacingError =
+      errMsg.includes("[ede_diagnostic]") && errMsg.includes("last_content_type=none")
+        ? "The model returned an empty reply. Please retry."
+        : errMsg;
+    assistantMessage.text = `Error: ${userFacingError}`;
     assistantMessage.streaming = false;
     refreshChatSafely();
     await persistAssistantOnce();
-    setStatusSafely(`Error: ${errMsg.slice(0, 40)}`, "error");
+    setStatusSafely(`Error: ${userFacingError.slice(0, 40)}`, "error");
   } finally {
     deps.restoreRequestUIIdle(body, conversationKey, thisRequestId);
     deps.setCurrentAbortController(conversationKey, null);

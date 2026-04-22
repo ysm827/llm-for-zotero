@@ -2433,10 +2433,12 @@ export function buildAgentTraceDisplayItems(
         ) {
           break;
         }
-        const isResumeStatus =
+        const isSessionStartStatus =
           statusText === "Running SessionStart:resume" ||
-          statusText === "Finished SessionStart:resume";
-        if (isResumeStatus && !sawSessionResume) {
+          statusText === "Finished SessionStart:resume" ||
+          statusText === "Running SessionStart:startup" ||
+          statusText === "Finished SessionStart:startup";
+        if (isSessionStartStatus) {
           break;
         }
         if (statusText === "Initializing Claude session" && !sawSessionResume) {
@@ -2609,8 +2611,8 @@ export function renderAgentTrace({
   events,
   onTraceMissing,
 }: RenderAgentTraceParams): HTMLElement | null {
-  const runId = message.agentRunId?.trim();
-  if (!runId) return null;
+  const runId = message.agentRunId?.trim() || "pending";
+  if (!events.length && !message.pendingAgentTraceEvents?.length) return null;
   const wrap = doc.createElement("div");
   wrap.className = "llm-agent-activity";
   const list = doc.createElement("div");
