@@ -176,6 +176,8 @@ export type AgentEngineDeps = {
     fallbackText?: string,
   ) => void;
   sanitizeText: (text: string) => string;
+  accumulateSessionTokens: (conversationKey: number, delta: number) => number;
+  setTokenUsage: (el: HTMLElement, total: number) => void;
 
   // Persistence
   persistConversationMessage: (
@@ -477,6 +479,15 @@ export async function sendAgentTurn(
               );
             }
             break;
+          case "usage":
+            if (ui.tokenUsageEl && event.totalTokens > 0) {
+              const total = deps.accumulateSessionTokens(
+                conversationKey,
+                event.totalTokens,
+              );
+              deps.setTokenUsage(ui.tokenUsageEl, total);
+            }
+            break;
           case "final":
             if (!assistantMessage.text.trim()) {
               assistantMessage.text = deps.sanitizeText(event.text);
@@ -722,6 +733,15 @@ export async function retryAgentTurn(
                 0,
                 Math.max(0, assistantMessage.text.length - event.length),
               );
+            }
+            break;
+          case "usage":
+            if (ui.tokenUsageEl && event.totalTokens > 0) {
+              const total = deps.accumulateSessionTokens(
+                conversationKey,
+                event.totalTokens,
+              );
+              deps.setTokenUsage(ui.tokenUsageEl, total);
             }
             break;
           case "final":

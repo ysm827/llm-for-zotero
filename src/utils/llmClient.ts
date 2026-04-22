@@ -69,6 +69,7 @@ import {
   extractCodexAppServerThreadId,
   extractCodexAppServerTurnId,
   getOrCreateCodexAppServerProcess,
+  resolveCodexAppServerReasoningParams,
   waitForCodexAppServerTurnCompletion,
 } from "./codexAppServerProcess";
 import { buildCodexAppServerChatInput } from "./codexAppServerInput";
@@ -2896,8 +2897,11 @@ async function callNativeProtocol(params: {
 async function callCodexAppServerChat(params: {
   model: string;
   messages: ChatMessage[];
+  reasoning?: ReasoningConfig;
   signal?: AbortSignal;
   onDelta?: (delta: string) => void;
+  onReasoning?: (event: ReasoningEvent) => void;
+  onUsage?: (usage: UsageStats) => void;
 }): Promise<string> {
   const proc = await getOrCreateCodexAppServerProcess("codex_app_server_chat");
   return proc.runTurnExclusive(async () => {
@@ -2911,9 +2915,15 @@ async function callCodexAppServerChat(params: {
       throw new Error("Codex app-server did not return a thread ID");
     }
     const input = await buildCodexAppServerChatInput(params.messages);
+    const appServerReasoning = resolveCodexAppServerReasoningParams(
+      params.reasoning,
+      params.model,
+    );
     const turnResult = await proc.sendRequest("turn/start", {
       threadId,
       input,
+      model: params.model,
+      ...appServerReasoning,
     });
     const turnId = extractCodexAppServerTurnId(turnResult);
     if (!turnId) {
@@ -2923,6 +2933,8 @@ async function callCodexAppServerChat(params: {
       proc,
       turnId,
       onTextDelta: params.onDelta,
+      onReasoning: params.onReasoning,
+      onUsage: params.onUsage,
       signal: params.signal,
       cacheKey: "codex_app_server_chat",
     });
@@ -3095,8 +3107,11 @@ export async function callLLMStream(
     return callCodexAppServerChat({
       model,
       messages,
+      reasoning: params.reasoning,
       signal: params.signal,
       onDelta,
+      onReasoning,
+      onUsage,
     });
   }
   const auth = await resolveRequestAuthState({

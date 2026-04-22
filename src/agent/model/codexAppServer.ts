@@ -10,6 +10,7 @@ import {
   extractCodexAppServerThreadId,
   extractCodexAppServerTurnId,
   getOrCreateCodexAppServerProcess,
+  resolveCodexAppServerReasoningParams,
   waitForCodexAppServerTurnCompletion,
 } from "../../utils/codexAppServerProcess";
 import {
@@ -46,7 +47,7 @@ export class CodexAppServerAdapter implements AgentModelAdapter {
       toolCalls: true,
       multimodal: isMultimodalRequestSupported(_request),
       fileInputs: false,
-      reasoning: false,
+      reasoning: true,
     };
   }
 
@@ -119,6 +120,11 @@ export class CodexAppServerAdapter implements AgentModelAdapter {
           const turnResp = await proc.sendRequest("turn/start", {
             threadId: this.threadId,
             input: userInput,
+            model: request.model,
+            ...resolveCodexAppServerReasoningParams(
+              request.reasoning,
+              request.model,
+            ),
           });
           const turnId = extractCodexAppServerTurnId(turnResp);
           if (!turnId) {
@@ -129,6 +135,8 @@ export class CodexAppServerAdapter implements AgentModelAdapter {
             proc,
             turnId,
             onTextDelta: params.onTextDelta,
+            onReasoning: params.onReasoning,
+            onUsage: params.onUsage,
             signal: params.signal,
             cacheKey: this.processKey,
           });

@@ -4,6 +4,7 @@ import {
   destroyCachedCodexAppServerProcess,
   extractCodexAppServerThreadId,
   extractCodexAppServerTurnId,
+  resolveCodexAppServerReasoningParams,
   waitForCodexAppServerTurnCompletion,
 } from "../src/utils/codexAppServerProcess";
 
@@ -28,6 +29,35 @@ describe("codexAppServerProcess", function () {
     assert.equal(
       extractCodexAppServerTurnId({ turn: { id: "turn-nested" } }),
       "turn-nested",
+    );
+  });
+
+  it("maps UI reasoning levels to app-server effort and verbose summaries", function () {
+    assert.deepEqual(
+      resolveCodexAppServerReasoningParams(
+        {
+          provider: "openai",
+          level: "low",
+        },
+        "gpt-5.4",
+      ),
+      {
+        effort: "low",
+        summary: "detailed",
+      },
+    );
+    assert.deepEqual(
+      resolveCodexAppServerReasoningParams(
+        {
+          provider: "openai",
+          level: "xhigh",
+        },
+        "gpt-5.4",
+      ),
+      {
+        effort: "xhigh",
+        summary: "detailed",
+      },
     );
   });
 
@@ -182,6 +212,280 @@ describe("codexAppServerProcess", function () {
     });
 
     assert.equal(result, "");
+  });
+
+  it("streams reasoning summaries and details without duplicating final reasoning items", async function () {
+    const proc = createProcess();
+    const reasoning: Array<{ summary?: string; details?: string }> = [];
+
+    setTimeout(() => {
+      void (proc as unknown as {
+        handleMessage: (msg: Record<string, unknown>) => void;
+      }).handleMessage({
+        method: "item/reasoning/summaryTextDelta",
+        params: {
+          itemId: "reasoning-1",
+          delta: "Plan first.",
+        },
+      });
+    }, 5);
+    setTimeout(() => {
+      void (proc as unknown as {
+        handleMessage: (msg: Record<string, unknown>) => void;
+      }).handleMessage({
+        method: "item/reasoning/textDelta",
+        params: {
+          itemId: "reasoning-1",
+          delta: "Inspecting the library.",
+        },
+      });
+    }, 10);
+    setTimeout(() => {
+      void (proc as unknown as {
+        handleMessage: (msg: Record<string, unknown>) => void;
+      }).handleMessage({
+        method: "item/completed",
+        params: {
+          item: {
+            id: "reasoning-1",
+            type: "reasoning",
+            summary: "Plan first.",
+            content: "Inspecting the library.",
+          },
+        },
+      });
+    }, 15);
+    setTimeout(() => {
+      void (proc as unknown as {
+        handleMessage: (msg: Record<string, unknown>) => void;
+      }).handleMessage({
+        method: "turn/completed",
+        params: {
+          turnId: "turn-reasoning",
+          status: "completed",
+        },
+      });
+    }, 20);
+
+    const result = await waitForCodexAppServerTurnCompletion({
+      proc,
+      turnId: "turn-reasoning",
+      onReasoning: async (event) => {
+        reasoning.push({
+          ...(event.summary ? { summary: event.summary } : {}),
+          ...(event.details ? { details: event.details } : {}),
+        });
+      },
+      timeoutMs: 50,
+    });
+
+    assert.equal(result, "");
+    assert.deepEqual(reasoning, [
+      { summary: "Plan first." },
+      { details: "Inspecting the library." },
+    ]);
+  });
+
+  it("falls back to final reasoning items when the app-server sends no reasoning deltas", async function () {
+    const proc = createProcess();
+    const reasoning: Array<{ summary?: string; details?: string }> = [];
+
+    setTimeout(() => {
+      void (proc as unknown as {
+        handleMessage: (msg: Record<string, unknown>) => void;
+      }).handleMessage({
+        method: "item/completed",
+        params: {
+          item: {
+            id: "reasoning-2",
+            type: "reasoning",
+            summary: "Reviewing context.",
+            content: "Looking through the selected note.",
+          },
+        },
+      });
+    }, 5);
+    setTimeout(() => {
+      void (proc as unknown as {
+        handleMessage: (msg: Record<string, unknown>) => void;
+      }).handleMessage({
+        method: "turn/completed",
+        params: {
+          turnId: "turn-reasoning-final",
+          status: "completed",
+        },
+      });
+    }, 10);
+
+    const result = await waitForCodexAppServerTurnCompletion({
+      proc,
+      turnId: "turn-reasoning-final",
+      onReasoning: async (event) => {
+        reasoning.push({
+          ...(event.summary ? { summary: event.summary } : {}),
+          ...(event.details ? { details: event.details } : {}),
+        });
+      },
+      timeoutMs: 50,
+    });
+
+    assert.equal(result, "");
+    assert.deepEqual(reasoning, [
+      { summary: "Reviewing context." },
+      { details: "Looking through the selected note." },
+    ]);
+  });
+
+  it("emits token usage updates for the active turn", async function () {
+    const proc = createProcess();
+    const usage: Array<{
+      promptTokens: number;
+      completionTokens: number;
+      totalTokens: number;
+    }> = [];
+
+    setTimeout(() => {
+      void (proc as unknown as {
+        handleMessage: (msg: Record<string, unknown>) => void;
+      }).handleMessage({
+        method: "thread/tokenUsage/updated",
+        params: {
+          threadId: "thread-usage",
+          turnId: "turn-usage",
+          tokenUsage: {
+            last: {
+              totalTokens: 42,
+              inputTokens: 39,
+              outputTokens: 3,
+            },
+          },
+        },
+      });
+    }, 5);
+    setTimeout(() => {
+      void (proc as unknown as {
+        handleMessage: (msg: Record<string, unknown>) => void;
+      }).handleMessage({
+        method: "turn/completed",
+        params: {
+          turnId: "turn-usage",
+          status: "completed",
+        },
+      });
+    }, 10);
+
+    const result = await waitForCodexAppServerTurnCompletion({
+      proc,
+      turnId: "turn-usage",
+      onUsage: async (event) => {
+        usage.push(event);
+      },
+      timeoutMs: 50,
+    });
+
+    assert.equal(result, "");
+    assert.deepEqual(usage, [
+      {
+        promptTokens: 39,
+        completionTokens: 3,
+        totalTokens: 42,
+      },
+    ]);
+  });
+
+  it("deduplicates repeated cumulative token usage updates", async function () {
+    const proc = createProcess();
+    const usage: Array<{
+      promptTokens: number;
+      completionTokens: number;
+      totalTokens: number;
+    }> = [];
+
+    setTimeout(() => {
+      void (proc as unknown as {
+        handleMessage: (msg: Record<string, unknown>) => void;
+      }).handleMessage({
+        method: "thread/tokenUsage/updated",
+        params: {
+          turnId: "turn-usage-repeat",
+          tokenUsage: {
+            last: {
+              totalTokens: 10,
+              inputTokens: 8,
+              outputTokens: 2,
+            },
+          },
+        },
+      });
+    }, 5);
+    setTimeout(() => {
+      void (proc as unknown as {
+        handleMessage: (msg: Record<string, unknown>) => void;
+      }).handleMessage({
+        method: "thread/tokenUsage/updated",
+        params: {
+          turnId: "turn-usage-repeat",
+          tokenUsage: {
+            last: {
+              totalTokens: 10,
+              inputTokens: 8,
+              outputTokens: 2,
+            },
+          },
+        },
+      });
+    }, 10);
+    setTimeout(() => {
+      void (proc as unknown as {
+        handleMessage: (msg: Record<string, unknown>) => void;
+      }).handleMessage({
+        method: "thread/tokenUsage/updated",
+        params: {
+          turnId: "turn-usage-repeat",
+          tokenUsage: {
+            last: {
+              totalTokens: 15,
+              inputTokens: 11,
+              outputTokens: 4,
+            },
+          },
+        },
+      });
+    }, 15);
+    setTimeout(() => {
+      void (proc as unknown as {
+        handleMessage: (msg: Record<string, unknown>) => void;
+      }).handleMessage({
+        method: "turn/completed",
+        params: {
+          turnId: "turn-usage-repeat",
+          status: "completed",
+        },
+      });
+    }, 20);
+
+    const result = await waitForCodexAppServerTurnCompletion({
+      proc,
+      turnId: "turn-usage-repeat",
+      onUsage: async (event) => {
+        usage.push(event);
+      },
+      timeoutMs: 50,
+    });
+
+    assert.equal(result, "");
+    assert.deepEqual(usage, [
+      {
+        promptTokens: 8,
+        completionTokens: 2,
+        totalTokens: 10,
+      },
+      {
+        promptTokens: 3,
+        completionTokens: 2,
+        totalTokens: 5,
+      },
+    ]);
   });
 
   it("uses CODEX_PATH when spawning on Windows", async function () {

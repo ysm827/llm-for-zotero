@@ -1,4 +1,6 @@
+import type { ReasoningConfig, ReasoningEvent, UsageStats } from "./llmClient";
 import { getRuntimePlatformInfo } from "./runtimePlatform";
+import { getReasoningDefaultLevelForModel } from "./reasoningProfiles";
 
 const DEFAULT_CODEX_APP_SERVER_TURN_TIMEOUT_MS = 300_000;
 
@@ -337,20 +339,178 @@ export function extractCodexAppServerTurnId(result: unknown): string {
   return extractCodexAppServerId(result, "turn");
 }
 
+function normalizeCodexAppServerReasoningLevel(
+  reasoning: ReasoningConfig,
+  modelName?: string,
+): "low" | "medium" | "high" | "xhigh" | null {
+  const resolvedLevel =
+    reasoning.level === "default"
+      ? getReasoningDefaultLevelForModel(reasoning.provider, modelName) ||
+        reasoning.level
+      : reasoning.level;
+  if (resolvedLevel === "minimal") return "low";
+  if (resolvedLevel === "low") return "low";
+  if (resolvedLevel === "medium") return "medium";
+  if (resolvedLevel === "high") return "high";
+  if (resolvedLevel === "xhigh") return "xhigh";
+  return null;
+}
+
+export function resolveCodexAppServerReasoningParams(
+  reasoning: ReasoningConfig | undefined,
+  modelName?: string,
+): { effort?: "low" | "medium" | "high" | "xhigh"; summary?: "detailed" } {
+  if (!reasoning) return {};
+  const effort = normalizeCodexAppServerReasoningLevel(reasoning, modelName);
+  if (!effort) return {};
+  return {
+    effort,
+    // OpenAI-backed app-server sessions usually expose readable reasoning only
+    // through summary events, so request the richer summary mode explicitly.
+    summary: "detailed",
+  };
+}
+
+function normalizeCodexAppServerText(value: unknown): string {
+  if (typeof value === "string") return value;
+  if (Array.isArray(value)) {
+    return value.map((entry) => normalizeCodexAppServerText(entry)).join("");
+  }
+  if (!value || typeof value !== "object") return "";
+  const row = value as {
+    text?: unknown;
+    content?: unknown;
+    summary?: unknown;
+    reasoning?: unknown;
+  };
+  return (
+    normalizeCodexAppServerText(row.text) ||
+    normalizeCodexAppServerText(row.content) ||
+    normalizeCodexAppServerText(row.summary) ||
+    normalizeCodexAppServerText(row.reasoning) ||
+    ""
+  );
+}
+
+function extractCodexAppServerItem(rawParams: unknown): {
+  id?: string;
+  type?: string;
+  summary?: string;
+  details?: string;
+} | null {
+  if (!rawParams || typeof rawParams !== "object") return null;
+  const source =
+    rawParams &&
+    typeof (rawParams as { item?: unknown }).item === "object" &&
+    (rawParams as { item?: unknown }).item
+      ? (rawParams as { item: unknown }).item
+      : rawParams;
+  if (!source || typeof source !== "object") return null;
+  const item = source as {
+    id?: unknown;
+    type?: unknown;
+    summary?: unknown;
+    content?: unknown;
+    text?: unknown;
+    reasoning?: unknown;
+  };
+  return {
+    id: typeof item.id === "string" && item.id.trim() ? item.id.trim() : undefined,
+    type:
+      typeof item.type === "string" && item.type.trim()
+        ? item.type.trim().toLowerCase()
+        : undefined,
+    summary: normalizeCodexAppServerText(item.summary) || undefined,
+    details:
+      normalizeCodexAppServerText(item.content) ||
+      normalizeCodexAppServerText(item.reasoning) ||
+      normalizeCodexAppServerText(item.text) ||
+      undefined,
+  };
+}
+
 export function waitForCodexAppServerTurnCompletion(params: {
   proc: CodexAppServerProcess;
   turnId: string;
   onTextDelta?: (delta: string) => void | Promise<void>;
+  onReasoning?: (event: ReasoningEvent) => void | Promise<void>;
+  onUsage?: (usage: UsageStats) => void | Promise<void>;
   signal?: AbortSignal;
   cacheKey?: string;
   timeoutMs?: number;
 }): Promise<string> {
-  const { proc, turnId, onTextDelta, signal, cacheKey } = params;
+  const { proc, turnId, onTextDelta, onReasoning, onUsage, signal, cacheKey } =
+    params;
   const timeoutMs = params.timeoutMs ?? DEFAULT_CODEX_APP_SERVER_TURN_TIMEOUT_MS;
   return new Promise((resolve, reject) => {
     let accumulated = "";
     let settled = false;
     let timeoutId: ReturnType<typeof setTimeout> | null = null;
+    let lastEmittedUsageTotals: UsageStats | null = null;
+    const reasoningState = new Map<
+      string,
+      { sawSummaryDelta: boolean; sawDetailsDelta: boolean }
+    >();
+    const getReasoningState = (itemId: string) => {
+      let state = reasoningState.get(itemId);
+      if (!state) {
+        state = { sawSummaryDelta: false, sawDetailsDelta: false };
+        reasoningState.set(itemId, state);
+      }
+      return state;
+    };
+    const emitReasoning = (event: ReasoningEvent) => {
+      const summary =
+        typeof event.summary === "string" && event.summary.length > 0
+          ? event.summary
+          : undefined;
+      const details =
+        typeof event.details === "string" && event.details.length > 0
+          ? event.details
+          : undefined;
+      if (!summary && !details) return;
+      Promise.resolve(onReasoning?.({ summary, details })).catch(() => {
+        // Ignore downstream consumer errors so the transport can finish cleanly.
+      });
+    };
+    const emitUsage = (usage: UsageStats) => {
+      const nextUsage: UsageStats = {
+        promptTokens: Math.max(0, usage.promptTokens || 0),
+        completionTokens: Math.max(0, usage.completionTokens || 0),
+        totalTokens: Math.max(0, usage.totalTokens || 0),
+      };
+      if (lastEmittedUsageTotals) {
+        const deltaPrompt = Math.max(
+          0,
+          nextUsage.promptTokens - lastEmittedUsageTotals.promptTokens,
+        );
+        const deltaCompletion = Math.max(
+          0,
+          nextUsage.completionTokens - lastEmittedUsageTotals.completionTokens,
+        );
+        const deltaTotal = Math.max(
+          0,
+          nextUsage.totalTokens - lastEmittedUsageTotals.totalTokens,
+        );
+        lastEmittedUsageTotals = nextUsage;
+        if (deltaTotal <= 0) return;
+        Promise.resolve(
+          onUsage?.({
+            promptTokens: deltaPrompt,
+            completionTokens: deltaCompletion,
+            totalTokens: deltaTotal,
+          }),
+        ).catch(() => {
+          // Ignore downstream consumer errors so the transport can finish cleanly.
+        });
+        return;
+      }
+      lastEmittedUsageTotals = nextUsage;
+      if (nextUsage.totalTokens <= 0) return;
+      Promise.resolve(onUsage?.(nextUsage)).catch(() => {
+        // Ignore downstream consumer errors so the transport can finish cleanly.
+      });
+    };
     const scheduleTimeout = () => {
       if (timeoutMs <= 0 || settled) return;
       if (timeoutId !== null) {
@@ -381,6 +541,10 @@ export function waitForCodexAppServerTurnCompletion(params: {
       settled = true;
       unsubActivity();
       unsubDelta();
+      unsubReasoningSummary();
+      unsubReasoningDetails();
+      unsubUsage();
+      unsubItemCompleted();
       unsubCompleted();
       if (timeoutId !== null) {
         clearTimeout(timeoutId);
@@ -406,6 +570,97 @@ export function waitForCodexAppServerTurnCompletion(params: {
           onTextDelta?.(delta);
         } catch {
           // Ignore downstream consumer errors so the transport can finish cleanly.
+        }
+      },
+    );
+
+    const unsubReasoningSummary = proc.onNotification(
+      "item/reasoning/summaryTextDelta",
+      (rawParams: unknown) => {
+        const notification = rawParams as {
+          itemId?: unknown;
+          delta?: unknown;
+          text?: unknown;
+        };
+        const summary = normalizeCodexAppServerText(
+          notification.delta ?? notification.text,
+        );
+        if (!summary) return;
+        if (typeof notification.itemId === "string" && notification.itemId.trim()) {
+          getReasoningState(notification.itemId.trim()).sawSummaryDelta = true;
+        }
+        emitReasoning({ summary });
+      },
+    );
+
+    const unsubReasoningDetails = proc.onNotification(
+      "item/reasoning/textDelta",
+      (rawParams: unknown) => {
+        const notification = rawParams as {
+          itemId?: unknown;
+          delta?: unknown;
+          text?: unknown;
+        };
+        const details = normalizeCodexAppServerText(
+          notification.delta ?? notification.text,
+        );
+        if (!details) return;
+        if (typeof notification.itemId === "string" && notification.itemId.trim()) {
+          getReasoningState(notification.itemId.trim()).sawDetailsDelta = true;
+        }
+        emitReasoning({ details });
+      },
+    );
+
+    const unsubUsage = proc.onNotification(
+      "thread/tokenUsage/updated",
+      (rawParams: unknown) => {
+        const notification = rawParams as {
+          turnId?: unknown;
+          tokenUsage?: {
+            last?: {
+              totalTokens?: unknown;
+              inputTokens?: unknown;
+              outputTokens?: unknown;
+            };
+            total?: {
+              totalTokens?: unknown;
+              inputTokens?: unknown;
+              outputTokens?: unknown;
+            };
+          };
+        };
+        const eventTurnId =
+          typeof notification.turnId === "string" ? notification.turnId : "";
+        if (eventTurnId && eventTurnId !== turnId) return;
+        const usage = notification.tokenUsage?.last || notification.tokenUsage?.total;
+        if (!usage) return;
+        const totalTokens =
+          typeof usage.totalTokens === "number" ? usage.totalTokens : 0;
+        const promptTokens =
+          typeof usage.inputTokens === "number" ? usage.inputTokens : 0;
+        const completionTokens =
+          typeof usage.outputTokens === "number" ? usage.outputTokens : 0;
+        if (totalTokens <= 0) return;
+        emitUsage({
+          promptTokens,
+          completionTokens,
+          totalTokens,
+        });
+      },
+    );
+
+    const unsubItemCompleted = proc.onNotification(
+      "item/completed",
+      (rawParams: unknown) => {
+        const item = extractCodexAppServerItem(rawParams);
+        if (!item || item.type !== "reasoning") return;
+        const state = item.id ? getReasoningState(item.id) : undefined;
+        if (item.summary && !state?.sawSummaryDelta) {
+          emitReasoning({ summary: item.summary });
+        }
+        if (item.details && !state?.sawDetailsDelta) {
+          emitReasoning({ details: item.details });
         }
       },
     );

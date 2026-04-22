@@ -2787,6 +2787,8 @@ function buildAgentEngineDeps(): AgentEngineDeps {
     waitForUiStep,
     finalizeCancelledAssistantMessage,
     sanitizeText,
+    accumulateSessionTokens,
+    setTokenUsage,
     persistConversationMessage,
     updateStoredLatestUserMessage: updateStoredLatestUserMessage as AgentEngineDeps["updateStoredLatestUserMessage"],
     updateStoredLatestAssistantMessage: updateStoredLatestAssistantMessage as AgentEngineDeps["updateStoredLatestAssistantMessage"],

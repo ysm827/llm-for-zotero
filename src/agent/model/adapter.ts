@@ -1,4 +1,4 @@
-import type { ReasoningEvent } from "../../utils/llmClient";
+import type { ReasoningEvent, UsageStats } from "../../utils/llmClient";
 import type {
   AgentModelCapabilities,
   AgentToolCall,
@@ -24,6 +24,7 @@ export type AgentStepParams = {
   signal?: AbortSignal;
   onTextDelta?: (delta: string) => void | Promise<void>;
   onReasoning?: (event: ReasoningEvent) => void | Promise<void>;
+  onUsage?: (usage: UsageStats) => void | Promise<void>;
   onToolCall?: (
     call: AgentToolCall,
   ) => Promise<AgentAdapterToolCallResult>;

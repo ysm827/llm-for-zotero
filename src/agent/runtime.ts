@@ -523,6 +523,21 @@ export class AgentRuntime {
             details: reasoning.details,
           });
         },
+        onUsage: async (usage) => {
+          const totalTokens = Math.max(0, usage.totalTokens || 0);
+          const promptTokens = Math.max(0, usage.promptTokens || 0);
+          const completionTokens = Math.max(0, usage.completionTokens || 0);
+          if (totalTokens <= 0 && promptTokens <= 0 && completionTokens <= 0) {
+            return;
+          }
+          await emit({
+            type: "usage",
+            round,
+            promptTokens,
+            completionTokens,
+            totalTokens,
+          });
+        },
         onToolCall: async (call) => {
           const outcome = await executeToolWorkflow(call, round, {
             modelCallId: call.id,

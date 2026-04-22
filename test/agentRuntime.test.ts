@@ -4,6 +4,10 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { AgentRuntime } from "../src/agent/runtime";
 import { AgentToolRegistry } from "../src/agent/tools/registry";
+import {
+  MAX_AGENT_ROUNDS,
+  MAX_AGENT_TOOL_CALLS_PER_ROUND,
+} from "../src/agent/model/limits";
 import type {
   AgentEvent,
   AgentModelCapabilities,
@@ -17,6 +21,7 @@ type MockDbRow = Record<string, unknown>;
 function installMockDb() {
   const runs = new Map<string, MockDbRow>();
   const events: MockDbRow[] = [];
+  const prefs = new Map<string, unknown>();
   const originalZotero = (globalThis as typeof globalThis & { Zotero?: unknown }).Zotero;
   (globalThis as typeof globalThis & { Zotero?: unknown }).Zotero = {
     DB: {
@@ -64,6 +69,12 @@ function installMockDb() {
           return run ? [run] : [];
         }
         return [];
+      },
+    },
+    Prefs: {
+      get: (key: string) => prefs.get(key),
+      set: (key: string, value: unknown) => {
+        prefs.set(key, value);
       },
     },
   };
@@ -514,7 +525,9 @@ describe("AgentRuntime", function () {
       assert.equal(outcome.text, "Summary ready.");
       assert.isTrue(
         events.some(
-          (event) => event.type === "status" && event.text === "Continuing agent (5/8)",
+          (event) =>
+            event.type === "status" &&
+            event.text === `Continuing agent (5/${MAX_AGENT_ROUNDS})`,
         ),
       );
       assert.equal(
@@ -553,6 +566,7 @@ describe("AgentRuntime", function () {
       });
 
       let sawConsistentFollowup = false;
+      const overLimitCallCount = MAX_AGENT_TOOL_CALLS_PER_ROUND + 1;
       const runtime = new AgentRuntime({
         registry,
         adapterFactory: () => ({
@@ -573,7 +587,10 @@ describe("AgentRuntime", function () {
               if (!priorAssistant || !Array.isArray(priorAssistant.tool_calls)) {
                 return {
                   kind: "tool_calls",
-                  calls: [1, 2, 3, 4, 5, 6, 7].map((index) => ({
+                  calls: Array.from(
+                    { length: overLimitCallCount },
+                    (_unused, index) => index + 1,
+                  ).map((index) => ({
                     id: `call-${index}`,
                     name: "read_context",
                     arguments: {},
@@ -581,7 +598,10 @@ describe("AgentRuntime", function () {
                   assistantMessage: {
                     role: "assistant",
                     content: "",
-                    tool_calls: [1, 2, 3, 4, 5, 6, 7].map((index) => ({
+                    tool_calls: Array.from(
+                      { length: overLimitCallCount },
+                      (_unused, index) => index + 1,
+                    ).map((index) => ({
                       id: `call-${index}`,
                       name: "read_context",
                       arguments: {},
@@ -593,8 +613,9 @@ describe("AgentRuntime", function () {
                 (message) => message.role === "tool",
               );
               sawConsistentFollowup =
-                priorAssistant.tool_calls.length === 6 &&
-                toolMessages.length === 6 &&
+                priorAssistant.tool_calls.length ===
+                  MAX_AGENT_TOOL_CALLS_PER_ROUND &&
+                toolMessages.length === MAX_AGENT_TOOL_CALLS_PER_ROUND &&
                 toolMessages.every(
                   (message, index) => message.tool_call_id === `call-${index + 1}`,
                 );
@@ -786,6 +807,92 @@ describe("AgentRuntime", function () {
         [
           { round: 1, details: "Inspecting the request." },
           { round: 2, details: "Writing the answer." },
+        ],
+      );
+    } finally {
+      restoreDb();
+    }
+  });
+
+  it("emits usage events without accumulating them inside the runtime", async function () {
+    const restoreDb = installMockDb();
+    try {
+      const runtime = new AgentRuntime({
+        registry: new AgentToolRegistry(),
+        adapterFactory: () => ({
+          getCapabilities: () => ({
+            streaming: true,
+            toolCalls: true,
+            multimodal: false,
+            fileInputs: false,
+            reasoning: true,
+          }),
+          supportsTools: () => true,
+          async runStep(params: AgentStepParams): Promise<AgentModelStep> {
+            await params.onUsage?.({
+              promptTokens: 10,
+              completionTokens: 4,
+              totalTokens: 14,
+            });
+            await params.onUsage?.({
+              promptTokens: 0,
+              completionTokens: 2,
+              totalTokens: 2,
+            });
+            return {
+              kind: "final",
+              text: "Done.",
+              assistantMessage: {
+                role: "assistant",
+                content: "Done.",
+              },
+            };
+          },
+        }),
+      });
+
+      const events: AgentEvent[] = [];
+      const outcome = await runtime.runTurn({
+        request: {
+          conversationKey: 1,
+          mode: "agent",
+          userText: "count tokens",
+          model: "gpt-5.4",
+          apiBase: "https://api.openai.com/v1/responses",
+          apiKey: "test",
+        },
+        onEvent: async (event) => {
+          events.push(event);
+        },
+      });
+
+      assert.equal(outcome.kind, "completed");
+      assert.deepEqual(
+        events
+          .filter((event) => event.type === "usage")
+          .map((event) =>
+            event.type === "usage"
+              ? {
+                  round: event.round,
+                  promptTokens: event.promptTokens,
+                  completionTokens: event.completionTokens,
+                  totalTokens: event.totalTokens,
+                }
+              : null,
+          ),
+        [
+          {
+            round: 1,
+            promptTokens: 10,
+            completionTokens: 4,
+            totalTokens: 14,
+          },
+          {
+            round: 1,
+            promptTokens: 0,
+            completionTokens: 2,
+            totalTokens: 2,
+          },
         ],
       );
     } finally {

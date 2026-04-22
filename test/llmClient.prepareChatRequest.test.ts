@@ -369,6 +369,13 @@ describe("llmClient prepareChatRequest", function () {
     const originalCodexPath = globalThis.process?.env?.CODEX_PATH;
     const stdout = new MockStdout();
     let lastTurnInput: unknown = "";
+    let lastTurnParams: Record<string, unknown> | null = null;
+    const reasoning: string[] = [];
+    const usage: Array<{
+      promptTokens: number;
+      completionTokens: number;
+      totalTokens: number;
+    }> = [];
 
     try {
       if (globalThis.process?.env) {
@@ -413,13 +420,23 @@ describe("llmClient prepareChatRequest", function () {
                         continue;
                       }
                       if (message.method === "turn/start") {
+                        lastTurnParams = (message.params || {}) as Record<
+                          string,
+                          unknown
+                        >;
                         lastTurnInput = message.params?.input ?? "";
                         stdout.push(
                           `${JSON.stringify({ id: message.id, result: { id: "turn-1" } })}\n`,
                         );
                         queueMicrotask(() => {
                           stdout.push(
+                            `${JSON.stringify({ method: "item/reasoning/summaryTextDelta", params: { itemId: "reasoning-1", delta: "Checking the history." } })}\n`,
+                          );
+                          stdout.push(
                             `${JSON.stringify({ method: "item/agentMessage/delta", params: { turnId: "turn-1", delta: "Hello" } })}\n`,
+                          );
+                          stdout.push(
+                            `${JSON.stringify({ method: "thread/tokenUsage/updated", params: { threadId: "thread-1", turnId: "turn-1", tokenUsage: { last: { totalTokens: 12, inputTokens: 9, outputTokens: 3 } } } })}\n`,
                           );
                           stdout.push(
                             `${JSON.stringify({ method: "turn/completed", params: { turnId: "turn-1", status: "completed" } })}\n`,
@@ -448,14 +465,37 @@ describe("llmClient prepareChatRequest", function () {
           model: "gpt-5.4",
           authMode: "codex_app_server",
           apiBase: "https://chatgpt.com/backend-api/codex/responses",
+          reasoning: {
+            provider: "openai",
+            level: "high",
+          },
         },
         (delta) => {
           chunks.push(delta);
+        },
+        (event) => {
+          if (event.summary) {
+            reasoning.push(event.summary);
+          }
+        },
+        (event) => {
+          usage.push(event);
         },
       );
 
       assert.equal(output, "Hello");
       assert.deepEqual(chunks, ["Hello"]);
+      assert.deepEqual(reasoning, ["Checking the history."]);
+      assert.deepEqual(usage, [
+        {
+          promptTokens: 9,
+          completionTokens: 3,
+          totalTokens: 12,
+        },
+      ]);
+      assert.equal(lastTurnParams?.model, "gpt-5.4");
+      assert.equal(lastTurnParams?.effort, "high");
+      assert.equal(lastTurnParams?.summary, "detailed");
       assert.isArray(lastTurnInput);
       const input = lastTurnInput as Array<Record<string, unknown>>;
       const textParts = input
