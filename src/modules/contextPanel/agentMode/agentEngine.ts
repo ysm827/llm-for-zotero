@@ -418,7 +418,8 @@ export async function sendAgentTurn(
     deps.createPanelUpdateHelpers(body, item, conversationKey, ui);
   const queueRefresh = deps.createQueuedRefresh(refreshChatSafely);
   const scheduleQueueDrain =
-    (body as any).__llmScheduleClaudeQueueDrain as (() => void) | undefined;
+    ((body as any).__llmScheduleClaudeThreadQueueDrain as (() => void) | undefined) ||
+    ((body as any).__llmScheduleClaudeQueueDrain as (() => void) | undefined);
   setStatusSafely("Checking the request against the attached context.", "sending");
   refreshChatSafely();
 
@@ -849,7 +850,8 @@ export async function retryAgentTurn(
   );
   const queueRefresh = deps.createQueuedRefresh(refreshChatSafely);
   const scheduleQueueDrain =
-    (body as any).__llmScheduleClaudeQueueDrain as (() => void) | undefined;
+    ((body as any).__llmScheduleClaudeThreadQueueDrain as (() => void) | undefined) ||
+    ((body as any).__llmScheduleClaudeQueueDrain as (() => void) | undefined);
   refreshChatSafely(); // Immediately clear the old trace from view
 
   const { question, screenshotImages, paperContexts, fullTextPaperContexts } =

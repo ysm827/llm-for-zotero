@@ -410,6 +410,7 @@ type QueuedClaudeInput = {
 
 let queuedClaudeInputSeq = 0;
 const queuedClaudeInputsByClaudeThread = new Map<string, QueuedClaudeInput[]>();
+const queuedClaudeThreadBodies = new Map<string, Set<Element>>();
 
 function getClaudeQueuedInputThreadKey(item: Zotero.Item | null | undefined): string | null {
   if (!item) return null;
@@ -433,6 +434,55 @@ function getClaudeQueuedInputThreadKey(item: Zotero.Item | null | undefined): st
     return `claude:paper:${Math.floor(libraryID)}:${Math.floor(paperItemID)}:${Math.floor(conversationKey)}`;
   }
   return null;
+}
+
+function registerClaudeQueuedInputThreadBody(
+  threadKey: string | null,
+  body: Element,
+): void {
+  if (!threadKey) return;
+  const existing = queuedClaudeThreadBodies.get(threadKey) || new Set<Element>();
+  existing.add(body);
+  queuedClaudeThreadBodies.set(threadKey, existing);
+}
+
+function unregisterClaudeQueuedInputThreadBody(
+  threadKey: string | null,
+  body: Element,
+): void {
+  if (!threadKey) return;
+  const existing = queuedClaudeThreadBodies.get(threadKey);
+  if (!existing) return;
+  existing.delete(body);
+  if (!existing.size) {
+    queuedClaudeThreadBodies.delete(threadKey);
+  }
+}
+
+function syncClaudeQueuedInputThreadBodies(threadKey: string | null): void {
+  if (!threadKey) return;
+  const bodies = queuedClaudeThreadBodies.get(threadKey);
+  if (!bodies?.size) return;
+  for (const body of bodies) {
+    try {
+      activeContextPanelStateSync.get(body)?.();
+    } catch (_err) {
+      void _err;
+    }
+  }
+}
+
+function scheduleClaudeQueuedInputThreadDrain(threadKey: string | null): void {
+  if (!threadKey) return;
+  const bodies = queuedClaudeThreadBodies.get(threadKey);
+  if (!bodies?.size) return;
+  for (const body of bodies) {
+    const schedule = (body as any).__llmScheduleClaudeQueueDrain as (() => void) | undefined;
+    if (typeof schedule === "function") {
+      schedule();
+      return;
+    }
+  }
 }
 
 /** Monotonic counter incremented every time setupHandlers rebuilds a panel. */
@@ -578,6 +628,15 @@ export function setupHandlers(
   panelRoot.dataset.handlersAttached = thisGen;
 
   activeContextPanels.set(body, () => item);
+  let registeredClaudeQueueThreadKey: string | null = null;
+  const syncQueuedThreadRegistration = () => {
+    const nextThreadKey = getClaudeQueuedInputThreadKey(item);
+    if (registeredClaudeQueueThreadKey === nextThreadKey) return;
+    unregisterClaudeQueuedInputThreadBody(registeredClaudeQueueThreadKey, body);
+    registeredClaudeQueueThreadKey = nextThreadKey;
+    registerClaudeQueuedInputThreadBody(registeredClaudeQueueThreadKey, body);
+  };
+  syncQueuedThreadRegistration();
 
   // Disconnect previous ResizeObservers to prevent accumulation across
   // successive setupHandlers calls (each call creates fresh observers).
@@ -918,6 +977,7 @@ export function setupHandlers(
   const syncConversationIdentity = () => {
     conversationKey = item ? getConversationKey(item) : null;
     activeContextPanels.set(body, () => item);
+    syncQueuedThreadRegistration();
     void retainClaudeRuntimeForBody(body, item);
     if ((body as HTMLElement).dataset?.standalone === "true") {
       activeContextPanelRawItems.set(body, item || null);
@@ -10268,9 +10328,11 @@ export function setupHandlers(
     if (!threadKey) return;
     if (!entries.length) {
       queuedClaudeInputsByClaudeThread.delete(threadKey);
+      syncClaudeQueuedInputThreadBodies(threadKey);
       return;
     }
     queuedClaudeInputsByClaudeThread.set(threadKey, entries);
+    syncClaudeQueuedInputThreadBodies(threadKey);
   };
 
   renderQueuedClaudeInputs = () => {
@@ -10324,6 +10386,8 @@ export function setupHandlers(
   };
 
   scheduleClaudeQueueDrain = () => {
+    const threadKey = getClaudeQueuedInputThreadKey(item);
+    if (!threadKey) return;
     if (queuedClaudeDrainTimer !== null) return;
     const win = body.ownerDocument?.defaultView;
     if (!win) return;
@@ -10333,6 +10397,9 @@ export function setupHandlers(
     }, 220) as unknown as number;
   };
   (body as any).__llmScheduleClaudeQueueDrain = scheduleClaudeQueueDrain;
+  (body as any).__llmScheduleClaudeThreadQueueDrain = () => {
+    scheduleClaudeQueuedInputThreadDrain(getClaudeQueuedInputThreadKey(item));
+  };
 
   isClaudeQueueSendAvailable = () => {
     const activeConversationKey = item ? getConversationKey(item) : null;
@@ -10932,7 +10999,7 @@ export function setupHandlers(
         : undefined,
     );
     persistDraftInputForCurrentConversation();
-    scheduleClaudeQueueDrain();
+    scheduleClaudeQueuedInputThreadDrain(getClaudeQueuedInputThreadKey(item));
   };
 
   async function drainQueuedClaudeInput(): Promise<void> {
@@ -13222,5 +13289,21 @@ export function setupHandlers(
 
       void clearCurrentConversation();
     });
+  }
+
+  const cleanupBody = body as Element & { __llmQueuedThreadCleanupRegistered?: boolean };
+  if (!cleanupBody.__llmQueuedThreadCleanupRegistered) {
+    cleanupBody.__llmQueuedThreadCleanupRegistered = true;
+    const observer = new MutationObserver(() => {
+      if (body.isConnected) return;
+      unregisterClaudeQueuedInputThreadBody(registeredClaudeQueueThreadKey, body);
+      activeContextPanelStateSync.delete(body);
+      observer.disconnect();
+      cleanupBody.__llmQueuedThreadCleanupRegistered = false;
+    });
+    const observeRoot = body.ownerDocument;
+    if (observeRoot) {
+      observer.observe(observeRoot, { childList: true, subtree: true });
+    }
   }
 }
