@@ -380,7 +380,10 @@ import {
   retainClaudeRuntimeForBody,
   releaseClaudeRuntimeForBody,
 } from "../../claudeCode/runtimeRetention";
-import { isClaudeGlobalPortalItem } from "../../claudeCode/portal";
+import {
+  isClaudeGlobalPortalItem,
+  isClaudePaperPortalItem,
+} from "../../claudeCode/portal";
 import {
   clearClaudeConversation,
   createClaudeGlobalConversation,
@@ -399,6 +402,38 @@ import {
   createClaudeGlobalPortalItem,
   createClaudePaperPortalItem,
 } from "../../claudeCode/portal";
+
+type QueuedClaudeInput = {
+  id: number;
+  text: string;
+};
+
+let queuedClaudeInputSeq = 0;
+const queuedClaudeInputsByClaudeThread = new Map<string, QueuedClaudeInput[]>();
+
+function getClaudeQueuedInputThreadKey(item: Zotero.Item | null | undefined): string | null {
+  if (!item) return null;
+  if (isClaudeGlobalPortalItem(item)) {
+    const libraryID = Number(item.libraryID);
+    const conversationKey = Number(item.id);
+    if (!Number.isFinite(libraryID) || !Number.isFinite(conversationKey)) return null;
+    return `claude:global:${Math.floor(libraryID)}:${Math.floor(conversationKey)}`;
+  }
+  if (isClaudePaperPortalItem(item)) {
+    const libraryID = Number(item.libraryID);
+    const paperItemID = Number(item.__llmClaudePaperPortalBaseItemID);
+    const conversationKey = Number(item.id);
+    if (
+      !Number.isFinite(libraryID) ||
+      !Number.isFinite(paperItemID) ||
+      !Number.isFinite(conversationKey)
+    ) {
+      return null;
+    }
+    return `claude:paper:${Math.floor(libraryID)}:${Math.floor(paperItemID)}:${Math.floor(conversationKey)}`;
+  }
+  return null;
+}
 
 /** Monotonic counter incremented every time setupHandlers rebuilds a panel. */
 let setupHandlersGeneration = 0;
@@ -10220,36 +10255,28 @@ export function setupHandlers(
     });
   }
 
-  type QueuedClaudeInput = {
-    id: number;
-    text: string;
-  };
-
-  let queuedClaudeInputSeq = 0;
-  const queuedClaudeInputsByConversation = new Map<number, QueuedClaudeInput[]>();
   let queuedClaudeDrainTimer: number | null = null;
 
   const getQueuedClaudeInputs = (): QueuedClaudeInput[] => {
-    const activeConversationKey = item ? getConversationKey(item) : null;
-    if (activeConversationKey === null) return [];
-    return queuedClaudeInputsByConversation.get(activeConversationKey) || [];
+    const threadKey = getClaudeQueuedInputThreadKey(item);
+    if (!threadKey) return [];
+    return queuedClaudeInputsByClaudeThread.get(threadKey) || [];
   };
 
   const setQueuedClaudeInputs = (entries: QueuedClaudeInput[]): void => {
-    const activeConversationKey = item ? getConversationKey(item) : null;
-    if (activeConversationKey === null) return;
+    const threadKey = getClaudeQueuedInputThreadKey(item);
+    if (!threadKey) return;
     if (!entries.length) {
-      queuedClaudeInputsByConversation.delete(activeConversationKey);
+      queuedClaudeInputsByClaudeThread.delete(threadKey);
       return;
     }
-    queuedClaudeInputsByConversation.set(activeConversationKey, entries);
+    queuedClaudeInputsByClaudeThread.set(threadKey, entries);
   };
 
   renderQueuedClaudeInputs = () => {
     if (!queueBar) return;
-    const isClaudeMode = panelRoot.dataset.conversationSystem === "claude_code";
     const queuedClaudeInputs = getQueuedClaudeInputs();
-    if (!isClaudeMode || !queuedClaudeInputs.length) {
+    if (!queuedClaudeInputs.length) {
       queueBar.textContent = "";
       queueBar.style.display = "none";
       return;
@@ -10310,7 +10337,7 @@ export function setupHandlers(
   isClaudeQueueSendAvailable = () => {
     const activeConversationKey = item ? getConversationKey(item) : null;
     return Boolean(
-      isClaudeConversationSystem() &&
+      getClaudeQueuedInputThreadKey(item) &&
         activeConversationKey !== null &&
         isRequestPending(activeConversationKey),
     );
@@ -10915,7 +10942,7 @@ export function setupHandlers(
       return;
     }
     const activeConversationKey = item ? getConversationKey(item) : null;
-    if (!isClaudeConversationSystem() || activeConversationKey === null) {
+    if (!getClaudeQueuedInputThreadKey(item) || activeConversationKey === null) {
       return;
     }
     if (isRequestPending(activeConversationKey)) {
