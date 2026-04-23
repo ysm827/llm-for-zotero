@@ -5,6 +5,7 @@ import type {
   AdvancedModelParams,
   ActiveNoteContext,
   ChatAttachment,
+  CollectionContextRef,
   PaperContextRef,
   SelectedTextSource,
 } from "../shared/types";
@@ -20,6 +21,7 @@ export type AgentRequest = {
   selectedPaperContexts?: PaperContextRef[];
   fullTextPaperContexts?: PaperContextRef[];
   pinnedPaperContexts?: PaperContextRef[];
+  selectedCollectionContexts?: CollectionContextRef[];
   attachments?: ChatAttachment[];
   screenshots?: string[];
   /** Skill IDs to force-activate regardless of regex matching (from slash menu selection). */

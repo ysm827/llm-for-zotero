@@ -177,6 +177,10 @@ export function getAgentApi() {
       if (!_actionRegistry) throw new Error("Agent subsystem is not initialized");
       return _actionRegistry.listActions(mode);
     },
+    getPaperScopedActionProfile: (name: string) => {
+      if (!_actionRegistry) throw new Error("Agent subsystem is not initialized");
+      return _actionRegistry.getPaperScopedActionProfile(name);
+    },
 
     /**
      * Run a named action programmatically.
@@ -199,6 +203,7 @@ export function getAgentApi() {
       input: unknown,
       opts: {
         libraryID?: number;
+        requestContext?: import("./actions").ActionRequestContext;
         confirmationMode?: import("./actions").ActionConfirmationMode;
         onProgress?: (event: import("./actions").ActionProgressEvent) => void;
         requestConfirmation?: (
@@ -223,6 +228,7 @@ export function getAgentApi() {
         onProgress: opts.onProgress ?? (() => {}),
         requestConfirmation: opts.requestConfirmation ?? (async () => ({ approved: true })),
         llm: opts.llm,
+        requestContext: opts.requestContext,
       };
       return _actionRegistry.run(name, input, ctx);
     },
