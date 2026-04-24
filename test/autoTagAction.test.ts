@@ -58,6 +58,25 @@ function makePaperTarget(
   };
 }
 
+function makeBibliographicTarget(
+  itemId: number,
+  title: string,
+  tags: string[] = [],
+  collectionIds: number[] = [],
+  attachments: Array<{ contextItemId: number; title: string; contentType: string }> = [],
+) {
+  return {
+    itemId,
+    itemType: "journalArticle",
+    title,
+    firstCreator: "Alice Example",
+    year: "2024",
+    attachments,
+    tags,
+    collectionIds,
+  };
+}
+
 function ok<T>(value: T): AgentToolInputValidation<T> {
   return { ok: true, value };
 }
@@ -90,11 +109,11 @@ describe("autoTag action", function () {
 
     const { ctx } = createActionContext(registry, {
       zoteroGateway: {
-        getPaperTargetsByItemIds: (itemIds: number[]) =>
+        getBibliographicItemTargetsByItemIds: (itemIds: number[]) =>
           itemIds.includes(2) || itemIds.includes(1)
             ? [
-                makePaperTarget(2, "Tagged Paper", ["existing"]),
-                makePaperTarget(1, "Untagged Paper"),
+                makeBibliographicTarget(2, "Tagged Paper", ["existing"]),
+                makeBibliographicTarget(1, "Untagged Paper"),
               ]
             : [],
         getEditableArticleMetadata: (item: { id: number } | null) => ({
@@ -147,11 +166,11 @@ describe("autoTag action", function () {
 
     const { ctx } = createActionContext(registry, {
       zoteroGateway: {
-        listLibraryPaperTargets: async () => ({
-          papers: [
-            makePaperTarget(31, "Newest Collection Paper", [], [55]),
-            makePaperTarget(22, "Outside Selection"),
-            makePaperTarget(11, "Older Collection Paper", [], [55]),
+        listBibliographicItemTargets: async () => ({
+          items: [
+            makeBibliographicTarget(31, "Newest Collection Paper", [], [55]),
+            makeBibliographicTarget(22, "Outside Selection"),
+            makeBibliographicTarget(11, "Older Collection Paper", [], [55]),
           ],
           totalCount: 3,
         }),
@@ -211,8 +230,10 @@ describe("autoTag action", function () {
 
     const { ctx } = createActionContext(registry, {
       zoteroGateway: {
-        getPaperTargetsByItemIds: (itemIds: number[]) =>
-          itemIds.includes(77) ? [makePaperTarget(77, "Current Paper")] : [],
+        getBibliographicItemTargetsByItemIds: (itemIds: number[]) =>
+          itemIds.includes(77)
+            ? [makeBibliographicTarget(77, "Current Paper")]
+            : [],
         getEditableArticleMetadata: () => ({
           fields: { abstractNote: "Current paper abstract" },
         }),
@@ -237,6 +258,65 @@ describe("autoTag action", function () {
     assert.deepEqual((applyArgs?.assignments as Array<Record<string, unknown>>).map(
       (entry) => entry.itemId,
     ), [77]);
+    assert.deepEqual(result.output, {
+      targeted: 1,
+      tagged: 1,
+      skipped: 0,
+    });
+  });
+
+  it("targets the active paper even when it has no PDF attachment", async function () {
+    const registry = new AgentToolRegistry();
+    let applyArgs: Record<string, unknown> | null = null;
+
+    registry.register(
+      createStubTool(
+        {
+          name: "apply_tags",
+          description: "apply tags",
+          inputSchema: { type: "object" },
+          mutability: "write",
+          requiresConfirmation: false,
+        },
+        (args) => ok(args as Record<string, unknown>),
+        async (input) => {
+          applyArgs = input;
+          return {
+            result: {
+              updatedCount: 1,
+            },
+          };
+        },
+      ),
+    );
+
+    const { ctx } = createActionContext(registry, {
+      zoteroGateway: {
+        getBibliographicItemTargetsByItemIds: (itemIds: number[]) =>
+          itemIds.includes(77)
+            ? [makeBibliographicTarget(77, "Metadata-only Paper")]
+            : [],
+        getEditableArticleMetadata: () => ({
+          fields: { abstractNote: "Metadata-only abstract" },
+        }),
+        getItem: (itemId: number) => ({ id: itemId }),
+      } as never,
+      requestContext: {
+        mode: "paper",
+        activeItemId: 77,
+      },
+    });
+
+    const result = await autoTagAction.execute({}, ctx);
+
+    assert.isTrue(result.ok);
+    if (!result.ok) return;
+    assert.deepEqual(
+      (applyArgs?.assignments as Array<Record<string, unknown>>).map(
+        (entry) => entry.itemId,
+      ),
+      [77],
+    );
     assert.deepEqual(result.output, {
       targeted: 1,
       tagged: 1,
@@ -307,10 +387,10 @@ describe("autoTag action", function () {
 
     const { ctx } = createActionContext(registry, {
       zoteroGateway: {
-        listLibraryPaperTargets: async () => ({
-          papers: [
-            makePaperTarget(1, "Paper One"),
-            makePaperTarget(2, "Paper Two", ["already-tagged"]),
+        listBibliographicItemTargets: async () => ({
+          items: [
+            makeBibliographicTarget(1, "Paper One"),
+            makeBibliographicTarget(2, "Paper Two", ["already-tagged"]),
           ],
           totalCount: 2,
         }),

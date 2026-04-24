@@ -248,32 +248,35 @@ describe("action compatibility after tool refactors", function () {
 
     const { ctx } = createActionContext(registry);
     ctx.zoteroGateway = {
-      listLibraryPaperTargets: async () => ({
-        papers: [
+      listBibliographicItemTargets: async () => ({
+        items: [
           {
             itemId: 1,
+            itemType: "journalArticle",
             title: "Paper One",
             firstCreator: "Alice Example",
             year: "2024",
-            attachments: [{ contextItemId: 101, title: "Paper One PDF" }],
+            attachments: [],
             tags: [],
             collectionIds: [],
           },
           {
             itemId: 2,
+            itemType: "journalArticle",
             title: "Paper Two",
             firstCreator: "Bob Example",
             year: "2023",
-            attachments: [{ contextItemId: 102, title: "Paper Two PDF" }],
+            attachments: [],
             tags: ["existing"],
             collectionIds: [],
           },
           {
             itemId: 3,
+            itemType: "journalArticle",
             title: "Paper Three",
             firstCreator: "Cara Example",
             year: "2022",
-            attachments: [{ contextItemId: 103, title: "Paper Three PDF" }],
+            attachments: [],
             tags: [],
             collectionIds: [],
           },

@@ -92,6 +92,10 @@ import {
   normalizeSelectedTextSource,
 } from "./textUtils";
 import {
+  formatActionLabel,
+  resolveActionCompletionStatusText,
+} from "./actionStatusText";
+import {
   normalizeAttachmentContentHash,
   normalizeSelectedTextPaperContexts,
 } from "./normalizers";
@@ -7074,9 +7078,6 @@ export function setupHandlers(
     actionPickerItems = [];
     actionPickerActiveIndex = 0;
   };
-  const formatActionLabel = (name: string): string =>
-    name.replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
-
   /** Renders the action picker dropdown. */
   const renderActionPicker = () => {
     if (!actionPicker || !actionPickerList) return;
@@ -7535,6 +7536,7 @@ export function setupHandlers(
     }
     if (status) setStatus(status, `Running: ${formatActionLabel(action.name)}…`, "ready");
     const progressIndicator = createActionProgressIndicator(action.name);
+    let lastProgressSummary = "";
     try {
       const agentApi = getAgentApi();
       const requestContext = buildActionRequestContext();
@@ -7561,6 +7563,7 @@ export function setupHandlers(
             }
           } else if (event.type === "step_done") {
             if (event.summary) {
+              lastProgressSummary = event.summary;
               progressIndicator.setSummary(event.summary);
               if (status) setStatus(status, event.summary, "ready");
             }
@@ -7576,7 +7579,10 @@ export function setupHandlers(
         setStatus(
           status,
           result.ok
-            ? `${formatActionLabel(action.name)} complete`
+            ? resolveActionCompletionStatusText({
+                actionName: action.name,
+                lastProgressSummary,
+              })
             : `${formatActionLabel(action.name)} failed: ${result.error}`,
           result.ok ? "ready" : "error",
         );

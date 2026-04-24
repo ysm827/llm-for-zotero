@@ -36,7 +36,7 @@ const autoTagPaperScopeProfile: PaperScopedActionProfile = {
   targetMode: "multi",
   allowedScopes: ["current", "selection", "collection", "all"],
   defaultEmptyInput: "selection_or_prompt",
-  paperRequirement: "pdf_backed",
+  paperRequirement: "bibliographic",
   supportsLimit: true,
   scopePromptOptions: {
     first: {
