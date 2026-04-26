@@ -8,6 +8,24 @@ import { getReasoningDefaultLevelForModel } from "./reasoningProfiles";
 
 const DEFAULT_CODEX_APP_SERVER_TURN_TIMEOUT_MS = 300_000;
 const DEFAULT_CODEX_APP_SERVER_REQUEST_TIMEOUT_MS = 60_000;
+const CODEX_APP_SERVER_STDERR_TAIL_WAIT_MS = 100;
+const CODEX_APP_SERVER_DIAGNOSTIC_BUFFER_MAX = 4000;
+const CODEX_APP_SERVER_DIAGNOSTIC_BUFFER_TRIM_THRESHOLD = 8000;
+const CODEX_ENV_KEYS = [
+  "CODEX_PATH",
+  "HOME",
+  "USERPROFILE",
+  "NPM_CONFIG_PREFIX",
+  "npm_config_prefix",
+  "PREFIX",
+  "APPDATA",
+  "LOCALAPPDATA",
+  "NVM_HOME",
+  "NVM_SYMLINK",
+  "NVM_DIR",
+  "PATH",
+  "Path",
+];
 
 type PendingRequest = {
   resolve: (value: unknown) => void;
@@ -26,6 +44,10 @@ export type CodexAppServerInjectItemsSupport =
   | "supported"
   | "unsupported";
 
+export type CodexAppServerProcessOptions = {
+  codexPath?: string;
+};
+
 function createAbortError(): Error {
   const err = new Error("Aborted");
   (err as { name?: string }).name = "AbortError";
@@ -41,18 +63,22 @@ export class CodexAppServerProcess {
   private requestHandlers = new Map<string, Set<RequestHandler>>();
   private closeHandlers = new Set<() => void>();
   private readLoopPromise: Promise<void> | null = null;
+  private stderrLoopPromise: Promise<void> | null = null;
   private turnQueue = Promise.resolve();
   private lineBuffer = "";
+  private diagnosticBuffer = "";
+  private launchDescription = "";
   private destroyed = false;
   private didNotifyClose = false;
   private injectItemsSupport: CodexAppServerInjectItemsSupport = "unknown";
 
-  private constructor(proc: unknown) {
+  private constructor(proc: unknown, launchDescription = "") {
     this.proc = proc;
+    this.launchDescription = launchDescription;
   }
 
-  static forTest(proc: unknown): CodexAppServerProcess {
-    return new CodexAppServerProcess(proc);
+  static forTest(proc: unknown, launchDescription = ""): CodexAppServerProcess {
+    return new CodexAppServerProcess(proc, launchDescription);
   }
 
   static async loadSubprocessModule(): Promise<any> {
@@ -84,18 +110,21 @@ export class CodexAppServerProcess {
     return Subprocess;
   }
 
-  static async spawn(): Promise<CodexAppServerProcess> {
+  static async spawn(
+    options: CodexAppServerProcessOptions = {},
+  ): Promise<CodexAppServerProcess> {
     const Subprocess = await CodexAppServerProcess.loadSubprocessModule();
     const info = getRuntimePlatformInfo();
-    const binary = await resolveCodexBinary();
+    const binary = await resolveCodexBinary(options.codexPath);
 
-    // On Windows, npm shims are batch scripts that can't be exec'd directly.
-    // Run the resolved binary through cmd.exe so CODEX_PATH and non-PATH installs work.
     let command: string;
     let args: string[];
+    let environment: Record<string, string> | undefined;
     if (info.platform === "windows") {
-      command = info.shellPath;
-      args = [info.shellFlag, `"${binary}" app-server`];
+      const invocation = await buildWindowsCodexInvocation(binary, info);
+      command = invocation.command;
+      args = invocation.args;
+      environment = invocation.environment;
     } else {
       command = binary;
       args = ["app-server"];
@@ -106,6 +135,10 @@ export class CodexAppServerProcess {
       proc = await Subprocess.call({
         command,
         arguments: args,
+        stderr: "pipe",
+        ...(environment
+          ? { environment, environmentAppend: true }
+          : {}),
       });
     } catch (err) {
       throw new Error(
@@ -113,8 +146,12 @@ export class CodexAppServerProcess {
       );
     }
 
-    const instance = new CodexAppServerProcess(proc);
+    const instance = new CodexAppServerProcess(
+      proc,
+      formatLaunchDescription(command, args),
+    );
     instance.startReadLoop();
+    instance.startStderrReadLoop();
     await instance.initialize();
     return instance;
   }
@@ -139,6 +176,7 @@ export class CodexAppServerProcess {
           try {
             this.handleMessage(JSON.parse(trimmed));
           } catch {
+            this.appendDiagnostic(trimmed);
             Zotero.debug?.(
               `[llm-for-zotero] codex app-server: failed to parse line: ${trimmed}`,
             );
@@ -146,12 +184,61 @@ export class CodexAppServerProcess {
         }
       }
       if (!this.destroyed) {
+        await this.waitForStderrTail();
+        const diagnostics = this.getDiagnosticTail();
         this.fail(
-          new Error("codex app-server process closed unexpectedly"),
+          new Error(
+            `codex app-server process closed unexpectedly${diagnostics ? `: ${diagnostics}` : " with no stderr/stdout diagnostics"}${this.launchDescription ? ` (launched: ${this.launchDescription})` : ""}`,
+          ),
           false,
         );
       }
     })();
+  }
+
+  private startStderrReadLoop(): void {
+    const proc = this.proc as any;
+    if (!proc.stderr?.readString) return;
+    this.stderrLoopPromise = (async () => {
+      while (!this.destroyed) {
+        let chunk: string;
+        try {
+          chunk = await proc.stderr.readString();
+        } catch {
+          break;
+        }
+        if (!chunk) break;
+        this.appendDiagnostic(chunk);
+      }
+    })();
+  }
+
+  private appendDiagnostic(chunk: string): void {
+    this.diagnosticBuffer += `${chunk}\n`;
+    if (
+      this.diagnosticBuffer.length >
+      CODEX_APP_SERVER_DIAGNOSTIC_BUFFER_TRIM_THRESHOLD
+    ) {
+      this.diagnosticBuffer = this.diagnosticBuffer.slice(
+        -CODEX_APP_SERVER_DIAGNOSTIC_BUFFER_MAX,
+      );
+    }
+  }
+
+  private getDiagnosticTail(): string {
+    const pendingStdout = this.lineBuffer.trim();
+    const combined = `${this.diagnosticBuffer}${pendingStdout ? `\n${pendingStdout}` : ""}`;
+    return combined.replace(/\s+/g, " ").trim();
+  }
+
+  private async waitForStderrTail(): Promise<void> {
+    if (!this.stderrLoopPromise) return;
+    await Promise.race([
+      this.stderrLoopPromise.catch(() => undefined),
+      new Promise<void>((resolve) =>
+        setTimeout(resolve, CODEX_APP_SERVER_STDERR_TAIL_WAIT_MS),
+      ),
+    ]);
   }
 
   private handleMessage(msg: Record<string, unknown>): void {
@@ -608,6 +695,7 @@ export function waitForCodexAppServerTurnCompletion(params: {
   onUsage?: (usage: UsageStats) => void | Promise<void>;
   signal?: AbortSignal;
   cacheKey?: string;
+  processOptions?: CodexAppServerProcessOptions;
   timeoutMs?: number;
 }): Promise<string> {
   const { proc, turnId, onTextDelta, onReasoning, onUsage, signal, cacheKey } =
@@ -705,7 +793,11 @@ export function waitForCodexAppServerTurnCompletion(params: {
       }
       timeoutId = setTimeout(() => {
         if (cacheKey) {
-          destroyCachedCodexAppServerProcess(cacheKey, proc);
+          destroyCachedCodexAppServerProcess(
+            cacheKey,
+            proc,
+            params.processOptions,
+          );
         }
         settle(() =>
           reject(
@@ -718,7 +810,11 @@ export function waitForCodexAppServerTurnCompletion(params: {
     };
     const abortHandler = () => {
       if (cacheKey) {
-        destroyCachedCodexAppServerProcess(cacheKey, proc);
+        destroyCachedCodexAppServerProcess(
+          cacheKey,
+          proc,
+          params.processOptions,
+        );
       }
       settle(() => reject(createAbortError()));
     };
@@ -910,6 +1006,31 @@ function getNonEmptyEnvValue(
   return typeof value === "string" && value.trim() ? value.trim() : undefined;
 }
 
+function getRuntimeEnvValue(key: string): string | undefined {
+  const processValue = (globalThis as any).process?.env?.[key];
+  if (typeof processValue === "string" && processValue.trim()) {
+    return processValue.trim();
+  }
+  try {
+    const servicesValue = (globalThis as any).Services?.env?.get?.(key);
+    if (typeof servicesValue === "string" && servicesValue.trim()) {
+      return servicesValue.trim();
+    }
+  } catch {
+    /* ignore */
+  }
+  return undefined;
+}
+
+function getCodexRuntimeEnv(): Record<string, string | undefined> {
+  const processEnv = (globalThis as any).process?.env ?? {};
+  const env: Record<string, string | undefined> = { ...processEnv };
+  for (const key of CODEX_ENV_KEYS) {
+    env[key] = getRuntimeEnvValue(key);
+  }
+  return env;
+}
+
 function joinRuntimePath(
   separator: "/" | "\\",
   base: string,
@@ -1007,6 +1128,178 @@ function buildPrefixCodexCandidates(params: {
   ];
 }
 
+function buildWindowsShellCommand(binary: string): string {
+  return /\s/.test(binary)
+    ? `""${binary}" app-server"`
+    : `${binary} app-server`;
+}
+
+function formatLaunchDescription(command: string, args: string[]): string {
+  return [command, ...args].join(" ");
+}
+
+function getWindowsDirectory(path: string): string {
+  const index = Math.max(path.lastIndexOf("\\"), path.lastIndexOf("/"));
+  return index >= 0 ? path.slice(0, index) : "";
+}
+
+async function buildWindowsCodexInvocation(
+  binary: string,
+  info: ReturnType<typeof getRuntimePlatformInfo>,
+): Promise<{
+  command: string;
+  args: string[];
+  environment?: Record<string, string>;
+}> {
+  const directory = getWindowsDirectory(binary);
+  if (directory && /\.cmd$/i.test(binary)) {
+    const nativeInvocation = await resolveWindowsNpmNativeCodexInvocation(
+      directory,
+    );
+    if (nativeInvocation) return nativeInvocation;
+
+    const nodePath = joinRuntimePath("\\", directory, "node.exe");
+    const codexJsPath = getWindowsNpmCodexJsPath(directory);
+    if ((await pathExists(nodePath)) && (await pathExists(codexJsPath))) {
+      return {
+        command: nodePath,
+        args: [codexJsPath, "app-server"],
+      };
+    }
+  }
+
+  if (/\.(exe|com)$/i.test(binary)) {
+    return {
+      command: binary,
+      args: ["app-server"],
+    };
+  }
+
+  // npm shims are usually batch scripts, and bare `codex` needs PATHEXT lookup.
+  return {
+    command: info.shellPath,
+    args: ["/d", "/s", info.shellFlag, buildWindowsShellCommand(binary)],
+  };
+}
+
+function getWindowsNpmCodexJsPath(directory: string): string {
+  return joinRuntimePath(
+    "\\",
+    directory,
+    "node_modules",
+    "@openai",
+    "codex",
+    "bin",
+    "codex.js",
+  );
+}
+
+async function resolveWindowsNpmNativeCodexInvocation(
+  directory: string,
+): Promise<{
+  command: string;
+  args: string[];
+  environment?: Record<string, string>;
+} | null> {
+  const codexPackageRoot = joinRuntimePath(
+    "\\",
+    directory,
+    "node_modules",
+    "@openai",
+    "codex",
+  );
+  const targetTriple = "x86_64-pc-windows-msvc";
+  const nativeRoots = [
+    joinRuntimePath(
+      "\\",
+      codexPackageRoot,
+      "node_modules",
+      "@openai",
+      "codex-win32-x64",
+      "vendor",
+      targetTriple,
+    ),
+    joinRuntimePath("\\", codexPackageRoot, "vendor", targetTriple),
+  ];
+
+  for (const nativeRoot of nativeRoots) {
+    const nativeBinary = joinRuntimePath(
+      "\\",
+      nativeRoot,
+      "codex",
+      "codex.exe",
+    );
+    if (!(await pathExists(nativeBinary))) continue;
+
+    const pathDir = joinRuntimePath("\\", nativeRoot, "path");
+    const runtimePath =
+      getRuntimeEnvValue("PATH") || getRuntimeEnvValue("Path") || "";
+    const environment: Record<string, string> = {
+      CODEX_MANAGED_BY_NPM: "1",
+    };
+    if (await pathExists(pathDir)) {
+      environment.PATH = runtimePath ? `${pathDir};${runtimePath}` : pathDir;
+    }
+    return {
+      command: nativeBinary,
+      args: ["app-server"],
+      environment,
+    };
+  }
+
+  return null;
+}
+
+function buildWindowsCodexCandidates(
+  env: Record<string, string | undefined>,
+): string[] {
+  const userProfile = getNonEmptyEnvValue(env, "USERPROFILE");
+  // Fall back to %USERPROFILE%\AppData\... when APPDATA / LOCALAPPDATA are
+  // missing (some sandboxed runtimes drop them) — but only when USERPROFILE
+  // is real, so we never fabricate a fake user name.
+  const appData =
+    getNonEmptyEnvValue(env, "APPDATA") ??
+    (userProfile
+      ? joinRuntimePath("\\", userProfile, "AppData", "Roaming")
+      : undefined);
+  const localAppData =
+    getNonEmptyEnvValue(env, "LOCALAPPDATA") ??
+    (userProfile
+      ? joinRuntimePath("\\", userProfile, "AppData", "Local")
+      : undefined);
+  const nvmHome = getNonEmptyEnvValue(env, "NVM_HOME");
+  const nvmSymlink = getNonEmptyEnvValue(env, "NVM_SYMLINK");
+  const candidates: string[] = [];
+
+  if (userProfile) {
+    candidates.push(
+      joinRuntimePath("\\", userProfile, ".cargo", "bin", "codex.exe"),
+    );
+  }
+  if (appData) {
+    candidates.push(
+      joinRuntimePath("\\", appData, "npm", "codex.cmd"),
+      joinRuntimePath("\\", appData, "npm", "codex.exe"),
+    );
+  }
+  if (localAppData) {
+    candidates.push(
+      joinRuntimePath("\\", localAppData, "Volta", "bin", "codex.cmd"),
+      joinRuntimePath("\\", localAppData, "Volta", "bin", "codex.exe"),
+    );
+  }
+  for (const nvmRoot of [nvmSymlink, nvmHome]) {
+    if (!nvmRoot) continue;
+    candidates.push(
+      joinRuntimePath("\\", nvmRoot, "codex.cmd"),
+      joinRuntimePath("\\", nvmRoot, "codex.exe"),
+      joinRuntimePath("\\", nvmRoot, "codex"),
+    );
+  }
+  candidates.push("C:\\Program Files\\codex\\codex.exe");
+  return uniquePaths(candidates);
+}
+
 export async function listNvmCodexCandidates(params: {
   homeDir: string;
   nvmDir?: string;
@@ -1031,12 +1324,81 @@ export async function listNvmCodexCandidates(params: {
     );
 }
 
-export async function resolveCodexBinary(): Promise<string> {
+export function resolveCodexAppServerBinaryPath(
+  value?: string | null,
+): string | undefined {
+  const trimmed = typeof value === "string" ? value.trim() : "";
+  if (!trimmed) return undefined;
+  if (/^https?:\/\//i.test(trimmed)) return undefined;
+  const quoted = trimmed.match(/^(['"])(.*)\1$/);
+  if (quoted?.[2]?.trim()) return quoted[2].trim();
+  return trimmed;
+}
+
+export function selectCodexLookupResult(
+  output: string,
+  platform: "windows" | "macos" | "linux",
+): string {
+  const candidates = output
+    .trim()
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean);
+  const first = candidates[0] || "";
+  if (platform !== "windows" || !first) return first;
+  // Preserve PATH precedence: only swap to a same-directory `.cmd` sibling
+  // (e.g. when `where codex` lists `…\codex` and `…\codex.cmd` for the same
+  // npm shim, the `.cmd` is the one we know how to dispatch through the
+  // npm-native fast path). Never jump to a `.cmd` from a different install
+  // that sits later on PATH.
+  if (/\.cmd$/i.test(first)) return first;
+  const firstDir = getWindowsDirectory(first).toLowerCase();
+  const sameDirCmd = candidates.find(
+    (candidate) =>
+      /\.cmd$/i.test(candidate) &&
+      getWindowsDirectory(candidate).toLowerCase() === firstDir,
+  );
+  return sameDirCmd || first;
+}
+
+function isWindowsPathLike(path: string): boolean {
+  return /^[a-z]:[\\/]/i.test(path) || path.includes("\\") || path.includes("/");
+}
+
+async function resolveWindowsCodexShimPath(path: string): Promise<string> {
+  if (!isWindowsPathLike(path)) return path;
+
+  const ps1Match = path.match(/\.ps1$/i);
+  const extensionlessMatch = path.match(/[\\/]codex$/i);
+  if (!ps1Match && !extensionlessMatch) return path;
+
+  const base = ps1Match ? path.slice(0, -4) : path;
+  for (const candidate of [`${base}.cmd`, `${base}.exe`]) {
+    if (await pathExists(candidate)) return candidate;
+  }
+  return path;
+}
+
+export async function resolveCodexBinary(
+  explicitPath?: string,
+): Promise<string> {
+  const normalizedExplicitPath = resolveCodexAppServerBinaryPath(explicitPath);
   const info = getRuntimePlatformInfo();
-  const env = (globalThis as any).process?.env ?? {};
+  if (normalizedExplicitPath) {
+    if (info.platform === "windows") {
+      return await resolveWindowsCodexShimPath(normalizedExplicitPath);
+    }
+    return normalizedExplicitPath;
+  }
+  const env = getCodexRuntimeEnv();
 
   // 1. CODEX_PATH env var
-  if (env.CODEX_PATH?.trim()) return env.CODEX_PATH.trim();
+  const codexPath = resolveCodexAppServerBinaryPath(env.CODEX_PATH);
+  if (codexPath) {
+    return info.platform === "windows"
+      ? await resolveWindowsCodexShimPath(codexPath)
+      : codexPath;
+  }
 
   // 2. Locate via `which`/`where` using shell
   let Subprocess: any;
@@ -1065,7 +1427,7 @@ export async function resolveCodexBinary(): Promise<string> {
         /* ignore */
       }
       await proc.wait();
-      const found = out.trim().split("\n")[0]?.trim();
+      const found = selectCodexLookupResult(out, info.platform);
       if (found) return found;
     } catch {
       /* continue to fallback */
@@ -1094,66 +1456,7 @@ export async function resolveCodexBinary(): Promise<string> {
   );
   const commonCandidates =
     info.platform === "windows"
-      ? uniquePaths([
-          joinRuntimePath(
-            info.pathSeparator,
-            getNonEmptyEnvValue(env, "USERPROFILE") ?? "C:\\Users\\User",
-            ".cargo",
-            "bin",
-            "codex.exe",
-          ),
-          joinRuntimePath(
-            info.pathSeparator,
-            getNonEmptyEnvValue(env, "APPDATA") ??
-              joinRuntimePath(
-                info.pathSeparator,
-                getNonEmptyEnvValue(env, "USERPROFILE") ?? "C:\\Users\\User",
-                "AppData",
-                "Roaming",
-              ),
-            "npm",
-            "codex.cmd",
-          ),
-          joinRuntimePath(
-            info.pathSeparator,
-            getNonEmptyEnvValue(env, "APPDATA") ??
-              joinRuntimePath(
-                info.pathSeparator,
-                getNonEmptyEnvValue(env, "USERPROFILE") ?? "C:\\Users\\User",
-                "AppData",
-                "Roaming",
-              ),
-            "npm",
-            "codex.exe",
-          ),
-          joinRuntimePath(
-            info.pathSeparator,
-            getNonEmptyEnvValue(env, "LOCALAPPDATA") ??
-              joinRuntimePath(
-                info.pathSeparator,
-                getNonEmptyEnvValue(env, "USERPROFILE") ?? "C:\\Users\\User",
-                "AppData",
-                "Local",
-              ),
-            "Volta",
-            "bin",
-            "codex.cmd",
-          ),
-          joinRuntimePath(
-            info.pathSeparator,
-            getNonEmptyEnvValue(env, "LOCALAPPDATA") ??
-              joinRuntimePath(
-                info.pathSeparator,
-                getNonEmptyEnvValue(env, "USERPROFILE") ?? "C:\\Users\\User",
-                "AppData",
-                "Local",
-              ),
-            "Volta",
-            "bin",
-            "codex.exe",
-          ),
-          "C:\\Program Files\\codex\\codex.exe",
-        ])
+      ? buildWindowsCodexCandidates(env)
       : uniquePaths([
           homeDir
             ? joinRuntimePath(
@@ -1222,6 +1525,8 @@ export async function resolveCodexBinary(): Promise<string> {
     if (await pathExists(candidate)) return candidate;
   }
 
+  if (info.platform === "windows") return "codex";
+
   throw new Error(
     "codex binary not found. Install Codex CLI (https://github.com/openai/codex) and ensure it is on your PATH, " +
       "or set the CODEX_PATH environment variable to the absolute path of the codex executable.",
@@ -1231,17 +1536,27 @@ export async function resolveCodexBinary(): Promise<string> {
 // Per-auth-mode singleton processes
 const processCache = new Map<string, Promise<CodexAppServerProcess>>();
 
+function buildProcessCacheKey(
+  cacheKey: string,
+  options: CodexAppServerProcessOptions = {},
+): string {
+  const codexPath = resolveCodexAppServerBinaryPath(options.codexPath);
+  return codexPath ? `${cacheKey}\u0000${codexPath}` : cacheKey;
+}
+
 export function destroyCachedCodexAppServerProcess(
   cacheKey: string,
   proc?: CodexAppServerProcess,
+  options: CodexAppServerProcessOptions = {},
 ): void {
-  const existing = processCache.get(cacheKey);
+  const effectiveCacheKey = buildProcessCacheKey(cacheKey, options);
+  const existing = processCache.get(effectiveCacheKey);
   if (!existing) {
     proc?.destroy();
     return;
   }
 
-  processCache.delete(cacheKey);
+  processCache.delete(effectiveCacheKey);
   existing
     .then((cachedProc) => {
       if (proc && cachedProc !== proc) return;
@@ -1256,20 +1571,22 @@ export function destroyCachedCodexAppServerProcess(
 
 export async function getOrCreateCodexAppServerProcess(
   cacheKey: string,
+  options: CodexAppServerProcessOptions = {},
 ): Promise<CodexAppServerProcess> {
-  const existing = processCache.get(cacheKey);
+  const effectiveCacheKey = buildProcessCacheKey(cacheKey, options);
+  const existing = processCache.get(effectiveCacheKey);
   if (existing) {
     return existing;
   }
-  const promise = CodexAppServerProcess.spawn();
+  const promise = CodexAppServerProcess.spawn(options);
   promise.then((proc) => {
     proc.onClose(() => {
-      if (processCache.get(cacheKey) === promise) {
-        processCache.delete(cacheKey);
+      if (processCache.get(effectiveCacheKey) === promise) {
+        processCache.delete(effectiveCacheKey);
       }
     });
   });
-  processCache.set(cacheKey, promise);
-  promise.catch(() => processCache.delete(cacheKey));
+  processCache.set(effectiveCacheKey, promise);
+  promise.catch(() => processCache.delete(effectiveCacheKey));
   return promise;
 }
