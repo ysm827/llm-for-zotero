@@ -4875,6 +4875,7 @@ export function refreshChat(body: Element, item?: Zotero.Item | null) {
         modelName.textContent = formatDisplayModelName(
           msg.modelName,
           msg.modelProviderLabel,
+          { suppressProviderPrefix: resolveConversationSystemForItem(item) === "claude_code" },
         );
         modelHeader.appendChild(modelName);
 
