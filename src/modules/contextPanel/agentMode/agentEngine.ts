@@ -50,6 +50,19 @@ function buildPendingAgentTraceEvents(body?: Element): AgentRunEventRecord[] {
   }
   return events;
 }
+
+function applyResolvedClaudeEffortDisplay(
+  body: Element,
+  event: AgentEvent,
+): void {
+  if (event.type !== "provider_event") return;
+  if (event.providerType !== "runtime_config") return;
+  const applyResolvedEffort = (body as any).__llmApplyResolvedClaudeEffort as
+    | ((effort: unknown) => void)
+    | undefined;
+  if (typeof applyResolvedEffort !== "function") return;
+  applyResolvedEffort(event.payload?.resolvedEffort);
+}
 import type {
   AdvancedModelParams,
   ChatAttachment,
@@ -609,6 +622,7 @@ export async function sendAgentTurn(
         }
         switch (event.type) {
           case "provider_event":
+            applyResolvedClaudeEffortDisplay(body, event);
             break;
           case "usage": {
             if (ui.tokenUsageEl) {
@@ -1028,6 +1042,7 @@ export async function retryAgentTurn(
         }
         switch (event.type) {
           case "provider_event":
+            applyResolvedClaudeEffortDisplay(body, event);
             break;
           case "usage": {
             if (ui.tokenUsageEl) {

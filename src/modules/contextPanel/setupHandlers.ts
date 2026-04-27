@@ -6919,6 +6919,7 @@ export function setupHandlers(
           e.stopPropagation();
           if (!item) return;
           if (isClaudeConversationSystem()) {
+            clearClaudeReasoningDisplayOverride();
             setClaudeRuntimeModelPref(entry.model);
             setFloatingMenuOpen(modelMenu, MODEL_MENU_OPEN_CLASS, false);
             setFloatingMenuOpen(reasoningMenu, REASONING_MENU_OPEN_CLASS, false);
@@ -7121,6 +7122,90 @@ export function setupHandlers(
     }
   };
 
+  type ClaudeReasoningDisplayMode =
+    | "auto"
+    | "low"
+    | "medium"
+    | "high"
+    | "xhigh"
+    | "max";
+
+  let claudeReasoningDisplayOverride: {
+    mode: ClaudeReasoningDisplayMode;
+    modelKey: string;
+  } | null = null;
+
+  const getClaudeReasoningDisplayScopeKey = () => {
+    const { selectedEntryId, currentModel } = getSelectedModelInfo();
+    return `${selectedEntryId || "claude-runtime"}::${currentModel}`;
+  };
+
+  const normalizeClaudeReasoningDisplayMode = (
+    value: unknown,
+  ): ClaudeReasoningDisplayMode | null => {
+    if (typeof value !== "string") return null;
+    const normalized = value.trim().toLowerCase();
+    if (normalized === "default" || normalized === "none") return "auto";
+    if (
+      normalized === "auto" ||
+      normalized === "low" ||
+      normalized === "medium" ||
+      normalized === "high" ||
+      normalized === "xhigh" ||
+      normalized === "max"
+    ) {
+      return normalized;
+    }
+    return null;
+  };
+
+  const getClaudeReasoningDisplayMode = (): ClaudeReasoningDisplayMode => {
+    if (claudeReasoningDisplayOverride) {
+      if (
+        claudeReasoningDisplayOverride.modelKey ===
+        getClaudeReasoningDisplayScopeKey()
+      ) {
+        return claudeReasoningDisplayOverride.mode;
+      }
+      claudeReasoningDisplayOverride = null;
+    }
+    return getClaudeReasoningModePref();
+  };
+
+  const getClaudeReasoningDisplayLabel = (
+    mode: ClaudeReasoningDisplayMode,
+  ) => {
+    if (mode === "auto") return "Auto";
+    if (mode === "xhigh") return "XHigh";
+    if (mode === "max") return "Max";
+    if (mode === "high") return "High";
+    if (mode === "medium") return "Medium";
+    if (mode === "low") return "Low";
+    return "Auto";
+  };
+
+  const clearClaudeReasoningDisplayOverride = () => {
+    claudeReasoningDisplayOverride = null;
+  };
+
+  const applyClaudeResolvedReasoningDisplay = (effort: unknown) => {
+    if (!isClaudeConversationSystem()) return;
+    const mode = normalizeClaudeReasoningDisplayMode(effort);
+    if (!mode) return;
+    if (mode === getClaudeReasoningModePref()) {
+      claudeReasoningDisplayOverride = null;
+    } else {
+      claudeReasoningDisplayOverride = {
+        mode,
+        modelKey: getClaudeReasoningDisplayScopeKey(),
+      };
+    }
+    updateReasoningButton();
+    if (isFloatingMenuOpen(reasoningMenu)) {
+      rebuildReasoningMenu();
+    }
+  };
+
   const getReasoningState = () => {
     if (!item) {
       return {
@@ -7133,7 +7218,7 @@ export function setupHandlers(
     }
     const { currentModel } = getSelectedModelInfo();
     if (isClaudeConversationSystem()) {
-      const selectedMode = getClaudeReasoningModePref();
+      const selectedMode = getClaudeReasoningDisplayMode();
       const options: ReasoningOption[] = [
         { level: "low", enabled: true, label: "Low" },
         { level: "medium", enabled: true, label: "Medium" },
@@ -7309,14 +7394,9 @@ export function setupHandlers(
       const available = enabledLevels.length > 0;
       const resolvedReasoningLabel = isClaudeConversationSystem()
         ? (() => {
-            const mode = getClaudeReasoningModePref();
-            if (mode === "auto") return "Auto";
-            if (mode === "xhigh") return "XHigh";
-            if (mode === "max") return "Max";
-            if (mode === "high") return "High";
-            if (mode === "medium") return "Medium";
-            if (mode === "low") return "Low";
-            return "Auto";
+            return getClaudeReasoningDisplayLabel(
+              getClaudeReasoningDisplayMode(),
+            );
           })()
         : available
           ? getReasoningLevelDisplayLabel(
@@ -7377,6 +7457,7 @@ export function setupHandlers(
           e.stopPropagation();
           if (!item) return;
           if (isClaudeConversationSystem()) {
+            clearClaudeReasoningDisplayOverride();
             setClaudeReasoningModePref(mode.level === "none" ? "auto" : (mode.level as any));
           } else {
             selectedReasoningCache.clear();
@@ -7410,7 +7491,7 @@ export function setupHandlers(
         { value: "xhigh", label: "XHigh" },
         { value: "max", label: "Max" },
       ];
-      const currentMode = getClaudeReasoningModePref();
+      const currentMode = getClaudeReasoningDisplayMode();
       for (const mode of claudeModes) {
         const option = createElement(
           body.ownerDocument as Document,
@@ -7429,6 +7510,7 @@ export function setupHandlers(
           e.preventDefault();
           e.stopPropagation();
           if (!item) return;
+          clearClaudeReasoningDisplayOverride();
           setClaudeReasoningModePref(mode.value as any);
           setFloatingMenuOpen(reasoningMenu, REASONING_MENU_OPEN_CLASS, false);
           updateReasoningButton();
@@ -7455,6 +7537,7 @@ export function setupHandlers(
         e.stopPropagation();
         if (!item) return;
         if (isClaudeConversationSystem()) {
+          clearClaudeReasoningDisplayOverride();
           setClaudeReasoningModePref("auto");
         } else {
           selectedReasoningCache.clear();
@@ -7496,6 +7579,7 @@ export function setupHandlers(
           if (!item) return;
           if (isClaudeConversationSystem()) {
             const nextMode = optionState.label === "Max" ? "max" : level;
+            clearClaudeReasoningDisplayOverride();
             setClaudeReasoningModePref(nextMode as any);
           } else {
             selectedReasoningCache.clear();
@@ -7514,6 +7598,9 @@ export function setupHandlers(
       reasoningMenu.appendChild(option);
     }
   };
+
+  (body as any).__llmApplyResolvedClaudeEffort =
+    applyClaudeResolvedReasoningDisplay;
 
   const syncModelFromPrefs = () => {
     updateModelButton();
@@ -13471,6 +13558,7 @@ export function setupHandlers(
       cleanupPrefObservers?.();
       unregisterClaudeQueuedInputThreadBody(registeredClaudeQueueThreadKey, body);
       activeContextPanelStateSync.delete(body);
+      delete (body as any).__llmApplyResolvedClaudeEffort;
       void releaseClaudeRuntimeForBody(body);
       observer.disconnect();
       cleanupBody.__llmQueuedThreadCleanupRegistered = false;

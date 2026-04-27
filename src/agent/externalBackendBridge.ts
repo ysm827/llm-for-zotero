@@ -5,6 +5,7 @@ import {
   getConversationSystemPref,
 } from "../claudeCode/prefs";
 import { getClaudeProfileSignature } from "../claudeCode/projectSkills";
+import { getClaudeConversationSummary } from "../claudeCode/store";
 import { dbg, dbgError } from "../utils/debugLogger";
 import type { AgentRuntime } from "./runtime";
 import {
@@ -83,6 +84,7 @@ export type AgentRuntimeLike = Pick<
     mountId: string;
     retain: boolean;
     probeId?: string;
+    providerSessionId?: string;
   }): Promise<RuntimeRetentionResponse | null>;
   invalidateSession(params: {
     conversationKey: number;
@@ -328,6 +330,30 @@ function buildScopedConversationKey(
     return String(conversationKey);
   }
   return `${conversationKey}::${scope.scopeType}:${scope.scopeId}`;
+}
+
+async function resolveClaudeProviderSessionHint(
+  conversationKey: number,
+  scope?: BridgeScope,
+): Promise<string | undefined> {
+  const summary = await getClaudeConversationSummary(conversationKey).catch(() => null);
+  const providerSessionId = summary?.providerSessionId?.trim();
+  if (!summary || !providerSessionId) return undefined;
+  const expectedScopedConversationKey = buildScopedConversationKey(conversationKey, scope);
+  if (
+    summary.scopedConversationKey &&
+    summary.scopedConversationKey !== expectedScopedConversationKey
+  ) {
+    return undefined;
+  }
+  if (scope) {
+    if (summary.scopeType !== scope.scopeType || summary.scopeId !== scope.scopeId) {
+      return undefined;
+    }
+  } else if (summary.scopeType || summary.scopeId) {
+    return undefined;
+  }
+  return providerSessionId;
 }
 
 function getBridgeHealthUrl(baseUrl?: string): string {
@@ -580,6 +606,7 @@ async function updateExternalRuntimeRetention(params: {
   mountId: string;
   retain: boolean;
   probeId?: string;
+  providerSessionId?: string;
 }): Promise<RuntimeRetentionResponse | null> {
   const normalized = normalizeBaseUrl(params.baseUrl);
   if (!normalized) return null;
@@ -588,6 +615,7 @@ async function updateExternalRuntimeRetention(params: {
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
       conversationKey: params.conversationKey,
+      providerSessionId: params.providerSessionId,
       scopeType: params.scope?.scopeType,
       scopeId: params.scope?.scopeId,
       scopeLabel: params.scope?.scopeLabel,
@@ -731,9 +759,14 @@ async function runExternalBridgeTurn(
       : undefined;
   const providerIdentityStack = await buildClaudeProviderIdentityStack();
   const providerIdentity = hashProviderIdentityStack(providerIdentityStack);
+  const providerSessionIdHint = await resolveClaudeProviderSessionHint(
+    params.request.conversationKey,
+    params.scope,
+  );
   const payload = {
     conversationKey: params.request.conversationKey,
     userText: userTextForBridge,
+    providerSessionId: providerSessionIdHint,
     scopeType: params.scope?.scopeType,
     scopeId: params.scope?.scopeId,
     scopeLabel: params.scope?.scopeLabel,
@@ -1728,7 +1761,7 @@ export function createExternalBackendBridgeRuntime(options: {
     listSlashCommandsSync,
     refreshSlashCommands,
     listEfforts,
-    updateRuntimeRetention: async ({ conversationKey, scope, mountId, retain, probeId }) => {
+    updateRuntimeRetention: async ({ conversationKey, scope, mountId, retain, probeId, providerSessionId }) => {
       const bridgeUrl = normalizeBaseUrl(getBridgeUrl());
       if (!bridgeUrl) {
         return null;
@@ -1740,6 +1773,9 @@ export function createExternalBackendBridgeRuntime(options: {
         mountId,
         retain,
         probeId,
+        providerSessionId:
+          providerSessionId ||
+          (retain ? await resolveClaudeProviderSessionHint(conversationKey, scope) : undefined),
       });
     },
     invalidateSession: async ({ conversationKey, scope, metadata }) => {
@@ -1871,7 +1907,7 @@ export function createExternalBackendBridgeRuntime(options: {
     runTurn: async (params: RunTurnParams): Promise<AgentRuntimeOutcome> => {
       const bridgeUrl = normalizeBaseUrl(getBridgeUrl());
       if (!bridgeUrl) {
-        return coreRuntime.runTurn(params);
+        throw new Error("Claude bridge URL is empty. Set Bridge URL to http://127.0.0.1:19787.");
       }
       let persistedRunId = "";
       let persistedRunCreated = false;
@@ -2014,17 +2050,31 @@ export function createExternalBackendBridgeRuntime(options: {
           bridgeUrl,
           "External agent backend unavailable",
         );
+        const fallbackRunId = persistedRunId || `bridge-error-${Date.now()}`;
+        if (!persistedRunCreated) {
+          await ensurePersistedRun(fallbackRunId);
+          await params.onStart?.(fallbackRunId);
+        }
+        const statusEvent: AgentEvent = {
+          type: "status",
+          text: message,
+        };
+        await appendPersistedEvent(statusEvent);
+        await params.onEvent?.(statusEvent);
+        const fallbackEvent: AgentEvent = {
+          type: "fallback",
+          reason: message,
+        };
+        await appendPersistedEvent(fallbackEvent);
+        await params.onEvent?.(fallbackEvent);
+        await finishAgentRun(fallbackRunId, "failed", message);
         if (typeof ztoolkit !== "undefined" && typeof ztoolkit.log === "function") {
           ztoolkit.log(
-            "LLM Agent: External bridge unavailable, fallback to local runtime",
+            "LLM Agent: External bridge unavailable",
             message,
           );
         }
-        await params.onEvent?.({
-          type: "status",
-          text: `${message} Fell back to local runtime.`,
-        });
-        return coreRuntime.runTurn(params);
+        throw new Error(message);
       }
     },
   };
