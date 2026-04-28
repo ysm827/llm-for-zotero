@@ -192,6 +192,29 @@ describe("sendFlowController", function () {
     assert.equal(counts.retainTextCalled, 1);
   });
 
+  it("sends override text while preserving the current draft", async function () {
+    const { controller, inputBox, getCounts, getLastSend } = createBaseDeps({
+      getSelectedTextContextEntries: () => [],
+      getSelectedPaperContexts: () => [],
+      getSelectedCollectionContexts: () => [],
+      getFullTextPaperContexts: () => [],
+      getSelectedFiles: () => [],
+      getSelectedImages: () => [],
+      resolvePromptText: (text: string) => text,
+      buildModelPromptWithFileContext: (question: string) => question,
+    });
+    inputBox.value = "draft typed while waiting";
+
+    await controller.doSend({
+      overrideText: "queued follow-up",
+      preserveInputDraft: true,
+    });
+
+    assert.equal(getLastSend().lastSentQuestion, "queued follow-up");
+    assert.equal(inputBox.value, "draft typed while waiting");
+    assert.equal(getCounts().persistDraftInputCalls, 0);
+  });
+
   it("uses retain-pinned callbacks for edit-latest flow", async function () {
     const { controller, inputBox, getCounts, getLastEditRuntimeMode } = createBaseDeps({
       getActiveEditSession: () => ({

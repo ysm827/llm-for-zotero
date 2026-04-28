@@ -31,6 +31,7 @@ import {
 import { pauseBatchProcessing } from "./modules/mineruBatchProcessor";
 import { startAutoWatch, stopAutoWatch } from "./modules/mineruAutoWatch";
 import { clearAllState, initFontScale } from "./modules/contextPanel/state";
+import { clearQueuedFollowUpState } from "./modules/contextPanel/queuedFollowUps";
 
 async function onStartup() {
   await Promise.all([
@@ -203,6 +204,7 @@ function onShutdown(): void {
   pauseBatchProcessing();
   stopAutoWatch();
   shutdownAgentSubsystem();
+  clearQueuedFollowUpState();
   clearAllState();
   // Remove addon object
   addon.data.alive = false;

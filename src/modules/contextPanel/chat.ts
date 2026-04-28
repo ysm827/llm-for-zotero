@@ -66,6 +66,7 @@ import {
   formatFigureCountLabel,
   formatPaperCountLabel,
 } from "./constants";
+import type { ConversationSystem } from "../../shared/types";
 import { hasCachedMineruMd, getMineruItemDir } from "./mineruCache";
 import type {
   Message,
@@ -203,6 +204,12 @@ import {
   retryAgentTurn,
   type AgentEngineDeps,
 } from "./agentMode/agentEngine";
+import {
+  buildQueuedFollowUpThreadKey,
+  scheduleQueuedFollowUpDrainForThread,
+  SCHEDULE_QUEUED_FOLLOW_UP_DRAIN_PROPERTY,
+  SCHEDULE_QUEUED_FOLLOW_UP_THREAD_DRAIN_PROPERTY,
+} from "./queuedFollowUps";
 
 /** Get AbortController constructor from global scope */
 function getAbortControllerCtor(): new () => AbortController {
@@ -1297,6 +1304,58 @@ function getPanelRequestUI(body: Element): PanelRequestUI {
   };
 }
 
+function isPanelWebChatMode(body: Element): boolean {
+  return (
+    (body.querySelector("#llm-main") as HTMLElement | null)?.dataset
+      ?.webchatMode === "true"
+  );
+}
+
+type QueuedInputDrainScope = {
+  conversationSystem?: ConversationSystem | string | null;
+  conversationKey?: number | null;
+  webChatActive?: boolean;
+};
+
+function normalizeQueuedInputConversationSystem(
+  value: ConversationSystem | string | null | undefined,
+): ConversationSystem {
+  return value === "claude_code" || value === "codex" ? value : "upstream";
+}
+
+function scheduleQueuedInputDrain(
+  body: Element,
+  scope?: QueuedInputDrainScope,
+): void {
+  if (scope) {
+    const threadKey = buildQueuedFollowUpThreadKey({
+      conversationSystem: normalizeQueuedInputConversationSystem(
+        scope.conversationSystem,
+      ),
+      conversationKey: scope.conversationKey ?? null,
+      webChatActive: scope.webChatActive === true,
+    });
+    if (threadKey) {
+      scheduleQueuedFollowUpDrainForThread(threadKey);
+      return;
+    }
+    if (scope.webChatActive) return;
+  }
+  const threadSchedule = (body as unknown as Record<string, unknown>)[
+    SCHEDULE_QUEUED_FOLLOW_UP_THREAD_DRAIN_PROPERTY
+  ];
+  const schedule = (body as unknown as Record<string, unknown>)[
+    SCHEDULE_QUEUED_FOLLOW_UP_DRAIN_PROPERTY
+  ];
+  if (typeof threadSchedule === "function") {
+    (threadSchedule as () => void)();
+    return;
+  }
+  if (typeof schedule === "function") {
+    (schedule as () => void)();
+  }
+}
+
 function setRequestUIBusy(
   body: Element,
   ui: PanelRequestUI,
@@ -1310,10 +1369,7 @@ function setRequestUIBusy(
     }
     if (ui.cancelBtn) ui.cancelBtn.style.display = "";
     if (ui.inputBox) {
-      const keepInputLive =
-        (body.querySelector("#llm-main") as HTMLElement | null)?.dataset
-          ?.conversationSystem === "claude_code";
-      ui.inputBox.disabled = keepInputLive ? false : true;
+      ui.inputBox.disabled = isPanelWebChatMode(body);
     }
     if (ui.status) setStatus(ui.status, statusText, "sending");
   });
@@ -2878,6 +2934,12 @@ export async function retryLatestAssistantResponse(
     restoreRequestUIIdle(body, conversationKey, thisRequestId);
     setAbortController(conversationKey, null);
     setPendingRequestId(conversationKey, 0);
+    if (effectiveRequestConfig.providerProtocol !== "web_sync") {
+      scheduleQueuedInputDrain(body, {
+        conversationSystem: resolveConversationSystemForItem(item) || "upstream",
+        conversationKey,
+      });
+    }
   }
 }
 
@@ -3282,6 +3344,7 @@ function buildAgentEngineDeps(currentItem?: Zotero.Item): AgentEngineDeps {
     getPanelRequestUI,
     setRequestUIBusy,
     restoreRequestUIIdle,
+    scheduleQueuedInputDrain,
     createPanelUpdateHelpers,
     ensureConversationLoaded,
     getConversationKey,
@@ -3436,6 +3499,13 @@ export async function sendQuestion(opts: import("./types").SendQuestionOptions) 
     return;
   }
   const ui = getPanelRequestUI(body);
+  const panelRoot = body.querySelector("#llm-main") as HTMLElement | null;
+  if (
+    panelRoot &&
+    (opts.providerProtocol === "web_sync" || opts.authMode === "webchat")
+  ) {
+    panelRoot.dataset.webchatMode = "true";
+  }
 
   // Track this request
   const thisRequestId = nextRequestId();
@@ -4013,6 +4083,10 @@ export async function sendQuestion(opts: import("./types").SendQuestionOptions) 
     restoreRequestUIIdle(body, conversationKey, thisRequestId);
     setAbortController(conversationKey, null);
     setPendingRequestId(conversationKey, 0);
+    scheduleQueuedInputDrain(body, {
+      conversationSystem: resolveConversationSystemForItem(item) || "upstream",
+      conversationKey,
+    });
   }
 }
 

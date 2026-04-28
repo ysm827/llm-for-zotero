@@ -270,6 +270,14 @@ export type AgentEngineDeps = {
     conversationKey: number,
     requestId: number,
   ) => void;
+  scheduleQueuedInputDrain: (
+    body: Element,
+    scope?: {
+      conversationSystem?: string | null;
+      conversationKey?: number | null;
+      webChatActive?: boolean;
+    },
+  ) => void;
   createPanelUpdateHelpers: (
     body: Element,
     item: Zotero.Item,
@@ -555,9 +563,12 @@ export async function sendAgentTurn(
   const { refreshChatSafely, setStatusSafely } =
     deps.createPanelUpdateHelpers(body, item, conversationKey, ui);
   const queueRefresh = deps.createQueuedRefresh(refreshChatSafely);
-  const scheduleQueueDrain =
-    ((body as any).__llmScheduleClaudeThreadQueueDrain as (() => void) | undefined) ||
-    ((body as any).__llmScheduleClaudeQueueDrain as (() => void) | undefined);
+  const scheduleQueueDrain = () =>
+    deps.scheduleQueuedInputDrain(body, {
+      conversationSystem: deps.getConversationSystem(),
+      conversationKey,
+      webChatActive: effectiveRequestConfig.providerProtocol === "web_sync",
+    });
   setStatusSafely("Checking the request against the attached context.", "sending");
   refreshChatSafely();
 
@@ -1050,9 +1061,12 @@ export async function retryAgentTurn(
     ui,
   );
   const queueRefresh = deps.createQueuedRefresh(refreshChatSafely);
-  const scheduleQueueDrain =
-    ((body as any).__llmScheduleClaudeThreadQueueDrain as (() => void) | undefined) ||
-    ((body as any).__llmScheduleClaudeQueueDrain as (() => void) | undefined);
+  const scheduleQueueDrain = () =>
+    deps.scheduleQueuedInputDrain(body, {
+      conversationSystem: deps.getConversationSystem(),
+      conversationKey,
+      webChatActive: effectiveRequestConfig.providerProtocol === "web_sync",
+    });
   refreshChatSafely(); // Immediately clear the old trace from view
 
   const {
