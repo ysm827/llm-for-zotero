@@ -440,17 +440,24 @@
   flex: none;
   width: 16px;
   height: 16px;
-  background: url("icons/codex-app-server.svg") center / contain no-repeat;
-  filter: invert(72%) grayscale(1);
+  background-color: var(--fill-primary, #0d0d0d);
+  mask-image: url("icons/codex-app-server.svg");
+  mask-repeat: no-repeat;
+  mask-position: center;
+  mask-size: contain;
+  -webkit-mask-image: url("icons/codex-app-server.svg");
+  -webkit-mask-repeat: no-repeat;
+  -webkit-mask-position: center;
+  -webkit-mask-size: contain;
   opacity: 0.62;
   transition:
-    filter 0.15s,
+    background-color 0.15s,
     opacity 0.15s;
 }
 
 .llm-claude-system-toggle[data-active="true"] .llm-codex-system-toggle-icon,
 .llm-standalone-claude-toggle[data-active="true"] .llm-codex-system-toggle-icon {
-  filter: invert(1);
+  background-color: var(--fill-primary, #0d0d0d);
   opacity: 1;
 }
 
@@ -5026,11 +5033,11 @@ label.llm-search-results-item:hover {
 }
 
 #llm-runtime-mode-toggle.llm-runtime-mode-static[data-system="codex"] {
-  color: #fff;
+  color: var(--fill-primary, #0d0d0d);
 }
 
 #llm-runtime-mode-toggle.llm-runtime-mode-static[data-system="codex"]:hover:not(:disabled) {
-  color: #fff;
+  color: var(--fill-primary, #0d0d0d);
 }
 
 #llm-runtime-mode-toggle.llm-runtime-mode-static .llm-agent-toggle-label {
