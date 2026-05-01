@@ -595,6 +595,18 @@ export function shouldAttachAssistantResponseContextMenu(
   return Boolean(sanitizeText(message.text || "").trim());
 }
 
+export function shouldDecorateInterleavedAgentTraceCitations(params: {
+  agentTraceEl: Element | null;
+  agentUsesInterleavedText: boolean;
+  streaming?: boolean;
+}): boolean {
+  return Boolean(
+    params.agentTraceEl &&
+      params.agentUsesInterleavedText &&
+      !params.streaming,
+  );
+}
+
 function attachAssistantResponseContextMenu(params: {
   body: Element;
   doc: Document;
@@ -5429,6 +5441,40 @@ export function refreshChat(body: Element, item?: Zotero.Item | null) {
 
       for (let i = bubbleHeaderNodes.length - 1; i >= 0; i -= 1) {
         bubble.insertBefore(bubbleHeaderNodes[i], bubble.firstChild);
+      }
+
+      if (
+        shouldDecorateInterleavedAgentTraceCitations({
+          agentTraceEl,
+          agentUsesInterleavedText,
+          streaming: msg.streaming,
+        })
+      ) {
+        try {
+          ztoolkit.log(
+            "LLM: calling decorateAssistantCitationLinks for interleaved agent trace",
+            "msgLen =",
+            msg.text.length,
+            "bubbleHTML =",
+            String(bubble.innerHTML || "").length,
+            "hasPairedUser =",
+            Boolean(previousUserMessage),
+            "pairedPaperContexts =",
+            previousUserMessage?.paperContexts?.length ?? "none",
+          );
+          decorateAssistantCitationLinks({
+            body,
+            panelItem: item,
+            bubble,
+            assistantMessage: msg,
+            pairedUserMessage: previousUserMessage,
+          });
+        } catch (decorateErr) {
+          ztoolkit.log(
+            "LLM interleaved citation decoration error:",
+            decorateErr,
+          );
+        }
       }
 
       if (!hasAnswerText && !(msg.streaming && isClaudeStreamingConversation)) {

@@ -8,6 +8,7 @@ import { createQueryLibraryTool } from "../src/agent/tools/read/queryLibrary";
 import { createReadLibraryTool } from "../src/agent/tools/read/readLibrary";
 import { createReadPaperTool } from "../src/agent/tools/read/readPaper";
 import { createSearchPaperTool } from "../src/agent/tools/read/searchPaper";
+import { createFileIOTool } from "../src/agent/tools/write/fileIO";
 import { createEditCurrentNoteTool } from "../src/agent/tools/write/editCurrentNote";
 import { createApplyTagsTool } from "../src/agent/tools/write/applyTags";
 import type { AgentToolContext } from "../src/agent/types";
@@ -405,6 +406,67 @@ describe("primitive agent tools", function () {
     assert.include(userText, "citationLabel=Smith, 2021");
     assert.include(userText, "sourceLabel=(Lee, 2022)");
     assert.include(userText, "for direct quotes and substantive paper-grounded claims");
+  });
+
+  it("file_io adds source metadata only for Codex app-server MinerU paper reads", async function () {
+    const scope = globalThis as typeof globalThis & {
+      IOUtils?: { read?: (path: string) => Promise<Uint8Array> };
+    };
+    const originalIOUtils = scope.IOUtils;
+    scope.IOUtils = {
+      read: async () => new TextEncoder().encode("Paper section text."),
+    };
+    try {
+      const paperContext: PaperContextRef = {
+        itemId: 50,
+        contextItemId: 51,
+        title: "MinerU Paper",
+        firstCreator: "Chandra et al.",
+        year: "2025",
+        mineruCacheDir: "/tmp/llm-for-zotero-mineru/51",
+      };
+      const tool = createFileIOTool();
+      const validated = tool.validate({
+        action: "read",
+        filePath: "/tmp/llm-for-zotero-mineru/51/full.md",
+      });
+      assert.isTrue(validated.ok);
+      if (!validated.ok) return;
+
+      const codexResult = await tool.execute(validated.value, {
+        ...baseContext,
+        request: {
+          ...baseContext.request,
+          authMode: "codex_app_server",
+          fullTextPaperContexts: [paperContext],
+        },
+      });
+      const codexContent = (codexResult as { content: Record<string, unknown> }).content;
+      assert.equal(codexContent.citationLabel, "Chandra et al., 2025");
+      assert.equal(codexContent.sourceLabel, "(Chandra et al., 2025)");
+      assert.deepInclude(codexContent.paperContext as Record<string, unknown>, {
+        itemId: 50,
+        contextItemId: 51,
+      });
+      assert.include(
+        String(codexContent.citationInstruction || ""),
+        "short verbatim blockquote",
+      );
+
+      const normalResult = await tool.execute(validated.value, {
+        ...baseContext,
+        request: {
+          ...baseContext.request,
+          authMode: "api_key",
+          fullTextPaperContexts: [paperContext],
+        },
+      });
+      const normalContent = (normalResult as { content: Record<string, unknown> }).content;
+      assert.notProperty(normalContent, "citationInstruction");
+      assert.notProperty(normalContent, "sourceLabel");
+    } finally {
+      scope.IOUtils = originalIOUtils;
+    }
   });
 
   it("read_paper returns citation and source labels", async function () {

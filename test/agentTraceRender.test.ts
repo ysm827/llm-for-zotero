@@ -5,6 +5,7 @@ import {
 } from "../src/modules/contextPanel/agentTrace/render";
 import {
   shouldAttachAssistantResponseContextMenu,
+  shouldDecorateInterleavedAgentTraceCitations,
   shouldSuppressAssistantResponseContextMenu,
 } from "../src/modules/contextPanel/chat";
 import type {
@@ -653,6 +654,92 @@ describe("agentTrace render", function () {
     assert.isTrue(
       shouldAttachAssistantResponseContextMenu({
         text: "The paper argues that context switching changes recall.",
+      }),
+    );
+  });
+
+  it("decorates citations for completed interleaved agent trace text", function () {
+    const finalText =
+      "Here is the paper evidence.\n\n" +
+      "> The scaffold states can be used for content-addressable memory.\n\n" +
+      "(Chandra et al., 2025)";
+    const events: AgentRunEventRecord[] = [
+      {
+        runId: "run-1",
+        seq: 1,
+        eventType: "message_delta",
+        payload: {
+          type: "message_delta",
+          text: "I need to read the paper section first.",
+        },
+        createdAt: 1,
+      },
+      {
+        runId: "run-1",
+        seq: 2,
+        eventType: "tool_call",
+        payload: {
+          type: "tool_call",
+          callId: "call-1",
+          name: "file_io",
+          args: {
+            action: "read",
+            filePath: "/tmp/llm-for-zotero-mineru/51/full.md",
+          },
+        },
+        createdAt: 2,
+      },
+      {
+        runId: "run-1",
+        seq: 3,
+        eventType: "message_delta",
+        payload: {
+          type: "message_delta",
+          text: finalText,
+        },
+        createdAt: 3,
+      },
+      {
+        runId: "run-1",
+        seq: 4,
+        eventType: "final",
+        payload: {
+          type: "final",
+          text: finalText,
+        },
+        createdAt: 4,
+      },
+    ];
+
+    const { items, isInterleaved } = buildAgentTraceDisplayItems(
+      events,
+      null,
+      {
+        role: "assistant",
+        text: finalText,
+        timestamp: 1,
+        runMode: "agent",
+        modelProviderLabel: "Codex",
+      },
+    );
+    const finalInlineText = items.find(
+      (item) => item.type === "inline_text" && item.text === finalText,
+    );
+
+    assert.isTrue(isInterleaved);
+    assert.exists(finalInlineText);
+    assert.isTrue(
+      shouldDecorateInterleavedAgentTraceCitations({
+        agentTraceEl: {} as Element,
+        agentUsesInterleavedText: isInterleaved,
+        streaming: false,
+      }),
+    );
+    assert.isFalse(
+      shouldDecorateInterleavedAgentTraceCitations({
+        agentTraceEl: {} as Element,
+        agentUsesInterleavedText: isInterleaved,
+        streaming: true,
       }),
     );
   });
