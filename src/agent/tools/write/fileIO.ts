@@ -9,7 +9,6 @@ import {
   formatPaperSourceLabel,
 } from "../../../modules/contextPanel/paperAttribution";
 import { ok, fail, validateObject } from "../shared";
-import { isCommandAutoApproved, setCommandAutoApproved } from "./runCommand";
 import { getLocalParentPath } from "../../../utils/localPath";
 
 type FileIOInput = {
@@ -21,6 +20,23 @@ type FileIOInput = {
   length?: number;
 };
 
+const fileIoAutoApprovedConversations = new Set<number>();
+
+export function isFileIoAutoApproved(conversationKey: number): boolean {
+  return fileIoAutoApprovedConversations.has(conversationKey);
+}
+
+export function setFileIoAutoApproved(
+  conversationKey: number,
+  value: boolean,
+): void {
+  if (value) {
+    fileIoAutoApprovedConversations.add(conversationKey);
+  } else {
+    fileIoAutoApprovedConversations.delete(conversationKey);
+  }
+}
+
 function normalizePathForPrefix(value: string): string {
   return value.replace(/\\/g, "/").replace(/\/+$/g, "");
 }
@@ -31,7 +47,12 @@ function collectRequestPaperContexts(
   const out: PaperContextRef[] = [];
   const seen = new Set<string>();
   const push = (entry: PaperContextRef | undefined) => {
-    if (!entry || !Number.isFinite(entry.itemId) || !Number.isFinite(entry.contextItemId)) return;
+    if (
+      !entry ||
+      !Number.isFinite(entry.itemId) ||
+      !Number.isFinite(entry.contextItemId)
+    )
+      return;
     const key = `${entry.itemId}:${entry.contextItemId}`;
     if (seen.has(key)) return;
     seen.add(key);
@@ -82,10 +103,7 @@ function buildCodexMineruPaperSourceMetadata(
 /**
  * Read a file using Gecko-compatible I/O APIs.
  */
-async function readFile(
-  filePath: string,
-  encoding: string,
-): Promise<string> {
+async function readFile(filePath: string, encoding: string): Promise<string> {
   const IOUtils = (globalThis as any).IOUtils;
   if (IOUtils?.read) {
     const data = await IOUtils.read(filePath);
@@ -98,7 +116,8 @@ async function readFile(
   if (OSFile?.read) {
     const result = await OSFile.read(filePath, { encoding });
     if (typeof result === "string") return result;
-    const bytes = result instanceof Uint8Array ? result : new Uint8Array(result);
+    const bytes =
+      result instanceof Uint8Array ? result : new Uint8Array(result);
     return new TextDecoder(encoding).decode(bytes);
   }
   throw new Error("File I/O is not available in this Zotero environment");
@@ -120,8 +139,13 @@ async function writeFile(
     const IOUtils = (globalThis as any).IOUtils;
     if (IOUtils?.makeDirectory) {
       try {
-        await IOUtils.makeDirectory(parent, { createAncestors: true, ignoreExisting: true });
-      } catch { /* ignore */ }
+        await IOUtils.makeDirectory(parent, {
+          createAncestors: true,
+          ignoreExisting: true,
+        });
+      } catch {
+        /* ignore */
+      }
     }
   }
 
@@ -152,7 +176,8 @@ export function createFileIOTool(): AgentToolDefinition<FileIOInput, unknown> {
           action: {
             type: "string",
             enum: ["read", "write"],
-            description: "'read' to read a file, 'write' to create or overwrite a file.",
+            description:
+              "'read' to read a file, 'write' to create or overwrite a file.",
           },
           filePath: {
             type: "string",
@@ -160,7 +185,8 @@ export function createFileIOTool(): AgentToolDefinition<FileIOInput, unknown> {
           },
           content: {
             type: "string",
-            description: "For action 'write': the content to write to the file.",
+            description:
+              "For action 'write': the content to write to the file.",
           },
           encoding: {
             type: "string",
@@ -168,11 +194,13 @@ export function createFileIOTool(): AgentToolDefinition<FileIOInput, unknown> {
           },
           offset: {
             type: "number",
-            description: "For action 'read': character offset to start reading from (default: 0). Use with manifest.json charStart/charEnd to read specific paper sections.",
+            description:
+              "For action 'read': character offset to start reading from (default: 0). Use with manifest.json charStart/charEnd to read specific paper sections.",
           },
           length: {
             type: "number",
-            description: "For action 'read': maximum characters to read. If omitted, reads the entire file from offset to end. Use with offset to read a specific character range.",
+            description:
+              "For action 'read': maximum characters to read. If omitted, reads the entire file from offset to end. Use with offset to read a specific character range.",
           },
         },
       },
@@ -196,13 +224,19 @@ export function createFileIOTool(): AgentToolDefinition<FileIOInput, unknown> {
       label: "File I/O",
       summaries: {
         onCall: ({ args }) => {
-          const a = args && typeof args === "object" ? (args as Record<string, unknown>) : {};
+          const a =
+            args && typeof args === "object"
+              ? (args as Record<string, unknown>)
+              : {};
           const action = String(a.action || "access");
           const filePath = typeof a.filePath === "string" ? a.filePath : "";
           const fileName = filePath.split(/[\\/]/).pop() || "file";
 
           if (action === "read") {
-            if (fileName === "manifest.json" && filePath.includes("llm-for-zotero-mineru")) {
+            if (
+              fileName === "manifest.json" &&
+              filePath.includes("llm-for-zotero-mineru")
+            ) {
               return "Reading paper structure";
             }
             if (fileName === "full.md" && typeof a.offset === "number") {
@@ -229,7 +263,10 @@ export function createFileIOTool(): AgentToolDefinition<FileIOInput, unknown> {
           if (r.imageFile) return "Figure loaded";
           const filePath = typeof r.filePath === "string" ? r.filePath : "";
           const fileName = filePath.split(/[\\/]/).pop() || "";
-          if (fileName === "manifest.json" && filePath.includes("llm-for-zotero-mineru")) {
+          if (
+            fileName === "manifest.json" &&
+            filePath.includes("llm-for-zotero-mineru")
+          ) {
             return "Paper structure loaded";
           }
           if (fileName === "full.md" && typeof r.offset === "number") {
@@ -251,7 +288,7 @@ export function createFileIOTool(): AgentToolDefinition<FileIOInput, unknown> {
       if (typeof args.filePath !== "string" || !args.filePath.trim()) {
         return fail("filePath is required: an absolute path to the file");
       }
-      if (action === "write" && (typeof args.content !== "string")) {
+      if (action === "write" && typeof args.content !== "string") {
         return fail("content is required for action 'write'");
       }
       const encoding =
@@ -285,7 +322,7 @@ export function createFileIOTool(): AgentToolDefinition<FileIOInput, unknown> {
         value: "ask",
         options: [
           { id: "ask", label: "Ask every time" },
-          { id: "auto", label: "Auto accept for this chat" },
+          { id: "auto", label: "Auto accept this tool for this chat" },
         ],
       };
       if (input.action === "read") {
@@ -296,7 +333,12 @@ export function createFileIOTool(): AgentToolDefinition<FileIOInput, unknown> {
           confirmLabel: "Read",
           cancelLabel: "Cancel",
           fields: [
-            { type: "text" as const, id: "path", label: "File", value: input.filePath },
+            {
+              type: "text" as const,
+              id: "path",
+              label: "File",
+              value: input.filePath,
+            },
             approvalField,
           ],
         };
@@ -304,7 +346,8 @@ export function createFileIOTool(): AgentToolDefinition<FileIOInput, unknown> {
       // write
       const preview =
         (input.content || "").length > 500
-          ? (input.content || "").slice(0, 500) + `\n... [${(input.content || "").length} chars total]`
+          ? (input.content || "").slice(0, 500) +
+            `\n... [${(input.content || "").length} chars total]`
           : input.content || "";
       return {
         toolName: "file_io",
@@ -313,8 +356,18 @@ export function createFileIOTool(): AgentToolDefinition<FileIOInput, unknown> {
         confirmLabel: "Write",
         cancelLabel: "Cancel",
         fields: [
-          { type: "text" as const, id: "path", label: "File", value: input.filePath },
-          { type: "textarea" as const, id: "preview", label: "Content preview", value: preview },
+          {
+            type: "text" as const,
+            id: "path",
+            label: "File",
+            value: input.filePath,
+          },
+          {
+            type: "textarea" as const,
+            id: "preview",
+            label: "Content preview",
+            value: preview,
+          },
           approvalField,
         ],
       };
@@ -324,13 +377,13 @@ export function createFileIOTool(): AgentToolDefinition<FileIOInput, unknown> {
       // Read operations are safe — auto-approve
       if (input.action === "read") return false;
       // Write operations require confirmation unless user opted into auto-approve
-      return !isCommandAutoApproved(context.request.conversationKey);
+      return !isFileIoAutoApproved(context.request.conversationKey);
     },
 
     applyConfirmation(input, resolutionData, context) {
       if (validateObject<Record<string, unknown>>(resolutionData)) {
         if (resolutionData.approvalMode === "auto") {
-          setCommandAutoApproved(context.request.conversationKey, true);
+          setFileIoAutoApproved(context.request.conversationKey, true);
         }
       }
       return ok(input);
@@ -343,12 +396,25 @@ export function createFileIOTool(): AgentToolDefinition<FileIOInput, unknown> {
       );
       if (input.action === "read") {
         // Image files: return via artifacts so the LLM can see them visually
-        const IMAGE_EXTENSIONS = new Set(["png", "jpg", "jpeg", "gif", "webp", "svg"]);
+        const IMAGE_EXTENSIONS = new Set([
+          "png",
+          "jpg",
+          "jpeg",
+          "gif",
+          "webp",
+          "svg",
+        ]);
         const IMAGE_MIME: Record<string, string> = {
-          png: "image/png", jpg: "image/jpeg", jpeg: "image/jpeg",
-          gif: "image/gif", webp: "image/webp", svg: "image/svg+xml",
+          png: "image/png",
+          jpg: "image/jpeg",
+          jpeg: "image/jpeg",
+          gif: "image/gif",
+          webp: "image/webp",
+          svg: "image/svg+xml",
         };
-        const fileExt = (input.filePath.match(/\.(\w+)$/)?.[1] || "").toLowerCase();
+        const fileExt = (
+          input.filePath.match(/\.(\w+)$/)?.[1] || ""
+        ).toLowerCase();
         if (IMAGE_EXTENSIONS.has(fileExt)) {
           const mimeType = IMAGE_MIME[fileExt] || "image/png";
           // Verify the file exists by attempting a binary read
@@ -381,12 +447,14 @@ export function createFileIOTool(): AgentToolDefinition<FileIOInput, unknown> {
               mimeType,
               ...(paperSourceMetadata || {}),
             },
-            artifacts: [{
-              kind: "image" as const,
-              mimeType,
-              storedPath: input.filePath,
-              paperContext: paperSourceMetadata?.paperContext,
-            }],
+            artifacts: [
+              {
+                kind: "image" as const,
+                mimeType,
+                storedPath: input.filePath,
+                paperContext: paperSourceMetadata?.paperContext,
+              },
+            ],
           };
         }
 

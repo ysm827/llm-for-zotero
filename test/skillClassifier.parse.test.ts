@@ -1,5 +1,8 @@
 import { assert } from "chai";
-import { parseClassifierResponse } from "../src/agent/model/skillClassifier";
+import {
+  canUseSkillClassifierModel,
+  parseClassifierResponse,
+} from "../src/agent/model/skillClassifier";
 import type { AgentSkill } from "../src/agent/skills/skillLoader";
 
 const SKILLS: AgentSkill[] = [
@@ -48,7 +51,8 @@ describe("parseClassifierResponse", function () {
   });
 
   it("drops IDs that aren't in the known skill set", function () {
-    const raw = '{"skillIds": ["write-note", "made-up-skill", "analyze-figures"]}';
+    const raw =
+      '{"skillIds": ["write-note", "made-up-skill", "analyze-figures"]}';
     const result = parseClassifierResponse(raw, SKILLS);
     assert.deepEqual(result, ["write-note", "analyze-figures"]);
   });
@@ -57,7 +61,9 @@ describe("parseClassifierResponse", function () {
     assert.isNull(parseClassifierResponse("not JSON at all", SKILLS));
     assert.isNull(parseClassifierResponse("", SKILLS));
     assert.isNull(parseClassifierResponse('{"wrongKey": []}', SKILLS));
-    assert.isNull(parseClassifierResponse('{"skillIds": "not-an-array"}', SKILLS));
+    assert.isNull(
+      parseClassifierResponse('{"skillIds": "not-an-array"}', SKILLS),
+    );
   });
 
   it("strips non-string entries from the skillIds array", function () {
@@ -66,5 +72,22 @@ describe("parseClassifierResponse", function () {
       "write-note",
       "compare-papers",
     ]);
+  });
+
+  it("allows blank apiBase for Codex app-server skill classification", function () {
+    assert.isTrue(
+      canUseSkillClassifierModel({
+        model: "gpt-5.4",
+        apiBase: "",
+        authMode: "codex_app_server",
+      }),
+    );
+    assert.isFalse(
+      canUseSkillClassifierModel({
+        model: "gpt-5.4",
+        apiBase: "",
+        authMode: "api_key",
+      }),
+    );
   });
 });

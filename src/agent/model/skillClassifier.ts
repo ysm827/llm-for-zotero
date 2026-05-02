@@ -41,7 +41,7 @@ export async function detectSkillIntent(
   if (skills.length === 0) return [];
   const userText = (request.userText || "").trim();
   if (!userText) return regexFallback(skills, request);
-  if (!request.model || !request.apiBase) {
+  if (!canUseSkillClassifierModel(request)) {
     return regexFallback(skills, request);
   }
 
@@ -77,6 +77,14 @@ export async function detectSkillIntent(
     return regexFallback(skills, request);
   }
   return parsed;
+}
+
+export function canUseSkillClassifierModel(
+  request: Pick<AgentRuntimeRequest, "model" | "apiBase" | "authMode">,
+): boolean {
+  if (!request.model) return false;
+  if (request.apiBase) return true;
+  return request.authMode === "codex_app_server";
 }
 
 function regexFallback(

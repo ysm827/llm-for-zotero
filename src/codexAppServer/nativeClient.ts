@@ -47,6 +47,10 @@ import {
   readCodexNativeMcpSetupStatus,
   type CodexNativeMcpSetupStatus,
 } from "./mcpSetup";
+import {
+  resolveCodexNativeSkills,
+  type CodexNativeSkillContext,
+} from "./nativeSkills";
 
 export const CODEX_APP_SERVER_NATIVE_PROCESS_KEY = "codex_app_server_native";
 const CODEX_APP_SERVER_SERVICE_NAME = "llm_for_zotero";
@@ -109,6 +113,7 @@ export type CodexNativeDiagnostics = {
   mcpServerName?: string;
   mcpReady: boolean;
   mcpToolNames: string[];
+  skillIds: string[];
   historyVerified?: boolean;
 };
 
@@ -526,6 +531,7 @@ function buildZoteroEnvironmentManifest(params: {
   mcpEnabled: boolean;
   mcpReady: boolean;
   mcpWarning?: string;
+  skillInstructionBlock?: string;
 }): string {
   const { scope } = params;
   const lines = [
@@ -572,14 +578,18 @@ function buildZoteroEnvironmentManifest(params: {
     lines.push(
       "- Zotero MCP tools: disabled for this turn. Do not claim access to Zotero library or PDF tools unless another tool source is available.",
     );
-    return lines.join("\n");
+    return [lines.join("\n"), params.skillInstructionBlock || ""]
+      .filter(Boolean)
+      .join("\n\n");
   }
 
   if (!params.mcpReady) {
     lines.push(
       `- Zotero MCP tools: unavailable for this turn.${params.mcpWarning ? ` ${params.mcpWarning}` : ""}`,
     );
-    return lines.join("\n");
+    return [lines.join("\n"), params.skillInstructionBlock || ""]
+      .filter(Boolean)
+      .join("\n\n");
   }
 
   lines.push(
@@ -599,7 +609,9 @@ function buildZoteroEnvironmentManifest(params: {
       "- Library workflow: use query_library to discover/search/list items in the active library, then read_library and paper tools on selected item IDs before answering. Do not ask the user to paste the whole library.",
     );
   }
-  return lines.join("\n");
+  return [lines.join("\n"), params.skillInstructionBlock || ""]
+    .filter(Boolean)
+    .join("\n\n");
 }
 
 function prefixUserContentWithContext(
@@ -1056,6 +1068,7 @@ function buildNativeDiagnostics(params: {
   mcpServerName?: string;
   mcpReady: boolean;
   mcpStatus?: CodexNativeMcpSetupStatus;
+  skillIds?: string[];
   historyVerified?: boolean;
 }): CodexNativeDiagnostics {
   return {
@@ -1067,6 +1080,7 @@ function buildNativeDiagnostics(params: {
     mcpServerName: params.mcpServerName,
     mcpReady: params.mcpReady,
     mcpToolNames: params.mcpStatus?.toolNames || [],
+    skillIds: params.skillIds || [],
     historyVerified: params.historyVerified,
   };
 }
@@ -1093,6 +1107,8 @@ export async function runCodexAppServerNativeTurn(params: {
   onTurnCompleted?: (event: { turnId: string; status?: string }) => void;
   onMcpSetupWarning?: (message: string) => void;
   onDiagnostics?: (diagnostics: CodexNativeDiagnostics) => void;
+  onSkillActivated?: (skillId: string) => void;
+  skillContext?: CodexNativeSkillContext;
   onApprovalRequest?: (
     request: CodexNativeApprovalRequest,
   ) => unknown | Promise<unknown>;
@@ -1112,6 +1128,17 @@ export async function runCodexAppServerNativeTurn(params: {
       normalizeNonEmptyString(params.scope.profileSignature) ||
       getCodexProfileSignature();
     const latestUserText = extractLatestUserText(params.messages);
+    const resolvedSkills = await resolveCodexNativeSkills({
+      scope: { ...params.scope, profileSignature },
+      userText: latestUserText,
+      model: params.model,
+      apiBase: params.codexPath,
+      signal: params.signal,
+      skillContext: params.skillContext,
+    });
+    for (const skillId of resolvedSkills.matchedSkillIds) {
+      params.onSkillActivated?.(skillId);
+    }
     const scopedMcp = mcpEnabled
       ? registerScopedZoteroMcpScope({
           ...params.scope,
@@ -1167,6 +1194,7 @@ export async function runCodexAppServerNativeTurn(params: {
           mcpEnabled,
           mcpReady: optimisticMcpReady,
           mcpWarning,
+          skillInstructionBlock: resolvedSkills.instructionBlock,
         }),
       });
       const plainPreparedTurn =
@@ -1242,6 +1270,7 @@ export async function runCodexAppServerNativeTurn(params: {
           mcpServerName: mcpThreadConfig?.serverName,
           mcpReady,
           mcpStatus,
+          skillIds: resolvedSkills.matchedSkillIds,
         }),
       );
       const nativeMessages = buildNativeMessages({
@@ -1252,6 +1281,7 @@ export async function runCodexAppServerNativeTurn(params: {
           mcpEnabled,
           mcpReady,
           mcpWarning,
+          skillInstructionBlock: resolvedSkills.instructionBlock,
         }),
         prefixLatestUserWithContext: !thread.developerInstructionsAccepted,
       });
@@ -1326,6 +1356,7 @@ export async function runCodexAppServerNativeTurn(params: {
         mcpServerName: mcpThreadConfig?.serverName,
         mcpReady,
         mcpStatus,
+        skillIds: resolvedSkills.matchedSkillIds,
         historyVerified,
       });
       params.onDiagnostics?.(diagnostics);

@@ -36,7 +36,9 @@ async function drainPipe(pipe: any): Promise<string> {
       if (!chunk) break;
       result += chunk;
     }
-  } catch { /* pipe closed */ }
+  } catch {
+    /* pipe closed */
+  }
   return result;
 }
 
@@ -57,15 +59,21 @@ async function executeCommand(params: {
     const CU = (globalThis as any).ChromeUtils;
     if (CU?.importESModule) {
       try {
-        const mod = CU.importESModule("resource://gre/modules/Subprocess.sys.mjs");
+        const mod = CU.importESModule(
+          "resource://gre/modules/Subprocess.sys.mjs",
+        );
         Subprocess = mod.Subprocess || mod.default || mod;
-      } catch { /* fallback below */ }
+      } catch {
+        /* fallback below */
+      }
     }
     if (!Subprocess && CU?.import) {
       try {
         const mod = CU.import("resource://gre/modules/Subprocess.jsm");
         Subprocess = mod.Subprocess || mod;
-      } catch { /* fallback below */ }
+      } catch {
+        /* fallback below */
+      }
     }
 
     if (Subprocess?.call) {
@@ -75,9 +83,11 @@ async function executeCommand(params: {
         // Windows: Subprocess pipes don't capture cmd.exe output in Zotero's
         // Gecko build. Redirect to a fixed temp file, then read it back.
         const Components = (globalThis as any).Components;
-        const tempDir = (globalThis as any).Services?.dirsvc
-          ?.get("TmpD", Components?.interfaces?.nsIFile)?.path
-          || "C:\\Windows\\Temp";
+        const tempDir =
+          (globalThis as any).Services?.dirsvc?.get(
+            "TmpD",
+            Components?.interfaces?.nsIFile,
+          )?.path || "C:\\Windows\\Temp";
         const tempOut = `${tempDir}\\zotero-llm-cmd-${Date.now()}-${Math.random().toString(36).slice(2, 8)}.txt`;
         const wrappedCommand = `( ${command} ) > "${tempOut}" 2>&1`;
 
@@ -105,8 +115,17 @@ async function executeCommand(params: {
 
         const race = await Promise.race([resultPromise, timeoutPromise]);
         if (race === "timeout") {
-          try { proc.kill(); } catch { /* ignore */ }
-          try { const IO = (globalThis as any).IOUtils; await IO.remove(tempOut, { ignoreAbsent: true }); } catch { /* ignore */ }
+          try {
+            proc.kill();
+          } catch {
+            /* ignore */
+          }
+          try {
+            const IO = (globalThis as any).IOUtils;
+            await IO.remove(tempOut, { ignoreAbsent: true });
+          } catch {
+            /* ignore */
+          }
           return { stdout: "", stderr: "[Command timed out]", exitCode: -1 };
         }
 
@@ -115,12 +134,15 @@ async function executeCommand(params: {
         try {
           const IOUtils = (globalThis as any).IOUtils;
           const data = await IOUtils.read(tempOut);
-          stdout = new TextDecoder("utf-8").decode(data instanceof Uint8Array ? data : new Uint8Array(data));
+          stdout = new TextDecoder("utf-8").decode(
+            data instanceof Uint8Array ? data : new Uint8Array(data),
+          );
           await IOUtils.remove(tempOut, { ignoreAbsent: true });
-        } catch { /* temp file missing or unreadable */ }
+        } catch {
+          /* temp file missing or unreadable */
+        }
 
         return { stdout, stderr: "", exitCode: race };
-
       } else {
         // macOS / Linux: pipes work normally
         const proc = await Subprocess.call({
@@ -144,7 +166,11 @@ async function executeCommand(params: {
 
         const raceResult = await Promise.race([resultPromise, timeoutPromise]);
         if (raceResult === "timeout") {
-          try { proc.kill(); } catch { /* ignore */ }
+          try {
+            proc.kill();
+          } catch {
+            /* ignore */
+          }
           const partial = await resultPromise.catch(() => ({
             stdout: "",
             stderr: "",
@@ -186,7 +212,8 @@ async function executeCommand(params: {
     process.init(nsILocalFile);
     process.run(true, [shellFlag, command], 2);
     return {
-      stdout: "(nsIProcess does not capture stdout — check output files instead)",
+      stdout:
+        "(nsIProcess does not capture stdout — check output files instead)",
       stderr: "",
       exitCode: process.exitValue,
     };
@@ -199,34 +226,43 @@ async function executeCommand(params: {
   }
 }
 
-// Per-conversation auto-approve state for run_command and file_io
-const autoApprovedConversations = new Set<number>();
+// Per-conversation auto-approve state for run_command.
+const commandAutoApprovedConversations = new Set<number>();
 
 export function isCommandAutoApproved(conversationKey: number): boolean {
-  return autoApprovedConversations.has(conversationKey);
+  return commandAutoApprovedConversations.has(conversationKey);
 }
 
-export function setCommandAutoApproved(conversationKey: number, value: boolean): void {
+export function setCommandAutoApproved(
+  conversationKey: number,
+  value: boolean,
+): void {
   if (value) {
-    autoApprovedConversations.add(conversationKey);
+    commandAutoApprovedConversations.add(conversationKey);
   } else {
-    autoApprovedConversations.delete(conversationKey);
+    commandAutoApprovedConversations.delete(conversationKey);
   }
 }
 
 /** Patterns that indicate a command only reads data (safe to auto-approve). */
-const READ_ONLY_COMMANDS = /^\s*(?:cat|head|tail|less|more|ls|dir|find|file|wc|du|stat|which|where|type|echo|printf|grep|rg|awk|sed\s+-n|sort|uniq|diff|strings|xxd|hexdump|md5|shasum|sha256sum|tesseract|swift|node\s+-e|python3?\s+[-\/])/i;
+const READ_ONLY_COMMANDS =
+  /^\s*(?:cat|head|tail|less|more|ls|dir|find|file|wc|du|stat|which|where|type|echo|printf|grep|rg|awk|sed\s+-n|sort|uniq|diff|strings|xxd|hexdump|md5|shasum|sha256sum|tesseract|swift|node\s+-e|python3?\s+[-\/])/i;
 
 /** Patterns that indicate a command mutates state (always require confirmation). */
-const DESTRUCTIVE_COMMANDS = /(?:^|\||\;|&&)\s*(?:rm\s|rmdir\s|mv\s|cp\s|chmod\s|chown\s|sudo\s|pip\s+install|npm\s+install|brew\s+install|git\s+(?:push|reset|checkout|clean|rebase)|mkfs|dd\s)/i;
+const DESTRUCTIVE_COMMANDS =
+  /(?:^|\||\;|&&)\s*(?:rm\s|rmdir\s|mv\s|cp\s|chmod\s|chown\s|sudo\s|pip\s+install|npm\s+install|brew\s+install|git\s+(?:push|reset|checkout|clean|rebase)|mkfs|dd\s)/i;
 
 /** Redirect to file (overwrite or append) — but not heredoc `<<`. */
 const REDIRECT_PATTERN = /(?:^|[^<])\s*>{1,2}\s*[^\s&]/;
 
+function isDestructiveCommand(command: string): boolean {
+  return DESTRUCTIVE_COMMANDS.test(command.trim());
+}
+
 function isReadOnlyCommand(command: string): boolean {
   const trimmed = command.trim();
   // Destructive commands always need confirmation
-  if (DESTRUCTIVE_COMMANDS.test(trimmed)) return false;
+  if (isDestructiveCommand(trimmed)) return false;
   // File redirects are writes
   if (REDIRECT_PATTERN.test(trimmed)) return false;
   // Known read-only commands are safe
@@ -237,7 +273,10 @@ function isReadOnlyCommand(command: string): boolean {
   return false;
 }
 
-export function createRunCommandTool(): AgentToolDefinition<RunCommandInput, unknown> {
+export function createRunCommandTool(): AgentToolDefinition<
+  RunCommandInput,
+  unknown
+> {
   return {
     spec: {
       name: "run_command",
@@ -287,7 +326,10 @@ export function createRunCommandTool(): AgentToolDefinition<RunCommandInput, unk
       label: "Run Command",
       summaries: {
         onCall: ({ args }) => {
-          const a = args && typeof args === "object" ? (args as Record<string, unknown>) : {};
+          const a =
+            args && typeof args === "object"
+              ? (args as Record<string, unknown>)
+              : {};
           const cmd = typeof a.command === "string" ? a.command : "command";
           return `Running: ${cmd}`;
         },
@@ -300,7 +342,9 @@ export function createRunCommandTool(): AgentToolDefinition<RunCommandInput, unk
               ? (content as Record<string, unknown>)
               : {};
           const exitCode = Number(r.exitCode ?? -1);
-          return exitCode === 0 ? "Command completed successfully" : `Command exited with code ${exitCode}`;
+          return exitCode === 0
+            ? "Command completed successfully"
+            : `Command exited with code ${exitCode}`;
         },
       },
     },
@@ -320,16 +364,21 @@ export function createRunCommandTool(): AgentToolDefinition<RunCommandInput, unk
 
       return ok<RunCommandInput>({
         command: args.command.trim(),
-        cwd: typeof args.cwd === "string" && args.cwd.trim() ? args.cwd.trim() : undefined,
+        cwd:
+          typeof args.cwd === "string" && args.cwd.trim()
+            ? args.cwd.trim()
+            : undefined,
         timeoutMs,
       });
     },
 
     shouldRequireConfirmation(input, context) {
-      // Skip confirmation if user already approved commands in this conversation
-      if (isCommandAutoApproved(context.request.conversationKey)) return false;
+      // Destructive commands always need confirmation.
+      if (isDestructiveCommand(input.command)) return true;
       // Auto-approve read-only commands (analysis, inspection, listing)
       if (isReadOnlyCommand(input.command)) return false;
+      // Skip confirmation if user already approved commands in this conversation.
+      if (isCommandAutoApproved(context.request.conversationKey)) return false;
       return true;
     },
 
@@ -348,12 +397,14 @@ export function createRunCommandTool(): AgentToolDefinition<RunCommandInput, unk
             value: input.command,
           },
           ...(input.cwd
-            ? [{
-                type: "text" as const,
-                id: "cwd",
-                label: "Working directory",
-                value: input.cwd,
-              }]
+            ? [
+                {
+                  type: "text" as const,
+                  id: "cwd",
+                  label: "Working directory",
+                  value: input.cwd,
+                },
+              ]
             : []),
           {
             type: "select" as const,
@@ -362,7 +413,7 @@ export function createRunCommandTool(): AgentToolDefinition<RunCommandInput, unk
             value: "ask",
             options: [
               { id: "ask", label: "Ask every time" },
-              { id: "auto", label: "Auto accept for this chat" },
+              { id: "auto", label: "Auto accept this tool for this chat" },
             ],
           },
         ],
@@ -388,11 +439,13 @@ export function createRunCommandTool(): AgentToolDefinition<RunCommandInput, unk
       const maxLen = 8000;
       const stdout =
         result.stdout.length > maxLen
-          ? result.stdout.slice(0, maxLen) + `\n... [truncated, ${result.stdout.length} chars total]`
+          ? result.stdout.slice(0, maxLen) +
+            `\n... [truncated, ${result.stdout.length} chars total]`
           : result.stdout;
       const stderr =
         result.stderr.length > maxLen
-          ? result.stderr.slice(0, maxLen) + `\n... [truncated, ${result.stderr.length} chars total]`
+          ? result.stderr.slice(0, maxLen) +
+            `\n... [truncated, ${result.stderr.length} chars total]`
           : result.stderr;
 
       return {

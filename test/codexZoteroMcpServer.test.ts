@@ -651,6 +651,77 @@ describe("Zotero MCP server", function () {
     }
   });
 
+  it("lets run_command and file_io use their own confirmation policy in native MCP mode", async function () {
+    const executed: string[] = [];
+    const registry = new AgentToolRegistry();
+    for (const name of ["run_command", "file_io"]) {
+      registry.register({
+        spec: {
+          name,
+          description: `Policy-controlled tool ${name}`,
+          inputSchema: { type: "object", additionalProperties: true },
+          mutability: "write",
+          requiresConfirmation: true,
+        },
+        validate: (args) => ({ ok: true, value: args ?? {} }),
+        shouldRequireConfirmation: async () => false,
+        createPendingAction: async () => ({
+          toolName: name,
+          title: `Confirm ${name}`,
+          confirmLabel: "Confirm",
+          cancelLabel: "Cancel",
+          fields: [],
+        }),
+        execute: async () => {
+          executed.push(name);
+          return { direct: true, name };
+        },
+      });
+    }
+    registerMcpServer({
+      toolRegistry: registry,
+      zoteroGateway: {} as never,
+    });
+    const scoped = registerScopedZoteroMcpScope(
+      {
+        profileSignature: "profile-dev",
+        conversationKey: 457,
+        libraryID: 1,
+        kind: "global",
+      },
+      { token: "policy-scope-token" },
+    );
+
+    try {
+      for (const name of ["run_command", "file_io"]) {
+        const response = await invokeMcpEndpoint({
+          token: getOrCreateZoteroMcpBearerToken(),
+          headers: { [ZOTERO_MCP_SCOPE_HEADER]: scoped.token },
+          body: {
+            jsonrpc: "2.0",
+            id: name,
+            method: "tools/call",
+            params: {
+              name,
+              arguments:
+                name === "run_command"
+                  ? { command: 'rg "notes" src' }
+                  : { action: "read", filePath: "/tmp/source.md" },
+            },
+          },
+        });
+        const payload = JSON.parse(response[2]);
+        const content = JSON.parse(payload.result.content[0].text);
+        assert.isUndefined(payload.result.isError);
+        assert.equal(content.ok, true);
+        assert.deepEqual(content.result, { direct: true, name });
+      }
+      assert.deepEqual(executed, ["run_command", "file_io"]);
+    } finally {
+      scoped.clear();
+    }
+  });
+
   it("creates standalone notes through the edit_current_note review card path", async function () {
     const registry = new AgentToolRegistry();
     registry.register({

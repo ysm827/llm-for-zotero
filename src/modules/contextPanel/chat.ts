@@ -55,6 +55,7 @@ import {
   type CodexNativeConversationScope,
   type CodexNativeDiagnostics,
 } from "../../codexAppServer/nativeClient";
+import type { CodexNativeSkillContext } from "../../codexAppServer/nativeSkills";
 import {
   callLLMStream,
   ChatFileAttachment,
@@ -2045,6 +2046,44 @@ function formatCodexNativeDiagnosticsStatus(
   return `Codex app-server ${threadShort} (${source}), library ${libraryLabel}, ${mcpLabel}${historyLabel}`;
 }
 
+function buildCodexNativeSkillContext(params: {
+  forcedSkillIds?: string[];
+  selectedTexts?: string[];
+  selectedTextSources?: SelectedTextSource[];
+  selectedTextPaperContexts?: (PaperContextRef | undefined)[];
+  paperContexts?: PaperContextRef[];
+  fullTextPaperContexts?: PaperContextRef[];
+  selectedCollectionContexts?: CollectionContextRef[];
+  screenshots?: string[];
+  attachments?: ChatAttachment[];
+}): CodexNativeSkillContext {
+  return {
+    forcedSkillIds: params.forcedSkillIds?.length
+      ? params.forcedSkillIds
+      : undefined,
+    selectedTexts: params.selectedTexts?.length
+      ? params.selectedTexts
+      : undefined,
+    selectedTextSources: params.selectedTextSources?.length
+      ? params.selectedTextSources
+      : undefined,
+    selectedTextPaperContexts: params.selectedTextPaperContexts?.some(Boolean)
+      ? params.selectedTextPaperContexts
+      : undefined,
+    selectedPaperContexts: params.paperContexts?.length
+      ? params.paperContexts
+      : undefined,
+    fullTextPaperContexts: params.fullTextPaperContexts?.length
+      ? params.fullTextPaperContexts
+      : undefined,
+    selectedCollectionContexts: params.selectedCollectionContexts?.length
+      ? params.selectedCollectionContexts
+      : undefined,
+    screenshots: params.screenshots?.length ? params.screenshots : undefined,
+    attachments: params.attachments?.length ? params.attachments : undefined,
+  };
+}
+
 async function buildContextPlanForRequest(params: {
   item: Zotero.Item;
   question: string;
@@ -3984,6 +4023,20 @@ export async function retryLatestAssistantResponse(
             reasoning: effectiveRequestConfig.reasoning,
             signal: getAbortController(conversationKey)?.signal,
             codexPath: effectiveRequestConfig.apiBase,
+            skillContext: buildCodexNativeSkillContext({
+              selectedTexts: retryPair.userMessage.selectedTexts,
+              selectedTextSources: retryPair.userMessage.selectedTextSources,
+              selectedTextPaperContexts:
+                retryPair.userMessage.selectedTextPaperContexts,
+              paperContexts: contextPlan.paperContexts,
+              fullTextPaperContexts: contextPlan.fullTextPaperContexts,
+              selectedCollectionContexts,
+              screenshots: allImages,
+              attachments,
+            }),
+            onSkillActivated: (skillId) => {
+              setStatusSafely(`Codex skill activated: ${skillId}`, "sending");
+            },
             onDelta: handleDelta,
             onAgentMessageDelta: (event) => {
               if (!codexActivityTrace?.appendAgentMessageDelta(event)) {
@@ -5376,6 +5429,20 @@ export async function sendQuestion(
             reasoning: effectiveRequestConfig.reasoning,
             signal: getAbortController(conversationKey)?.signal,
             codexPath: effectiveRequestConfig.apiBase,
+            skillContext: buildCodexNativeSkillContext({
+              forcedSkillIds: opts.forcedSkillIds,
+              selectedTexts: selectedTextsForMessage,
+              selectedTextSources: selectedTextSourcesForMessage,
+              selectedTextPaperContexts: selectedTextPaperContextsForMessage,
+              paperContexts: contextPlan.paperContexts,
+              fullTextPaperContexts: contextPlan.fullTextPaperContexts,
+              selectedCollectionContexts: selectedCollectionContextsForMessage,
+              screenshots: allSendImages,
+              attachments,
+            }),
+            onSkillActivated: (skillId) => {
+              setStatusSafely(`Codex skill activated: ${skillId}`, "sending");
+            },
             onDelta: handleDelta,
             onAgentMessageDelta: (event) => {
               if (!codexActivityTrace?.appendAgentMessageDelta(event)) {

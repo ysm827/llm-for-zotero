@@ -12,6 +12,7 @@ import { createSearchPaperTool } from "../src/agent/tools/read/searchPaper";
 import { createFileIOTool } from "../src/agent/tools/write/fileIO";
 import { createEditCurrentNoteTool } from "../src/agent/tools/write/editCurrentNote";
 import { createApplyTagsTool } from "../src/agent/tools/write/applyTags";
+import { createRunCommandTool } from "../src/agent/tools/write/runCommand";
 import { createUndoLastActionTool } from "../src/agent/tools/write/undoLastAction";
 import { createZoteroScriptTool } from "../src/agent/tools/write/zoteroScript";
 import type { AgentToolContext } from "../src/agent/types";
@@ -568,6 +569,157 @@ describe("primitive agent tools", function () {
     } finally {
       scope.IOUtils = originalIOUtils;
     }
+  });
+
+  it("file_io read and write confirmation follows scoped file auto-accept", async function () {
+    const tool = createFileIOTool();
+    const context: AgentToolContext = {
+      ...baseContext,
+      request: {
+        ...baseContext.request,
+        conversationKey: 43_001,
+      },
+    };
+    const read = tool.validate({
+      action: "read",
+      filePath: "/tmp/source.md",
+    });
+    assert.isTrue(read.ok);
+    if (!read.ok) return;
+    assert.isFalse(await tool.shouldRequireConfirmation?.(read.value, context));
+
+    const write = tool.validate({
+      action: "write",
+      filePath: "/tmp/output.md",
+      content: "Saved note.",
+    });
+    assert.isTrue(write.ok);
+    if (!write.ok) return;
+    assert.isTrue(await tool.shouldRequireConfirmation?.(write.value, context));
+
+    const approved = tool.applyConfirmation?.(
+      write.value,
+      { approvalMode: "auto" },
+      context,
+    );
+    assert.isTrue(approved?.ok);
+    assert.isFalse(
+      await tool.shouldRequireConfirmation?.(write.value, context),
+    );
+  });
+
+  it("run_command confirmation keeps read-only commands direct and destructive commands gated after auto-accept", async function () {
+    const tool = createRunCommandTool();
+    const context: AgentToolContext = {
+      ...baseContext,
+      request: {
+        ...baseContext.request,
+        conversationKey: 43_002,
+      },
+    };
+
+    const readOnly = tool.validate({ command: 'rg "notes" src' });
+    assert.isTrue(readOnly.ok);
+    if (!readOnly.ok) return;
+    assert.isFalse(
+      await tool.shouldRequireConfirmation?.(readOnly.value, context),
+    );
+
+    const commandWrite = tool.validate({ command: "python3 analyze.py" });
+    assert.isTrue(commandWrite.ok);
+    if (!commandWrite.ok) return;
+    assert.isTrue(
+      await tool.shouldRequireConfirmation?.(commandWrite.value, context),
+    );
+
+    const approved = tool.applyConfirmation?.(
+      commandWrite.value,
+      { approvalMode: "auto" },
+      context,
+    );
+    assert.isTrue(approved?.ok);
+    assert.isFalse(
+      await tool.shouldRequireConfirmation?.(commandWrite.value, context),
+    );
+
+    const destructive = tool.validate({ command: "rm -rf /tmp/example" });
+    assert.isTrue(destructive.ok);
+    if (!destructive.ok) return;
+    assert.isTrue(
+      await tool.shouldRequireConfirmation?.(destructive.value, context),
+    );
+  });
+
+  it("run_command and file_io auto-accept scopes are independent", async function () {
+    const commandTool = createRunCommandTool();
+    const fileTool = createFileIOTool();
+
+    const commandContext: AgentToolContext = {
+      ...baseContext,
+      request: {
+        ...baseContext.request,
+        conversationKey: 43_003,
+      },
+    };
+    const command = commandTool.validate({ command: "python3 analyze.py" });
+    const fileForCommandContext = fileTool.validate({
+      action: "write",
+      filePath: "/tmp/from-command-context.md",
+      content: "Content",
+    });
+    assert.isTrue(command.ok);
+    assert.isTrue(fileForCommandContext.ok);
+    if (!command.ok || !fileForCommandContext.ok) return;
+    commandTool.applyConfirmation?.(
+      command.value,
+      { approvalMode: "auto" },
+      commandContext,
+    );
+    assert.isFalse(
+      await commandTool.shouldRequireConfirmation?.(
+        command.value,
+        commandContext,
+      ),
+    );
+    assert.isTrue(
+      await fileTool.shouldRequireConfirmation?.(
+        fileForCommandContext.value,
+        commandContext,
+      ),
+    );
+
+    const fileContext: AgentToolContext = {
+      ...baseContext,
+      request: {
+        ...baseContext.request,
+        conversationKey: 43_004,
+      },
+    };
+    const file = fileTool.validate({
+      action: "write",
+      filePath: "/tmp/from-file-context.md",
+      content: "Content",
+    });
+    const commandForFileContext = commandTool.validate({
+      command: "python3 analyze.py",
+    });
+    assert.isTrue(file.ok);
+    assert.isTrue(commandForFileContext.ok);
+    if (!file.ok || !commandForFileContext.ok) return;
+    fileTool.applyConfirmation?.(
+      file.value,
+      { approvalMode: "auto" },
+      fileContext,
+    );
+    assert.isFalse(
+      await fileTool.shouldRequireConfirmation?.(file.value, fileContext),
+    );
+    assert.isTrue(
+      await commandTool.shouldRequireConfirmation?.(
+        commandForFileContext.value,
+        fileContext,
+      ),
+    );
   });
 
   it("read_paper returns citation and source labels", async function () {

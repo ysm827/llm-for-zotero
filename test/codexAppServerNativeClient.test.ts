@@ -6,17 +6,25 @@ import {
 } from "../src/codexAppServer/nativeClient";
 import { destroyCachedCodexAppServerProcess } from "../src/utils/codexAppServerProcess";
 import { ZOTERO_MCP_SCOPE_HEADER } from "../src/agent/mcp/server";
+import { setUserSkills } from "../src/agent/skills";
+import type { AgentSkill } from "../src/agent/skills/skillLoader";
 
 describe("Codex app-server native client", function () {
-  const originalChromeUtils = (globalThis as typeof globalThis & {
-    ChromeUtils?: unknown;
-  }).ChromeUtils;
-  const originalToolkit = (globalThis as typeof globalThis & {
-    ztoolkit?: unknown;
-  }).ztoolkit;
-  const originalFetch = (globalThis as typeof globalThis & {
-    fetch?: typeof fetch;
-  }).fetch;
+  const originalChromeUtils = (
+    globalThis as typeof globalThis & {
+      ChromeUtils?: unknown;
+    }
+  ).ChromeUtils;
+  const originalToolkit = (
+    globalThis as typeof globalThis & {
+      ztoolkit?: unknown;
+    }
+  ).ztoolkit;
+  const originalFetch = (
+    globalThis as typeof globalThis & {
+      fetch?: typeof fetch;
+    }
+  ).fetch;
   const originalCodexPath = globalThis.process?.env?.CODEX_PATH;
   const originalZotero = globalThis.Zotero;
 
@@ -43,10 +51,13 @@ describe("Codex app-server native client", function () {
     }
   }
 
-  function installMcpPreflightFetch(toolNames = ["query_library", "read_library"]) {
-    (
-      globalThis as typeof globalThis & { fetch: typeof fetch }
-    ).fetch = (async (_input: RequestInfo | URL, init?: RequestInit) => {
+  function installMcpPreflightFetch(
+    toolNames = ["query_library", "read_library"],
+  ) {
+    (globalThis as typeof globalThis & { fetch: typeof fetch }).fetch = (async (
+      _input: RequestInfo | URL,
+      init?: RequestInit,
+    ) => {
       const payload = JSON.parse(String(init?.body || "{}")) as {
         id?: string | number;
         method?: string;
@@ -94,6 +105,17 @@ describe("Codex app-server native client", function () {
     }) as typeof fetch;
   }
 
+  function makeSkill(id: string, instruction: string): AgentSkill {
+    return {
+      id,
+      description: `${id} description`,
+      version: 1,
+      patterns: [/native skill/i],
+      instruction,
+      source: "system",
+    };
+  }
+
   beforeEach(function () {
     (
       globalThis as typeof globalThis & { ztoolkit: { log: () => void } }
@@ -109,44 +131,78 @@ describe("Codex app-server native client", function () {
         delete globalThis.process.env.CODEX_PATH;
       }
     }
-    (
-      globalThis as typeof globalThis & { ChromeUtils?: unknown }
-    ).ChromeUtils = originalChromeUtils;
-    (
-      globalThis as typeof globalThis & { ztoolkit?: unknown }
-    ).ztoolkit = originalToolkit;
-    (
-      globalThis as typeof globalThis & { fetch?: typeof fetch }
-    ).fetch = originalFetch;
+    (globalThis as typeof globalThis & { ChromeUtils?: unknown }).ChromeUtils =
+      originalChromeUtils;
+    (globalThis as typeof globalThis & { ztoolkit?: unknown }).ztoolkit =
+      originalToolkit;
+    (globalThis as typeof globalThis & { fetch?: typeof fetch }).fetch =
+      originalFetch;
     (globalThis as typeof globalThis & { Zotero?: typeof Zotero }).Zotero =
       originalZotero;
-    destroyCachedCodexAppServerProcess("native-client-test");
-    destroyCachedCodexAppServerProcess("native-client-resume-test");
-    destroyCachedCodexAppServerProcess("native-client-approval-request-test");
-    destroyCachedCodexAppServerProcess("native-client-guardian-review-test");
-    destroyCachedCodexAppServerProcess("native-client-thread-reuse-test");
+    setUserSkills([]);
+    const mockCodexPath = { codexPath: "/mock/codex" };
+    destroyCachedCodexAppServerProcess(
+      "native-client-test",
+      undefined,
+      mockCodexPath,
+    );
+    destroyCachedCodexAppServerProcess(
+      "native-client-resume-test",
+      undefined,
+      mockCodexPath,
+    );
+    destroyCachedCodexAppServerProcess(
+      "native-client-approval-request-test",
+      undefined,
+      mockCodexPath,
+    );
+    destroyCachedCodexAppServerProcess(
+      "native-client-guardian-review-test",
+      undefined,
+      mockCodexPath,
+    );
+    destroyCachedCodexAppServerProcess(
+      "native-client-thread-reuse-test",
+      undefined,
+      mockCodexPath,
+    );
+    destroyCachedCodexAppServerProcess(
+      "native-client-skills-test",
+      undefined,
+      mockCodexPath,
+    );
+    destroyCachedCodexAppServerProcess(
+      "native-client-skills-fallback-test",
+      undefined,
+      mockCodexPath,
+    );
+    destroyCachedCodexAppServerProcess(
+      "codex_app_server_chat",
+      undefined,
+      mockCodexPath,
+    );
   });
 
   it("auto-approves trusted Zotero MCP approval prompts except self-confirmation", function () {
     const legacyReadDecision = resolveSafeCodexNativeApprovalRequest({
-        method: "tool/requestUserInput",
-        params: {
-          serverName: "llm_for_zotero_profile_1234",
-          toolName: "query_library",
-          questions: [{ header: "Allow", question: "Use query_library?" }],
-        },
-      });
+      method: "tool/requestUserInput",
+      params: {
+        serverName: "llm_for_zotero_profile_1234",
+        toolName: "query_library",
+        questions: [{ header: "Allow", question: "Use query_library?" }],
+      },
+    });
     assert.equal(legacyReadDecision?.approved, true);
     assert.deepEqual(legacyReadDecision?.response, { approved: true });
 
     const legacyWriteDecision = resolveSafeCodexNativeApprovalRequest({
-        method: "tool/requestUserInput",
-        params: {
-          serverName: "llm_for_zotero_profile_1234",
-          toolName: "edit_current_note",
-          questions: [{ header: "Allow", question: "Use edit_current_note?" }],
-        },
-      });
+      method: "tool/requestUserInput",
+      params: {
+        serverName: "llm_for_zotero_profile_1234",
+        toolName: "edit_current_note",
+        questions: [{ header: "Allow", question: "Use edit_current_note?" }],
+      },
+    });
     assert.equal(legacyWriteDecision?.approved, true);
     assert.deepEqual(legacyWriteDecision?.response, { approved: true });
 
@@ -197,13 +253,13 @@ describe("Codex app-server native client", function () {
     });
 
     const turnApprovalDecision = resolveSafeCodexNativeApprovalRequest({
-        method: "turn/approval/request",
-        params: {
-          serverName: "llm_for_zotero_profile_1234",
-          toolName: "edit_current_note",
-          message: "Allow llm_for_zotero to use edit_current_note?",
-        },
-      });
+      method: "turn/approval/request",
+      params: {
+        serverName: "llm_for_zotero_profile_1234",
+        toolName: "edit_current_note",
+        message: "Allow llm_for_zotero to use edit_current_note?",
+      },
+    });
     assert.equal(turnApprovalDecision?.approved, true);
     assert.deepEqual(turnApprovalDecision?.response, { approved: true });
 
@@ -306,9 +362,9 @@ describe("Codex app-server native client", function () {
     (
       globalThis as typeof globalThis & {
         ChromeUtils?: {
-          importESModule: (
-            path: string,
-          ) => { Subprocess: { call: () => Promise<unknown> } };
+          importESModule: (path: string) => {
+            Subprocess: { call: () => Promise<unknown> };
+          };
         };
       }
     ).ChromeUtils = {
@@ -376,7 +432,8 @@ describe("Codex app-server native client", function () {
                     const config = (threadStartParams?.config || {}) as {
                       mcp_servers?: Record<string, unknown>;
                     };
-                    mcpServerName = Object.keys(config.mcp_servers || {})[0] || "";
+                    mcpServerName =
+                      Object.keys(config.mcp_servers || {})[0] || "";
                     stdout.push(
                       `${JSON.stringify({ id: message.id, result: { thread: { id: "thread-native-1", source: "appServer" } } })}\n`,
                     );
@@ -436,7 +493,10 @@ describe("Codex app-server native client", function () {
       },
       model: "gpt-5.4",
       messages: [
-        { role: "system", content: "Document Context:\nImportant paper context." },
+        {
+          role: "system",
+          content: "Document Context:\nImportant paper context.",
+        },
         { role: "user", content: "Earlier question." },
         { role: "assistant", content: "Earlier answer." },
         { role: "user", content: "Latest question." },
@@ -489,10 +549,7 @@ describe("Codex app-server native client", function () {
     assert.match(Object.keys(servers)[0], /^llm_for_zotero_profile_/);
     const serverConfig = servers[Object.keys(servers)[0]];
     assert.equal(serverConfig.required, true);
-    assert.equal(
-      serverConfig.url,
-      "http://127.0.0.1:23119/llm-for-zotero/mcp",
-    );
+    assert.equal(serverConfig.url, "http://127.0.0.1:23119/llm-for-zotero/mcp");
     assert.equal(serverConfig.default_tools_approval_mode, "approve");
     assert.include(serverConfig.http_headers.Authorization, "Bearer ");
     assert.isString(serverConfig.http_headers[ZOTERO_MCP_SCOPE_HEADER]);
@@ -500,10 +557,7 @@ describe("Codex app-server native client", function () {
     assert.include(serverConfig.enabled_tools, "read_library");
     assert.include(serverConfig.enabled_tools, "edit_current_note");
     assert.notInclude(serverConfig.enabled_tools, "zotero_confirm_action");
-    assert.equal(
-      serverConfig.tools.edit_current_note.approval_mode,
-      "approve",
-    );
+    assert.equal(serverConfig.tools.edit_current_note.approval_mode, "approve");
     assert.equal(serverConfig.tools.query_library.approval_mode, "approve");
     assert.notProperty(serverConfig.tools, "zotero_confirm_action");
     assert.deepEqual(injectedItems, [
@@ -538,6 +592,397 @@ describe("Codex app-server native client", function () {
     assert.equal(result.diagnostics?.mcpServerName, Object.keys(servers)[0]);
   });
 
+  it("injects matched LLM-for-Zotero skills into native developer instructions", async function () {
+    let nativeThreadStartParams: Record<string, unknown> | null = null;
+    let mcpServerName = "";
+    const activatedSkillIds: string[] = [];
+    const prefStore = new Map<string, unknown>();
+    setUserSkills([makeSkill("write-note", "Use the write-note workflow.")]);
+
+    if (globalThis.process?.env) {
+      globalThis.process.env.CODEX_PATH = "/mock/codex";
+    }
+    (globalThis as typeof globalThis & { Zotero: typeof Zotero }).Zotero = {
+      ...(originalZotero || {}),
+      isWin: true,
+      Profile: { dir: "/tmp/zotero-native-client-profile-skills" },
+      Prefs: {
+        get: (key: string) => {
+          if (key === "httpServer.port") return 23119;
+          return prefStore.get(key);
+        },
+        set: (key: string, value: unknown) => {
+          prefStore.set(key, value);
+        },
+      },
+    } as typeof Zotero;
+    (
+      globalThis as typeof globalThis & {
+        ChromeUtils?: {
+          importESModule: (path: string) => {
+            Subprocess: { call: () => Promise<unknown> };
+          };
+        };
+      }
+    ).ChromeUtils = {
+      importESModule: () => ({
+        Subprocess: {
+          call: async () => {
+            const stdout = new MockStdout();
+            return {
+              stdout,
+              stdin: {
+                write: (chunk: string) => {
+                  for (const line of chunk.split("\n")) {
+                    if (!line.trim()) continue;
+                    const message = JSON.parse(line) as {
+                      id?: number;
+                      method?: string;
+                      params?: Record<string, unknown> & { input?: unknown };
+                    };
+                    if (!message.method || message.method === "initialized") {
+                      continue;
+                    }
+                    if (message.method === "initialize") {
+                      stdout.push(
+                        `${JSON.stringify({ id: message.id, result: {} })}\n`,
+                      );
+                      continue;
+                    }
+                    if (message.method === "thread/start") {
+                      if (message.params?.ephemeral === true) {
+                        stdout.push(
+                          `${JSON.stringify({ id: message.id, result: { id: "thread-classifier" } })}\n`,
+                        );
+                        continue;
+                      }
+                      nativeThreadStartParams = message.params || null;
+                      const config = (nativeThreadStartParams?.config ||
+                        {}) as {
+                        mcp_servers?: Record<string, unknown>;
+                      };
+                      mcpServerName =
+                        Object.keys(config.mcp_servers || {})[0] || "";
+                      stdout.push(
+                        `${JSON.stringify({ id: message.id, result: { thread: { id: "thread-skills", source: "appServer" } } })}\n`,
+                      );
+                      continue;
+                    }
+                    if (message.method === "thread/name/set") {
+                      stdout.push(
+                        `${JSON.stringify({ id: message.id, result: {} })}\n`,
+                      );
+                      continue;
+                    }
+                    if (message.method === "turn/start") {
+                      if (message.params?.threadId === "thread-classifier") {
+                        stdout.push(
+                          `${JSON.stringify({ id: message.id, result: { id: "turn-classifier" } })}\n`,
+                        );
+                        queueMicrotask(() => {
+                          stdout.push(
+                            `${JSON.stringify({ method: "item/agentMessage/delta", params: { turnId: "turn-classifier", delta: '{"skillIds":["write-note"]}' } })}\n`,
+                          );
+                          stdout.push(
+                            `${JSON.stringify({ method: "turn/completed", params: { turnId: "turn-classifier", status: "completed" } })}\n`,
+                          );
+                        });
+                        continue;
+                      }
+                      stdout.push(
+                        `${JSON.stringify({ id: message.id, result: { turn: { id: "turn-skills" } } })}\n`,
+                      );
+                      queueMicrotask(() => {
+                        stdout.push(
+                          `${JSON.stringify({ method: "item/agentMessage/delta", params: { turnId: "turn-skills", delta: "Done." } })}\n`,
+                        );
+                        stdout.push(
+                          `${JSON.stringify({ method: "turn/completed", params: { turnId: "turn-skills", status: "completed" } })}\n`,
+                        );
+                      });
+                      continue;
+                    }
+                    if (message.method === "thread/inject_items") {
+                      stdout.push(
+                        `${JSON.stringify({ id: message.id, result: {} })}\n`,
+                      );
+                      continue;
+                    }
+                    if (message.method === "config/read") {
+                      stdout.push(
+                        `${JSON.stringify({ id: message.id, result: { mcp_servers: mcpServerName ? { [mcpServerName]: { url: "http://127.0.0.1:23119/llm-for-zotero/mcp" } } : {} } })}\n`,
+                      );
+                      continue;
+                    }
+                    if (message.method === "mcpServerStatus/list") {
+                      stdout.push(
+                        `${JSON.stringify({ id: message.id, result: { servers: [{ name: mcpServerName, status: "ready", tools: [{ name: "query_library" }, { name: "read_library" }] }] } })}\n`,
+                      );
+                      continue;
+                    }
+                    if (message.method === "skills/list") {
+                      stdout.push(
+                        `${JSON.stringify({ id: message.id, result: { skills: [] } })}\n`,
+                      );
+                      continue;
+                    }
+                    if (message.method === "plugin/list") {
+                      stdout.push(
+                        `${JSON.stringify({ id: message.id, result: { plugins: [] } })}\n`,
+                      );
+                      continue;
+                    }
+                    if (message.method === "thread/read") {
+                      stdout.push(
+                        `${JSON.stringify({ id: message.id, result: { thread: { id: "thread-skills" }, turns: [{ id: "turn-skills" }] } })}\n`,
+                      );
+                      continue;
+                    }
+                    throw new Error(`unexpected method ${message.method}`);
+                  }
+                },
+              },
+              kill: () => undefined,
+            };
+          },
+        },
+      }),
+    };
+
+    const result = await runCodexAppServerNativeTurn({
+      processKey: "native-client-skills-test",
+      codexPath: "/mock/codex",
+      scope: {
+        conversationKey: 6_000_000_010,
+        libraryID: 1,
+        kind: "global",
+        title: "Write note",
+      },
+      model: "gpt-5.4",
+      messages: [{ role: "user", content: "Use native skill guidance." }],
+      hooks: {
+        loadProviderSessionId: async () => undefined,
+        persistProviderSessionId: async () => undefined,
+      },
+      onSkillActivated: (skillId) => {
+        activatedSkillIds.push(skillId);
+      },
+    });
+
+    const developerInstructions = String(
+      nativeThreadStartParams?.developerInstructions || "",
+    );
+    assert.equal(result.text, "Done.");
+    assert.deepEqual(activatedSkillIds, ["write-note"]);
+    assert.deepEqual(result.diagnostics?.skillIds, ["write-note"]);
+    assert.include(developerInstructions, "Zotero environment for this turn");
+    assert.include(
+      developerInstructions,
+      "LLM-for-Zotero skills active for this turn",
+    );
+    assert.include(developerInstructions, "Skill: write-note");
+    assert.include(developerInstructions, "Use the write-note workflow.");
+  });
+
+  it("keeps skill guidance in visible context when developer instructions are unsupported", async function () {
+    let rejectedDeveloperInstructions = false;
+    let nativeTurnInput: unknown = null;
+    let mcpServerName = "";
+    const prefStore = new Map<string, unknown>();
+    setUserSkills([makeSkill("write-note", "Use the write-note workflow.")]);
+
+    if (globalThis.process?.env) {
+      globalThis.process.env.CODEX_PATH = "/mock/codex";
+    }
+    (globalThis as typeof globalThis & { Zotero: typeof Zotero }).Zotero = {
+      ...(originalZotero || {}),
+      isWin: true,
+      Profile: { dir: "/tmp/zotero-native-client-profile-skills-fallback" },
+      Prefs: {
+        get: (key: string) => {
+          if (key === "httpServer.port") return 23119;
+          return prefStore.get(key);
+        },
+        set: (key: string, value: unknown) => {
+          prefStore.set(key, value);
+        },
+      },
+    } as typeof Zotero;
+    (
+      globalThis as typeof globalThis & {
+        ChromeUtils?: {
+          importESModule: (path: string) => {
+            Subprocess: { call: () => Promise<unknown> };
+          };
+        };
+      }
+    ).ChromeUtils = {
+      importESModule: () => ({
+        Subprocess: {
+          call: async () => {
+            const stdout = new MockStdout();
+            return {
+              stdout,
+              stdin: {
+                write: (chunk: string) => {
+                  for (const line of chunk.split("\n")) {
+                    if (!line.trim()) continue;
+                    const message = JSON.parse(line) as {
+                      id?: number;
+                      method?: string;
+                      params?: Record<string, unknown> & { input?: unknown };
+                    };
+                    if (!message.method || message.method === "initialized") {
+                      continue;
+                    }
+                    if (message.method === "initialize") {
+                      stdout.push(
+                        `${JSON.stringify({ id: message.id, result: {} })}\n`,
+                      );
+                      continue;
+                    }
+                    if (message.method === "thread/start") {
+                      if (message.params?.ephemeral === true) {
+                        stdout.push(
+                          `${JSON.stringify({ id: message.id, result: { id: "thread-classifier-fallback" } })}\n`,
+                        );
+                        continue;
+                      }
+                      if (
+                        message.params?.developerInstructions &&
+                        !rejectedDeveloperInstructions
+                      ) {
+                        rejectedDeveloperInstructions = true;
+                        stdout.push(
+                          `${JSON.stringify({ id: message.id, error: { code: -32602, message: "Invalid params: unknown field developerInstructions" } })}\n`,
+                        );
+                        continue;
+                      }
+                      const config = (message.params?.config || {}) as {
+                        mcp_servers?: Record<string, unknown>;
+                      };
+                      mcpServerName =
+                        Object.keys(config.mcp_servers || {})[0] || "";
+                      stdout.push(
+                        `${JSON.stringify({ id: message.id, result: { thread: { id: "thread-skills-fallback", source: "appServer" } } })}\n`,
+                      );
+                      continue;
+                    }
+                    if (message.method === "thread/name/set") {
+                      stdout.push(
+                        `${JSON.stringify({ id: message.id, result: {} })}\n`,
+                      );
+                      continue;
+                    }
+                    if (message.method === "turn/start") {
+                      if (
+                        message.params?.threadId ===
+                        "thread-classifier-fallback"
+                      ) {
+                        stdout.push(
+                          `${JSON.stringify({ id: message.id, result: { id: "turn-classifier-fallback" } })}\n`,
+                        );
+                        queueMicrotask(() => {
+                          stdout.push(
+                            `${JSON.stringify({ method: "item/agentMessage/delta", params: { turnId: "turn-classifier-fallback", delta: '{"skillIds":["write-note"]}' } })}\n`,
+                          );
+                          stdout.push(
+                            `${JSON.stringify({ method: "turn/completed", params: { turnId: "turn-classifier-fallback", status: "completed" } })}\n`,
+                          );
+                        });
+                        continue;
+                      }
+                      nativeTurnInput = message.params?.input ?? null;
+                      stdout.push(
+                        `${JSON.stringify({ id: message.id, result: { turn: { id: "turn-skills-fallback" } } })}\n`,
+                      );
+                      queueMicrotask(() => {
+                        stdout.push(
+                          `${JSON.stringify({ method: "item/agentMessage/delta", params: { turnId: "turn-skills-fallback", delta: "Done." } })}\n`,
+                        );
+                        stdout.push(
+                          `${JSON.stringify({ method: "turn/completed", params: { turnId: "turn-skills-fallback", status: "completed" } })}\n`,
+                        );
+                      });
+                      continue;
+                    }
+                    if (message.method === "thread/inject_items") {
+                      stdout.push(
+                        `${JSON.stringify({ id: message.id, result: {} })}\n`,
+                      );
+                      continue;
+                    }
+                    if (message.method === "config/read") {
+                      stdout.push(
+                        `${JSON.stringify({ id: message.id, result: { mcp_servers: mcpServerName ? { [mcpServerName]: { url: "http://127.0.0.1:23119/llm-for-zotero/mcp" } } : {} } })}\n`,
+                      );
+                      continue;
+                    }
+                    if (message.method === "mcpServerStatus/list") {
+                      stdout.push(
+                        `${JSON.stringify({ id: message.id, result: { servers: [{ name: mcpServerName, status: "ready", tools: [{ name: "query_library" }, { name: "read_library" }] }] } })}\n`,
+                      );
+                      continue;
+                    }
+                    if (message.method === "skills/list") {
+                      stdout.push(
+                        `${JSON.stringify({ id: message.id, result: { skills: [] } })}\n`,
+                      );
+                      continue;
+                    }
+                    if (message.method === "plugin/list") {
+                      stdout.push(
+                        `${JSON.stringify({ id: message.id, result: { plugins: [] } })}\n`,
+                      );
+                      continue;
+                    }
+                    if (message.method === "thread/read") {
+                      stdout.push(
+                        `${JSON.stringify({ id: message.id, result: { thread: { id: "thread-skills-fallback" }, turns: [{ id: "turn-skills-fallback" }] } })}\n`,
+                      );
+                      continue;
+                    }
+                    throw new Error(`unexpected method ${message.method}`);
+                  }
+                },
+              },
+              kill: () => undefined,
+            };
+          },
+        },
+      }),
+    };
+
+    const result = await runCodexAppServerNativeTurn({
+      processKey: "native-client-skills-fallback-test",
+      codexPath: "/mock/codex",
+      scope: {
+        conversationKey: 6_000_000_011,
+        libraryID: 1,
+        kind: "global",
+        title: "Write note",
+      },
+      model: "gpt-5.4",
+      messages: [{ role: "user", content: "Use native skill guidance." }],
+      hooks: {
+        loadProviderSessionId: async () => undefined,
+        persistProviderSessionId: async () => undefined,
+      },
+    });
+
+    const textInput = (nativeTurnInput as Array<Record<string, unknown>>).find(
+      (part) => part.type === "text",
+    );
+    const text = String(textInput?.text || "");
+    assert.equal(result.text, "Done.");
+    assert.isTrue(rejectedDeveloperInstructions);
+    assert.include(text, "Zotero context for this turn");
+    assert.include(text, "LLM-for-Zotero skills active for this turn");
+    assert.include(text, "Skill: write-note");
+    assert.include(text, "Use the write-note workflow.");
+    assert.include(text, "User request:");
+  });
+
   it("resumes stored native threads without reinjecting mirrored history", async function () {
     const stdout = new MockStdout();
     const methods: string[] = [];
@@ -568,9 +1013,9 @@ describe("Codex app-server native client", function () {
     (
       globalThis as typeof globalThis & {
         ChromeUtils?: {
-          importESModule: (
-            path: string,
-          ) => { Subprocess: { call: () => Promise<unknown> } };
+          importESModule: (path: string) => {
+            Subprocess: { call: () => Promise<unknown> };
+          };
         };
       }
     ).ChromeUtils = {
@@ -638,7 +1083,8 @@ describe("Codex app-server native client", function () {
                     const config = (resumeParams?.config || {}) as {
                       mcp_servers?: Record<string, unknown>;
                     };
-                    mcpServerName = Object.keys(config.mcp_servers || {})[0] || "";
+                    mcpServerName =
+                      Object.keys(config.mcp_servers || {})[0] || "";
                     stdout.push(
                       `${JSON.stringify({ id: message.id, result: { thread: { id: "thread-native-1", source: "appServer" } } })}\n`,
                     );
@@ -785,9 +1231,9 @@ describe("Codex app-server native client", function () {
     (
       globalThis as typeof globalThis & {
         ChromeUtils?: {
-          importESModule: (
-            path: string,
-          ) => { Subprocess: { call: () => Promise<unknown> } };
+          importESModule: (path: string) => {
+            Subprocess: { call: () => Promise<unknown> };
+          };
         };
       }
     ).ChromeUtils = {
@@ -862,7 +1308,8 @@ describe("Codex app-server native client", function () {
                     const config = (message.params?.config || {}) as {
                       mcp_servers?: Record<string, unknown>;
                     };
-                    mcpServerName = Object.keys(config.mcp_servers || {})[0] || "";
+                    mcpServerName =
+                      Object.keys(config.mcp_servers || {})[0] || "";
                     stdout.push(
                       `${JSON.stringify({ id: message.id, result: { thread: { id: "thread-approval", source: "appServer" } } })}\n`,
                     );
@@ -880,7 +1327,34 @@ describe("Codex app-server native client", function () {
                     );
                     queueMicrotask(() => {
                       stdout.push(
-                        `${JSON.stringify({ id: 900, method: "item/tool/requestUserInput", params: { turnId: "turn-approval", itemId: "tool-approval-1", serverName: mcpServerName, toolName: "edit_current_note", questions: [{ id: "allow", header: "Allow", question: "Allow llm_for_zotero to use edit_current_note?", options: [{ label: "Allow", description: "Allow trusted access." }, { label: "Deny", description: "Deny access." }] }] } })}\n`,
+                        `${JSON.stringify({
+                          id: 900,
+                          method: "item/tool/requestUserInput",
+                          params: {
+                            turnId: "turn-approval",
+                            itemId: "tool-approval-1",
+                            serverName: mcpServerName,
+                            toolName: "edit_current_note",
+                            questions: [
+                              {
+                                id: "allow",
+                                header: "Allow",
+                                question:
+                                  "Allow llm_for_zotero to use edit_current_note?",
+                                options: [
+                                  {
+                                    label: "Allow",
+                                    description: "Allow trusted access.",
+                                  },
+                                  {
+                                    label: "Deny",
+                                    description: "Deny access.",
+                                  },
+                                ],
+                              },
+                            ],
+                          },
+                        })}\n`,
                       );
                     });
                     continue;
@@ -954,9 +1428,9 @@ describe("Codex app-server native client", function () {
     (
       globalThis as typeof globalThis & {
         ChromeUtils?: {
-          importESModule: (
-            path: string,
-          ) => { Subprocess: { call: () => Promise<unknown> } };
+          importESModule: (path: string) => {
+            Subprocess: { call: () => Promise<unknown> };
+          };
         };
       }
     ).ChromeUtils = {
@@ -1011,7 +1485,8 @@ describe("Codex app-server native client", function () {
                     const config = (message.params?.config || {}) as {
                       mcp_servers?: Record<string, unknown>;
                     };
-                    mcpServerName = Object.keys(config.mcp_servers || {})[0] || "";
+                    mcpServerName =
+                      Object.keys(config.mcp_servers || {})[0] || "";
                     stdout.push(
                       `${JSON.stringify({ id: message.id, result: { thread: { id: "thread-guardian", source: "appServer" } } })}\n`,
                     );
@@ -1091,13 +1566,16 @@ describe("Codex app-server native client", function () {
     assert.equal(result.text, "Created the item note.");
     assert.include(methods, "thread/approveGuardianDeniedAction");
     assert.equal(guardianApprovalParams?.threadId, "thread-guardian");
-    assert.deepInclude(guardianApprovalParams?.event as Record<string, unknown>, {
-      target_item_id: "tool-1",
-      risk_level: "medium",
-      user_authorization: "low",
-      rationale: "MCP write tool requires approval.",
-      decision_source: "agent",
-    });
+    assert.deepInclude(
+      guardianApprovalParams?.event as Record<string, unknown>,
+      {
+        target_item_id: "tool-1",
+        risk_level: "medium",
+        user_authorization: "low",
+        rationale: "MCP write tool requires approval.",
+        decision_source: "agent",
+      },
+    );
     assert.deepEqual(
       (guardianApprovalParams?.event as { action?: unknown }).action,
       {
@@ -1139,9 +1617,9 @@ describe("Codex app-server native client", function () {
     (
       globalThis as typeof globalThis & {
         ChromeUtils?: {
-          importESModule: (
-            path: string,
-          ) => { Subprocess: { call: () => Promise<unknown> } };
+          importESModule: (path: string) => {
+            Subprocess: { call: () => Promise<unknown> };
+          };
         };
       }
     ).ChromeUtils = {
@@ -1196,7 +1674,8 @@ describe("Codex app-server native client", function () {
                     const config = (message.params?.config || {}) as {
                       mcp_servers?: Record<string, unknown>;
                     };
-                    mcpServerName = Object.keys(config.mcp_servers || {})[0] || "";
+                    mcpServerName =
+                      Object.keys(config.mcp_servers || {})[0] || "";
                     stdout.push(
                       `${JSON.stringify({ id: message.id, result: { thread: { id: "thread-reuse", source: "appServer" } } })}\n`,
                     );
@@ -1277,8 +1756,14 @@ describe("Codex app-server native client", function () {
     assert.equal(second.threadId, "thread-reuse");
     assert.equal(first.resumed, false);
     assert.equal(second.resumed, true);
-    assert.equal(methods.filter((method) => method === "thread/start").length, 1);
-    assert.equal(methods.filter((method) => method === "thread/resume").length, 1);
+    assert.equal(
+      methods.filter((method) => method === "thread/start").length,
+      1,
+    );
+    assert.equal(
+      methods.filter((method) => method === "thread/resume").length,
+      1,
+    );
   });
 
   it("aborts native turns before model generation when required MCP tools are missing", async function () {
@@ -1308,9 +1793,9 @@ describe("Codex app-server native client", function () {
     (
       globalThis as typeof globalThis & {
         ChromeUtils?: {
-          importESModule: (
-            path: string,
-          ) => { Subprocess: { call: () => Promise<unknown> } };
+          importESModule: (path: string) => {
+            Subprocess: { call: () => Promise<unknown> };
+          };
         };
       }
     ).ChromeUtils = {
@@ -1341,7 +1826,8 @@ describe("Codex app-server native client", function () {
                     const config = (message.params?.config || {}) as {
                       mcp_servers?: Record<string, unknown>;
                     };
-                    mcpServerName = Object.keys(config.mcp_servers || {})[0] || "";
+                    mcpServerName =
+                      Object.keys(config.mcp_servers || {})[0] || "";
                     stdout.push(
                       `${JSON.stringify({ id: message.id, result: { thread: { id: "thread-native-missing", source: "appServer" } } })}\n`,
                     );

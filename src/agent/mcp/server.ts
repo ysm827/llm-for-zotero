@@ -90,6 +90,11 @@ const MCP_SCOPE_ARG_NAMES = new Set([
   "activeContextItemID",
 ]);
 const CODEX_MCP_TOOL_APPROVAL_MODE = "approve";
+const MCP_TOOLS_WITH_OWN_CONFIRMATION_POLICY = new Set([
+  "run_command",
+  "file_io",
+  "zotero_script",
+]);
 
 export type ZoteroMcpActiveScope = {
   profileSignature?: string;
@@ -991,7 +996,8 @@ async function handleToolsCall(
       createToolContext(rawArgs, headers),
       {
         forceConfirmation:
-          tool.spec.mutability === "write" && name !== "zotero_script",
+          tool.spec.mutability === "write" &&
+          !MCP_TOOLS_WITH_OWN_CONFIRMATION_POLICY.has(name),
       },
     );
 
