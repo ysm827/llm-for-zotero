@@ -632,6 +632,7 @@ export type PreparedToolExecutionResult = {
 
 export type PreparedToolExecutionOptions = {
   inheritedApproval?: AgentInheritedApproval;
+  forceConfirmation?: boolean;
 };
 
 export type PreparedToolExecution =

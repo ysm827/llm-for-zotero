@@ -1,5 +1,6 @@
 import { assert } from "chai";
 import {
+  addZoteroMcpConfirmationHandler,
   addZoteroMcpToolActivityObserver,
   getOrCreateZoteroMcpBearerToken,
   getZoteroMcpServerUrl,
@@ -126,7 +127,7 @@ describe("Zotero MCP server", function () {
     assert.equal(payload.result.protocolVersion, "2025-06-18");
   });
 
-  it("lists only curated read tools plus the confirmation tool", async function () {
+  it("lists curated read tools and built-in write tools without self-confirmation", async function () {
     const registry = new AgentToolRegistry();
     registry.register(createReadTool("query_library"));
     registry.register(createWriteTool("apply_tags"));
@@ -144,7 +145,7 @@ describe("Zotero MCP server", function () {
     const names = payload.result.tools.map(
       (tool: { name: string }) => tool.name,
     );
-    assert.deepEqual(names.sort(), ["query_library", "zotero_confirm_action"]);
+    assert.deepEqual(names.sort(), ["apply_tags", "query_library"]);
     const queryTool = payload.result.tools.find(
       (tool: { name: string }) => tool.name === "query_library",
     );
@@ -159,14 +160,18 @@ describe("Zotero MCP server", function () {
       queryTool.inputSchema.properties.activeContextItemId.type,
       "number",
     );
-    const confirmTool = payload.result.tools.find(
-      (tool: { name: string }) => tool.name === "zotero_confirm_action",
+    const writeTool = payload.result.tools.find(
+      (tool: { name: string }) => tool.name === "apply_tags",
     );
-    assert.deepEqual(confirmTool.annotations, {
+    assert.deepEqual(writeTool.annotations, {
       readOnlyHint: false,
       openWorldHint: false,
-      destructiveHint: false,
+      destructiveHint: true,
     });
+    assert.include(
+      writeTool.description,
+      "Write operations pause in Zotero for user review",
+    );
   });
 
   it("accepts the MCP initialized notification without a JSON-RPC response", async function () {
@@ -496,7 +501,7 @@ describe("Zotero MCP server", function () {
     }
   });
 
-  it("returns confirmation_required and executes only via zotero_confirm_action", async function () {
+  it("routes pending MCP confirmations through the registered Zotero UI handler", async function () {
     const registry = new AgentToolRegistry();
     registry.register({
       spec: {
@@ -520,46 +525,228 @@ describe("Zotero MCP server", function () {
       toolRegistry: registry,
       zoteroGateway: {} as never,
     });
-
-    const token = getOrCreateZoteroMcpBearerToken();
-    const first = await invokeMcpEndpoint({
-      token,
-      body: {
-        jsonrpc: "2.0",
-        id: 1,
-        method: "tools/call",
-        params: {
-          name: "read_attachment",
-          arguments: { attachFile: true },
-        },
+    const scoped = registerScopedZoteroMcpScope(
+      {
+        profileSignature: "profile-dev",
+        conversationKey: 123,
+        libraryID: 1,
+        kind: "global",
       },
-    });
-    const firstPayload = JSON.parse(first[2]);
-    const pending = JSON.parse(firstPayload.result.content[0].text);
-    assert.equal(pending.type, "confirmation_required");
-    assert.isString(pending.requestId);
+      { token: "confirm-scope-token" },
+    );
+    const requests: Array<{ requestId: string; toolName: string }> = [];
+    const clearHandler = addZoteroMcpConfirmationHandler(
+      {
+        profileSignature: "profile-dev",
+        conversationKey: 123,
+      },
+      async (request) => {
+        requests.push({
+          requestId: request.requestId,
+          toolName: request.toolName,
+        });
+        return { approved: true };
+      },
+    );
 
-    const second = await invokeMcpEndpoint({
-      token,
-      body: {
-        jsonrpc: "2.0",
-        id: 2,
-        method: "tools/call",
-        params: {
-          name: "zotero_confirm_action",
-          arguments: {
-            requestId: pending.requestId,
-            approved: true,
+    try {
+      const response = await invokeMcpEndpoint({
+        token: getOrCreateZoteroMcpBearerToken(),
+        headers: { [ZOTERO_MCP_SCOPE_HEADER]: scoped.token },
+        body: {
+          jsonrpc: "2.0",
+          id: 1,
+          method: "tools/call",
+          params: {
+            name: "read_attachment",
+            arguments: { attachFile: true },
           },
         },
+      });
+      const payload = JSON.parse(response[2]);
+      const content = JSON.parse(payload.result.content[0].text);
+      assert.equal(content.ok, true);
+      assert.deepEqual(content.result, {
+        delivered: true,
+        input: { attachFile: true },
+      });
+      assert.deepEqual(requests.map((entry) => entry.toolName), [
+        "read_attachment",
+      ]);
+    } finally {
+      clearHandler();
+      scoped.clear();
+    }
+  });
+
+  it("forces write tools through Zotero UI approval and does not execute denied writes", async function () {
+    let executeCount = 0;
+    const registry = new AgentToolRegistry();
+    registry.register({
+      spec: {
+        name: "apply_tags",
+        description: "Apply tags",
+        inputSchema: { type: "object", additionalProperties: true },
+        mutability: "write",
+        requiresConfirmation: false,
+      },
+      validate: (args) => ({ ok: true, value: args ?? {} }),
+      createPendingAction: async () => ({
+        toolName: "apply_tags",
+        title: "Apply Tags",
+        confirmLabel: "Apply",
+        cancelLabel: "Cancel",
+        fields: [],
+      }),
+      execute: async () => {
+        executeCount += 1;
+        return { applied: true };
       },
     });
-    const secondPayload = JSON.parse(second[2]);
-    const content = JSON.parse(secondPayload.result.content[0].text);
-    assert.equal(content.ok, true);
-    assert.deepEqual(content.result, {
-      delivered: true,
-      input: { attachFile: true },
+    registerMcpServer({
+      toolRegistry: registry,
+      zoteroGateway: {} as never,
     });
+    const scoped = registerScopedZoteroMcpScope(
+      {
+        profileSignature: "profile-dev",
+        conversationKey: 456,
+        libraryID: 1,
+        kind: "global",
+      },
+      { token: "deny-scope-token" },
+    );
+    const clearHandler = addZoteroMcpConfirmationHandler(
+      {
+        profileSignature: "profile-dev",
+        conversationKey: 456,
+      },
+      async () => ({ approved: false }),
+    );
+
+    try {
+      const response = await invokeMcpEndpoint({
+        token: getOrCreateZoteroMcpBearerToken(),
+        headers: { [ZOTERO_MCP_SCOPE_HEADER]: scoped.token },
+        body: {
+          jsonrpc: "2.0",
+          id: 1,
+          method: "tools/call",
+          params: {
+            name: "apply_tags",
+            arguments: { itemIds: [1], tags: ["memory"] },
+          },
+        },
+      });
+      const payload = JSON.parse(response[2]);
+      const content = JSON.parse(payload.result.content[0].text);
+      assert.equal(payload.result.isError, true);
+      assert.equal(content.ok, false);
+      assert.equal(content.result.error, "User denied action");
+      assert.equal(executeCount, 0);
+    } finally {
+      clearHandler();
+      scoped.clear();
+    }
+  });
+
+  it("creates standalone notes through the edit_current_note review card path", async function () {
+    const registry = new AgentToolRegistry();
+    registry.register({
+      spec: {
+        name: "edit_current_note",
+        description: "Edit or create notes",
+        inputSchema: { type: "object", additionalProperties: true },
+        mutability: "write",
+        requiresConfirmation: false,
+      },
+      validate: (args) => ({ ok: true, value: args ?? {} }),
+      createPendingAction: async (input) => {
+        const record = input as Record<string, unknown>;
+        return {
+          toolName: "edit_current_note",
+          mode: "review",
+          title: "Review new note",
+          description:
+            "Review the note content before creating a standalone note.",
+          confirmLabel: "Create note",
+          cancelLabel: "Cancel",
+          fields: [
+            {
+              type: "textarea",
+              id: "content",
+              label: "Final note content",
+              value: String(record.content || ""),
+            },
+          ],
+        };
+      },
+      execute: async (input) => ({
+        status: "created",
+        noteId: 99,
+        target: (input as { target?: unknown }).target,
+        noteContent: (input as { content?: unknown }).content,
+      }),
+    });
+    registerMcpServer({
+      toolRegistry: registry,
+      zoteroGateway: {} as never,
+    });
+    const scoped = registerScopedZoteroMcpScope(
+      {
+        profileSignature: "profile-dev",
+        conversationKey: 789,
+        libraryID: 1,
+        kind: "global",
+      },
+      { token: "note-scope-token" },
+    );
+    const clearHandler = addZoteroMcpConfirmationHandler(
+      {
+        profileSignature: "profile-dev",
+        conversationKey: 789,
+      },
+      async (request) => {
+        assert.equal(request.action.title, "Review new note");
+        return {
+          approved: true,
+          data: {
+            content: "Approved standalone note",
+          },
+        };
+      },
+    );
+
+    try {
+      const response = await invokeMcpEndpoint({
+        token: getOrCreateZoteroMcpBearerToken(),
+        headers: { [ZOTERO_MCP_SCOPE_HEADER]: scoped.token },
+        body: {
+          jsonrpc: "2.0",
+          id: 1,
+          method: "tools/call",
+          params: {
+            name: "edit_current_note",
+            arguments: {
+              mode: "create",
+              target: "standalone",
+              content: "Draft standalone note",
+            },
+          },
+        },
+      });
+      const payload = JSON.parse(response[2]);
+      const content = JSON.parse(payload.result.content[0].text);
+      assert.equal(content.ok, true);
+      assert.deepEqual(content.result, {
+        status: "created",
+        noteId: 99,
+        target: "standalone",
+        noteContent: "Draft standalone note",
+      });
+    } finally {
+      clearHandler();
+      scoped.clear();
+    }
   });
 });

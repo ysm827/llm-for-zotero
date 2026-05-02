@@ -19,7 +19,6 @@ import {
 import { loadClaudeConversation } from "../../claudeCode/store";
 import {
   appendCodexMessage,
-  clearCodexConversationSessionMetadata,
   deleteCodexTurnMessages,
   loadCodexConversation,
   pruneCodexConversation,
@@ -51,7 +50,7 @@ import {
   isCodexAppServerModeEnabled,
 } from "../../codexAppServer/prefs";
 import {
-  resolveSafeCodexNativeApprovalRequest,
+  resolveCodexNativeApprovalRequest,
   runCodexAppServerNativeTurn,
   type CodexNativeConversationScope,
   type CodexNativeDiagnostics,
@@ -195,7 +194,7 @@ import { readNoteSnapshot } from "./noteSnapshot";
 import { extractManagedBlobHash } from "./attachmentStorage";
 import { buildContextPlanSystemMessages } from "./requestSystemMessages";
 import { canEditUserPromptTurn } from "./editability";
-import { renderAgentTrace } from "./agentTrace/render";
+import { renderAgentTrace, renderPendingActionCard } from "./agentTrace/render";
 import { toFileUrl } from "../../utils/pathFileUrl";
 import { replaceOwnerAttachmentRefs } from "../../utils/attachmentRefStore";
 import { decorateAssistantCitationLinks } from "./assistantCitationLinks";
@@ -203,7 +202,7 @@ import {
   getMessageCitationPaperContexts,
   mergeCitationPaperContexts,
 } from "./citationContexts";
-import { getCoreAgentRuntime } from "../../agent/index";
+import { getAgentApi, getCoreAgentRuntime } from "../../agent/index";
 import { getClaudeReasoningModePref } from "../../claudeCode/prefs";
 import { getAgentRunTrace } from "../../agent/store/traceStore";
 import {
@@ -212,7 +211,9 @@ import {
   clearConversationSummary,
 } from "./conversationSummaryCache";
 import type {
+  AgentConfirmationResolution,
   AgentEvent,
+  AgentPendingAction,
   AgentRunEventRecord,
   AgentRuntimeRequest,
 } from "../../agent/types";
@@ -1484,6 +1485,147 @@ function getPanelRequestUI(body: Element): PanelRequestUI {
   };
 }
 
+function syncInlineActionCardAttr(body: Element): void {
+  const panelRoot = body.querySelector("#llm-main") as HTMLElement | null;
+  if (!panelRoot) return;
+  const hasCard = Boolean(
+    body.querySelector(".llm-action-inline-card, .llm-action-progress-card"),
+  );
+  if (hasCard) {
+    panelRoot.dataset.hasActionCard = "true";
+  } else {
+    delete panelRoot.dataset.hasActionCard;
+  }
+}
+
+function findNativeMcpActionCard(
+  chatBox: HTMLElement,
+  requestId: string,
+): HTMLElement | null {
+  const cards = Array.from(
+    chatBox.querySelectorAll(
+      ".llm-agent-hitl-card[data-request-id], .llm-action-inline-card[data-request-id]",
+    ),
+  ) as HTMLElement[];
+  return cards.find((card) => card.dataset.requestId === requestId) || null;
+}
+
+function scrollNativeMcpActionCardIntoView(
+  chatBox: HTMLElement,
+  card: HTMLElement,
+): void {
+  const scroll = () => {
+    try {
+      card.scrollIntoView({ block: "end" });
+    } catch {
+      // Older Zotero runtimes can be picky about scrollIntoView options.
+    }
+    chatBox.scrollTop = chatBox.scrollHeight;
+  };
+  scroll();
+  const view = chatBox.ownerDocument?.defaultView;
+  view?.requestAnimationFrame?.(scroll);
+  view?.setTimeout(scroll, 80);
+}
+
+function closeNativeMcpActionCard(body: Element, requestId?: string): void {
+  const ui = getPanelRequestUI(body);
+  const chatBox = ui.chatBox;
+  if (!chatBox) return;
+  let card: Element | null = null;
+  if (requestId) {
+    card =
+      findNativeMcpActionCard(chatBox, requestId) ||
+      (
+        Array.from(
+          chatBox.querySelectorAll(".llm-action-inline-card"),
+        ) as HTMLElement[]
+      ).find((entry) => entry.dataset.requestId === requestId) ||
+      null;
+  } else {
+    card = chatBox.querySelector(".llm-action-inline-card");
+  }
+  card?.remove();
+  syncInlineActionCardAttr(body);
+}
+
+function showNativeMcpActionCard(
+  body: Element,
+  requestId: string,
+  action: AgentPendingAction,
+): Promise<AgentConfirmationResolution> {
+  return new Promise((resolve) => {
+    ztoolkit.log("Codex app-server native MCP confirmation requested", {
+      requestId,
+      toolName: action.toolName,
+      mode: action.mode || "approval",
+      title: action.title,
+    });
+    const ui = getPanelRequestUI(body);
+    const ownerDoc = body.ownerDocument;
+    if (!ownerDoc || !ui.chatBox) {
+      ztoolkit.log("Codex app-server native MCP confirmation unavailable", {
+        requestId,
+        reason: "missing_panel_review_card_ui",
+      });
+      throw new Error(
+        "Zotero review card UI is unavailable for native MCP confirmation.",
+      );
+    }
+
+    try {
+      getAgentApi().registerPendingConfirmation(requestId, (resolution) => {
+        ztoolkit.log("Codex app-server native MCP confirmation resolved", {
+          requestId,
+          approved: resolution.approved,
+          actionId: resolution.actionId,
+        });
+        closeNativeMcpActionCard(body, requestId);
+        resolve(resolution);
+      });
+    } catch (error) {
+      ztoolkit.log("Codex app-server native MCP confirmation unavailable", {
+        requestId,
+        reason: error instanceof Error ? error.message : String(error),
+      });
+      throw new Error(
+        `Zotero review card UI could not register native MCP confirmation: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+    }
+
+    const renderedCard = findNativeMcpActionCard(ui.chatBox, requestId);
+    if (renderedCard) {
+      scrollNativeMcpActionCardIntoView(ui.chatBox, renderedCard);
+      syncInlineActionCardAttr(body);
+      ztoolkit.log("Codex app-server native MCP confirmation rendered", {
+        requestId,
+        toolName: action.toolName,
+        mode: action.mode || "approval",
+        source: "trace",
+      });
+      return;
+    }
+    ui.chatBox.querySelector(".llm-action-inline-card")?.remove();
+    const wrapper = ownerDoc.createElement("div");
+    wrapper.className = "llm-action-inline-card";
+    wrapper.dataset.requestId = requestId;
+    wrapper.appendChild(
+      renderPendingActionCard(ownerDoc, { requestId, action }),
+    );
+    ui.chatBox.appendChild(wrapper);
+    scrollNativeMcpActionCardIntoView(ui.chatBox, wrapper);
+    syncInlineActionCardAttr(body);
+    ztoolkit.log("Codex app-server native MCP confirmation rendered", {
+      requestId,
+      toolName: action.toolName,
+      mode: action.mode || "approval",
+      source: "inline",
+    });
+  });
+}
+
 function isPanelWebChatMode(body: Element): boolean {
   return (
     (body.querySelector("#llm-main") as HTMLElement | null)?.dataset
@@ -2319,6 +2461,7 @@ type CodexNativeTraceItemEvent = {
   role?: string;
   summary?: string;
   details?: string;
+  error?: string;
   name?: string;
   toolName?: string;
   title?: string;
@@ -2340,6 +2483,7 @@ type CodexNativeMcpToolActivityEvent = {
   serverName?: string;
   arguments?: unknown;
   ok?: boolean;
+  error?: string;
 };
 
 function isCodexNativeAgentMessageItem(
@@ -2680,6 +2824,14 @@ function createCodexNativeActivityTraceController(
     if (isCodexNativeToolItem(event)) {
       const itemId =
         sanitizeText(event.id || "").trim() || `codex-tool-${phase}-${seq + 1}`;
+      const failureText = compactCodexNativeTraceLine(
+        event.error || event.summary || event.details || "",
+      );
+      const failed =
+        Boolean(event.error) ||
+        /failed|error|cancelled|denied|rejected/i.test(
+          sanitizeText(event.summary || event.details || ""),
+        );
       const updatedItemId = upsertToolActivity({
         itemId,
         phase,
@@ -2687,12 +2839,8 @@ function createCodexNativeActivityTraceController(
         toolLabel: resolveCodexNativeToolLabel(event),
         serverName: resolveCodexNativeToolServerName(event),
         args: resolveCodexNativeToolArguments(event),
-        ok:
-          phase === "completed"
-            ? !/failed|error|cancelled/i.test(
-                sanitizeText(event.summary || event.details || ""),
-              )
-            : undefined,
+        ok: phase === "completed" ? !failed : undefined,
+        text: phase === "completed" && failed ? failureText : undefined,
       });
       if (updatedItemId) sync();
       return;
@@ -2741,6 +2889,7 @@ function createCodexNativeActivityTraceController(
         serverName: event.serverName,
         args: event.arguments,
         ok: event.ok,
+        text: event.error,
       },
       { matchRecentUnknown: !existingItemId },
     );
@@ -2748,6 +2897,40 @@ function createCodexNativeActivityTraceController(
       mcpRequestToolItemIds.set(requestId, updatedItemId);
     }
     if (updatedItemId) sync();
+  };
+
+  const noteMcpConfirmationRequired = (
+    requestId: string,
+    action: AgentPendingAction,
+  ): void => {
+    const cleanRequestId = sanitizeText(requestId || "").trim();
+    if (!cleanRequestId) return;
+    events.push(
+      createEvent({
+        type: "confirmation_required",
+        requestId: cleanRequestId,
+        action,
+      }),
+    );
+    sync();
+  };
+
+  const noteMcpConfirmationResolved = (
+    requestId: string,
+    resolution: AgentConfirmationResolution,
+  ): void => {
+    const cleanRequestId = sanitizeText(requestId || "").trim();
+    if (!cleanRequestId) return;
+    events.push(
+      createEvent({
+        type: "confirmation_resolved",
+        requestId: cleanRequestId,
+        approved: Boolean(resolution.approved),
+        actionId: resolution.actionId,
+        data: resolution.data,
+      }),
+    );
+    sync();
   };
 
   const noteAgentMessageCompleted = (
@@ -2798,6 +2981,8 @@ function createCodexNativeActivityTraceController(
     appendAgentMessageDelta,
     appendItemStatus,
     finish,
+    noteMcpConfirmationRequired,
+    noteMcpConfirmationResolved,
     noteMcpToolActivity,
     noteAgentMessageCompleted,
   };
@@ -3778,16 +3963,6 @@ export async function retryLatestAssistantResponse(
         );
       }
     };
-    if (isCodexNativeTurn) {
-      await clearCodexConversationSessionMetadata(conversationKey).catch(
-        (error) => {
-          ztoolkit.log(
-            "Codex app-server native: failed to clear stale retry session metadata",
-            error,
-          );
-        },
-      );
-    }
     const answer = isCodexNativeTurn
       ? (
           await runCodexAppServerNativeTurn({
@@ -3843,6 +4018,28 @@ export async function retryLatestAssistantResponse(
                 );
               }
             },
+            onMcpConfirmationRequest: async ({ requestId, action }) => {
+              setStatusSafely(
+                action.mode === "review"
+                  ? "Codex is waiting for your Zotero review"
+                  : "Codex is waiting for your Zotero approval",
+                "sending",
+              );
+              codexActivityTrace?.noteMcpConfirmationRequired(
+                requestId,
+                action,
+              );
+              const resolution = await showNativeMcpActionCard(
+                body,
+                requestId,
+                action,
+              );
+              codexActivityTrace?.noteMcpConfirmationResolved(
+                requestId,
+                resolution,
+              );
+              return resolution;
+            },
             onMcpSetupWarning: (message) => {
               setStatusSafely(message, "error");
             },
@@ -3853,24 +4050,21 @@ export async function retryLatestAssistantResponse(
               );
             },
             onApprovalRequest: (request) => {
-              const safeDecision =
-                resolveSafeCodexNativeApprovalRequest(request);
-              if (safeDecision) {
+              const decision = resolveCodexNativeApprovalRequest(request);
+              if (decision.approved) {
+                setStatusSafely("Codex approved Zotero MCP access", "sending");
+              } else if (decision.reason === "unsupported_mcp_elicitation") {
                 setStatusSafely(
-                  "Codex approved Zotero read-only MCP access",
+                  "Codex declined unsupported MCP elicitation",
                   "sending",
                 );
-                return safeDecision;
+              } else {
+                setStatusSafely(
+                  "Codex denied a built-in or untrusted approval request",
+                  "error",
+                );
               }
-              setStatusSafely(
-                "Codex requested approval, but native Codex approvals are not enabled in Zotero yet.",
-                "error",
-              );
-              return {
-                approved: false,
-                error:
-                  "Zotero has not enabled native Codex app-server approval UI yet.",
-              };
+              return decision.response;
             },
           })
         ).text
@@ -5216,6 +5410,28 @@ export async function sendQuestion(
                 );
               }
             },
+            onMcpConfirmationRequest: async ({ requestId, action }) => {
+              setStatusSafely(
+                action.mode === "review"
+                  ? "Codex is waiting for your Zotero review"
+                  : "Codex is waiting for your Zotero approval",
+                "sending",
+              );
+              codexActivityTrace?.noteMcpConfirmationRequired(
+                requestId,
+                action,
+              );
+              const resolution = await showNativeMcpActionCard(
+                body,
+                requestId,
+                action,
+              );
+              codexActivityTrace?.noteMcpConfirmationResolved(
+                requestId,
+                resolution,
+              );
+              return resolution;
+            },
             onMcpSetupWarning: (message) => {
               setStatusSafely(message, "error");
             },
@@ -5226,24 +5442,21 @@ export async function sendQuestion(
               );
             },
             onApprovalRequest: (request) => {
-              const safeDecision =
-                resolveSafeCodexNativeApprovalRequest(request);
-              if (safeDecision) {
+              const decision = resolveCodexNativeApprovalRequest(request);
+              if (decision.approved) {
+                setStatusSafely("Codex approved Zotero MCP access", "sending");
+              } else if (decision.reason === "unsupported_mcp_elicitation") {
                 setStatusSafely(
-                  "Codex approved Zotero read-only MCP access",
+                  "Codex declined unsupported MCP elicitation",
                   "sending",
                 );
-                return safeDecision;
+              } else {
+                setStatusSafely(
+                  "Codex denied a built-in or untrusted approval request",
+                  "error",
+                );
               }
-              setStatusSafely(
-                "Codex requested approval, but native Codex approvals are not enabled in Zotero yet.",
-                "error",
-              );
-              return {
-                approved: false,
-                error:
-                  "Zotero has not enabled native Codex app-server approval UI yet.",
-              };
+              return decision.response;
             },
           })
         ).text

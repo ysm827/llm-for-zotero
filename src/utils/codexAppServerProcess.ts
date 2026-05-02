@@ -50,6 +50,7 @@ export type CodexAppServerItemEvent = {
   status?: string;
   summary?: string;
   details?: string;
+  error?: string;
   name?: string;
   toolName?: string;
   title?: string;
@@ -325,6 +326,14 @@ export class CodexAppServerProcess {
       if (typeof msg.method === "string") {
         const handlers = this.requestHandlers.get(msg.method);
         if (!handlers?.size) {
+          try {
+            ztoolkit.log("Codex app-server: unhandled server request", {
+              method: msg.method,
+              params: msg.params,
+            });
+          } catch {
+            /* diagnostics must not affect protocol responses */
+          }
           this.writeRawMessage({
             id,
             error: {
@@ -698,12 +707,14 @@ function normalizeCodexAppServerText(value: unknown): string {
     content?: unknown;
     summary?: unknown;
     reasoning?: unknown;
+    message?: unknown;
   };
   return (
     normalizeCodexAppServerText(row.text) ||
     normalizeCodexAppServerText(row.content) ||
     normalizeCodexAppServerText(row.summary) ||
     normalizeCodexAppServerText(row.reasoning) ||
+    normalizeCodexAppServerText(row.message) ||
     ""
   );
 }
@@ -749,6 +760,7 @@ function copyCodexAppServerRawMetadata(
     "arguments",
     "args",
     "input",
+    "error",
   ];
   const raw: Record<string, unknown> = {};
   for (const key of keys) {
@@ -779,6 +791,7 @@ function extractCodexAppServerItem(
     content?: unknown;
     text?: unknown;
     reasoning?: unknown;
+    error?: unknown;
     name?: unknown;
     tool?: unknown;
     toolName?: unknown;
@@ -813,6 +826,14 @@ function extractCodexAppServerItem(
       normalizeCodexAppServerText(item.reasoning) ||
       normalizeCodexAppServerText(item.text) ||
       undefined,
+    error:
+      normalizeCodexAppServerFieldText(item.error, 500) ||
+      normalizeCodexAppServerFieldText(
+        item.error && typeof item.error === "object"
+          ? (item.error as Record<string, unknown>).message
+          : undefined,
+        500,
+      ),
     name: normalizeCodexAppServerFieldText(item.name),
     toolName:
       readCodexAppServerObjectName(item.toolName) ||

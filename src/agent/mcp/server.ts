@@ -11,9 +11,12 @@ import type { PaperContextRef } from "../../shared/types";
 import type { AgentToolRegistry } from "../tools/registry";
 import type { ZoteroGateway } from "../services/zoteroGateway";
 import type {
+  AgentConfirmationResolution,
+  AgentPendingAction,
   AgentRuntimeRequest,
   AgentToolContext,
   PreparedToolExecution,
+  ToolSpec,
 } from "../types";
 import {
   MCP_METHODS,
@@ -37,9 +40,7 @@ export const ZOTERO_MCP_TOKEN_PREF_KEY = `${config.prefsPrefix}.codexZoteroMcpBe
 const SERVER_VERSION = "1.0.0";
 const MCP_PROTOCOL_VERSION = "2025-06-18";
 const DEFAULT_ZOTERO_HTTP_PORT = 23119;
-const PENDING_CONFIRMATION_TTL_MS = 10 * 60 * 1000;
 const SCOPED_MCP_SCOPE_TTL_MS = 2 * 60 * 60 * 1000;
-const CONFIRM_TOOL_NAME = "zotero_confirm_action";
 export const ZOTERO_MCP_SAFE_READ_TOOL_NAMES = [
   "query_library",
   "read_library",
@@ -49,18 +50,35 @@ export const ZOTERO_MCP_SAFE_READ_TOOL_NAMES = [
   "read_attachment",
   "view_pdf_pages",
 ] as const;
+export const ZOTERO_MCP_WRITE_TOOL_NAMES = [
+  "apply_tags",
+  "move_to_collection",
+  "update_metadata",
+  "manage_collections",
+  "edit_current_note",
+  "import_identifiers",
+  "trash_items",
+  "merge_items",
+  "manage_attachments",
+  "run_command",
+  "import_local_files",
+  "file_io",
+  "zotero_script",
+  "undo_last_action",
+] as const;
 const CURATED_READ_TOOL_NAMES = new Set<string>(
   ZOTERO_MCP_SAFE_READ_TOOL_NAMES,
 );
+const CURATED_WRITE_TOOL_NAMES = new Set<string>(ZOTERO_MCP_WRITE_TOOL_NAMES);
 const READ_ONLY_TOOL_ANNOTATIONS = {
   readOnlyHint: true,
   openWorldHint: false,
   destructiveHint: false,
 } as const;
-const CONFIRM_TOOL_ANNOTATIONS = {
+const WRITE_TOOL_ANNOTATIONS = {
   readOnlyHint: false,
   openWorldHint: false,
-  destructiveHint: false,
+  destructiveHint: true,
 } as const;
 const MCP_SCOPE_ARG_NAMES = new Set([
   "libraryID",
@@ -70,6 +88,7 @@ const MCP_SCOPE_ARG_NAMES = new Set([
   "activeContextItemId",
   "activeContextItemID",
 ]);
+const CODEX_MCP_TOOL_APPROVAL_MODE = "approve";
 
 export type ZoteroMcpActiveScope = {
   profileSignature?: string;
@@ -102,12 +121,6 @@ type McpHttpResponse = {
   body: string;
 };
 
-type PendingMcpConfirmation = {
-  createdAt: number;
-  execution: Extract<PreparedToolExecution, { kind: "confirmation" }>;
-};
-
-const pendingConfirmations = new Map<string, PendingMcpConfirmation>();
 const scopedZoteroMcpScopes = new Map<
   string,
   { createdAt: number; expiresAt: number; scope: ZoteroMcpActiveScope }
@@ -136,6 +149,22 @@ type ZoteroMcpToolActivityObserver = (
 
 const zoteroMcpToolActivityObservers = new Set<ZoteroMcpToolActivityObserver>();
 
+export type ZoteroMcpConfirmationRequest = {
+  requestId: string;
+  action: AgentPendingAction;
+  toolName: string;
+  scope: ZoteroMcpActiveScope | null;
+};
+
+type ZoteroMcpConfirmationHandler = (
+  request: ZoteroMcpConfirmationRequest,
+) => AgentConfirmationResolution | Promise<AgentConfirmationResolution>;
+
+const zoteroMcpConfirmationHandlers = new Set<{
+  scope: ZoteroMcpActiveScope;
+  handler: ZoteroMcpConfirmationHandler;
+}>();
+
 export function addZoteroMcpToolActivityObserver(
   observer: ZoteroMcpToolActivityObserver,
 ): () => void {
@@ -153,6 +182,29 @@ function emitZoteroMcpToolActivity(event: ZoteroMcpToolActivityEvent): void {
       /* observer errors must not affect MCP tool execution */
     }
   }
+}
+
+function logZoteroMcp(message: string, details?: unknown): void {
+  try {
+    (
+      globalThis as typeof globalThis & {
+        ztoolkit?: { log?: (...args: unknown[]) => void };
+      }
+    ).ztoolkit?.log?.(message, details);
+  } catch {
+    /* diagnostics must not affect MCP execution */
+  }
+}
+
+export function addZoteroMcpConfirmationHandler(
+  scope: ZoteroMcpActiveScope,
+  handler: ZoteroMcpConfirmationHandler,
+): () => void {
+  const entry = { scope: normalizeActiveScope(scope), handler };
+  zoteroMcpConfirmationHandlers.add(entry);
+  return () => {
+    zoteroMcpConfirmationHandlers.delete(entry);
+  };
 }
 
 function getZoteroPrefs(): {
@@ -222,7 +274,22 @@ export function getZoteroMcpServerUrl(): string {
 }
 
 export function getZoteroMcpAllowedToolNames(): string[] {
-  return [...Array.from(CURATED_READ_TOOL_NAMES), CONFIRM_TOOL_NAME];
+  return [
+    ...Array.from(CURATED_READ_TOOL_NAMES),
+    ...Array.from(CURATED_WRITE_TOOL_NAMES),
+  ];
+}
+
+function getZoteroMcpToolApprovalOverrides(): Record<
+  string,
+  { approval_mode: typeof CODEX_MCP_TOOL_APPROVAL_MODE }
+> {
+  return Object.fromEntries(
+    getZoteroMcpAllowedToolNames().map((name) => [
+      name,
+      { approval_mode: CODEX_MCP_TOOL_APPROVAL_MODE },
+    ]),
+  );
 }
 
 function normalizeServerNamePart(value: unknown): string {
@@ -251,6 +318,8 @@ export function buildZoteroMcpConfigValue(
   return {
     url: getZoteroMcpServerUrl(),
     ...(params.required ? { required: true } : {}),
+    default_tools_approval_mode: CODEX_MCP_TOOL_APPROVAL_MODE,
+    tools: getZoteroMcpToolApprovalOverrides(),
     http_headers: {
       [ZOTERO_MCP_AUTH_HEADER]: `Bearer ${token}`,
       ...(scopeToken ? { [ZOTERO_MCP_SCOPE_HEADER]: scopeToken } : {}),
@@ -393,53 +462,31 @@ async function handleInitialize(): Promise<McpServerInfo> {
   };
 }
 
-function createConfirmToolDefinition() {
-  return {
-    name: CONFIRM_TOOL_NAME,
-    title: "Confirm Zotero Action",
-    description:
-      "Execute or deny a Zotero MCP action that previously returned confirmation_required.",
-    annotations: CONFIRM_TOOL_ANNOTATIONS,
-    inputSchema: {
-      type: "object",
-      required: ["requestId", "approved"],
-      additionalProperties: false,
-      properties: {
-        requestId: {
-          type: "string",
-          description: "The requestId from a confirmation_required result.",
-        },
-        approved: {
-          type: "boolean",
-          description: "Set true to execute the action or false to deny it.",
-        },
-        data: {
-          description:
-            "Optional edited confirmation data for tools that support it.",
-        },
-      },
-    },
-  };
+function formatToolTitle(name: string): string {
+  return name
+    .split("_")
+    .map((part) => part.slice(0, 1).toUpperCase() + part.slice(1))
+    .join(" ");
+}
+
+function isMcpExposedTool(tool: ToolSpec): boolean {
+  if (tool.mutability === "read") return CURATED_READ_TOOL_NAMES.has(tool.name);
+  if (tool.mutability === "write") return CURATED_WRITE_TOOL_NAMES.has(tool.name);
+  return false;
 }
 
 function handleToolsList(toolRegistry: AgentToolRegistry): McpToolsListResult {
   const tools: McpToolDefinition[] = toolRegistry
     .listTools()
-    .filter(
-      (tool) =>
-        CURATED_READ_TOOL_NAMES.has(tool.name) && tool.mutability === "read",
-    )
-    .map(({ name, description, inputSchema }) => ({
+    .filter(isMcpExposedTool)
+    .map(({ name, description, inputSchema, mutability }) => ({
       name,
-      title: name
-        .split("_")
-        .map((part) => part.slice(0, 1).toUpperCase() + part.slice(1))
-        .join(" "),
-      description: decorateMcpToolDescription(description),
+      title: formatToolTitle(name),
+      description: decorateMcpToolDescription(description, mutability),
       inputSchema: decorateMcpToolSchema(inputSchema),
-      annotations: READ_ONLY_TOOL_ANNOTATIONS,
+      annotations:
+        mutability === "read" ? READ_ONLY_TOOL_ANNOTATIONS : WRITE_TOOL_ANNOTATIONS,
     }));
-  tools.push(createConfirmToolDefinition());
   return { tools };
 }
 
@@ -488,8 +535,19 @@ function extractMcpScopeArgs(rawArgs: unknown): {
   };
 }
 
-function decorateMcpToolDescription(description: string): string {
-  return `${description}\n\nZotero MCP scope: omit libraryID, activeItemId, and activeContextItemId to use the current Codex Zotero chat scope. Use query_library to discover Zotero items, read_library for structured item state, search_paper for evidence retrieval, and read_paper/read_attachment/view_pdf_pages for deeper inspection. For counting questions, prefer query_library totalCount/returnedCount/limited metadata instead of hand-counting listed results.`;
+function decorateMcpToolDescription(
+  description: string,
+  mutability: ToolSpec["mutability"],
+): string {
+  const scopeGuidance =
+    "Zotero MCP scope: omit libraryID, activeItemId, and activeContextItemId to use the current Codex Zotero chat scope. Use query_library to discover Zotero items, read_library for structured item state, search_paper for evidence retrieval, and read_paper/read_attachment/view_pdf_pages for deeper inspection. For counting questions, prefer query_library totalCount/returnedCount/limited metadata instead of hand-counting listed results.";
+  const writeGuidance =
+    mutability === "write"
+      ? "Write operations pause in Zotero for user review before execution. For Zotero note requests, call edit_current_note instead of returning note-ready text in chat."
+      : "";
+  return [description, scopeGuidance, writeGuidance]
+    .filter(Boolean)
+    .join("\n\n");
 }
 
 function decorateMcpToolSchema(inputSchema: object): object {
@@ -612,6 +670,37 @@ function buildMcpToolActivityEvent(params: {
   };
 }
 
+function scopesMatchForConfirmation(
+  handlerScope: ZoteroMcpActiveScope,
+  requestScope: ZoteroMcpActiveScope | null,
+): boolean {
+  if (!requestScope) return false;
+  if (
+    handlerScope.profileSignature &&
+    requestScope.profileSignature &&
+    handlerScope.profileSignature !== requestScope.profileSignature
+  ) {
+    return false;
+  }
+  if (
+    handlerScope.conversationKey &&
+    requestScope.conversationKey &&
+    handlerScope.conversationKey !== requestScope.conversationKey
+  ) {
+    return false;
+  }
+  return Boolean(handlerScope.profileSignature || handlerScope.conversationKey);
+}
+
+function findZoteroMcpConfirmationHandler(
+  scope: ZoteroMcpActiveScope | null,
+): ZoteroMcpConfirmationHandler | null {
+  for (const entry of Array.from(zoteroMcpConfirmationHandlers).reverse()) {
+    if (scopesMatchForConfirmation(entry.scope, scope)) return entry.handler;
+  }
+  return null;
+}
+
 function createToolContext(
   rawArgs: unknown,
   headers?: Record<string, string>,
@@ -647,6 +736,7 @@ function createToolContext(
     activeItemId,
     libraryID: scopeArgs.libraryID || scope?.libraryID || 0,
     model: "codex-app-server",
+    authMode: "codex_app_server",
     selectedPaperContexts: paperContext ? [paperContext] : undefined,
     fullTextPaperContexts: paperContext ? [paperContext] : undefined,
   };
@@ -657,13 +747,6 @@ function createToolContext(
     modelName: "codex-app-server",
     modelProviderLabel: "Codex",
   };
-}
-
-function pruneExpiredConfirmations(): void {
-  const cutoff = Date.now() - PENDING_CONFIRMATION_TTL_MS;
-  for (const [requestId, entry] of pendingConfirmations) {
-    if (entry.createdAt < cutoff) pendingConfirmations.delete(requestId);
-  }
 }
 
 function formatToolResult(
@@ -689,62 +772,75 @@ function formatToolResult(
   };
 }
 
-function formatConfirmationRequired(
-  execution: Extract<PreparedToolExecution, { kind: "confirmation" }>,
-): McpToolCallResult {
-  pendingConfirmations.set(execution.requestId, {
-    createdAt: Date.now(),
-    execution,
-  });
-  return {
-    content: [
-      {
-        type: "text",
-        text: JSON.stringify(
-          {
-            type: "confirmation_required",
-            requestId: execution.requestId,
-            action: execution.action,
-            instructions: `Call ${CONFIRM_TOOL_NAME} with this requestId and approved:true to execute, or approved:false to deny.`,
-          },
-          null,
-          2,
-        ),
-      },
-    ],
-  };
+function extractToolCallErrorText(result: McpToolCallResult): string | undefined {
+  if (!result.isError) return undefined;
+  for (const part of result.content) {
+    const text = normalizeText(part.text, 1000);
+    if (!text) continue;
+    try {
+      const parsed = JSON.parse(text) as {
+        error?: unknown;
+        result?: { error?: unknown };
+      };
+      return (
+        normalizeText(parsed.result?.error, 1000) ||
+        normalizeText(parsed.error, 1000) ||
+        text
+      );
+    } catch {
+      return text;
+    }
+  }
+  return undefined;
 }
 
-async function handleConfirmTool(rawArgs: unknown): Promise<McpToolCallResult> {
-  pruneExpiredConfirmations();
-  const args = normalizeRecord(rawArgs);
-  const requestId =
-    typeof args.requestId === "string" ? args.requestId.trim() : "";
-  if (!requestId) {
-    return {
-      content: [
-        { type: "text", text: "zotero_confirm_action requires requestId" },
-      ],
-      isError: true,
-    };
-  }
-  const pending = pendingConfirmations.get(requestId);
-  if (!pending) {
+async function requestZoteroMcpConfirmation(params: {
+  execution: Extract<PreparedToolExecution, { kind: "confirmation" }>;
+  headers?: Record<string, string>;
+}): Promise<McpToolCallResult> {
+  const scope = resolveScopedMcpScope(params.headers);
+  const handler = findZoteroMcpConfirmationHandler(scope);
+  if (!handler) {
+    logZoteroMcp("Zotero MCP confirmation unavailable", {
+      requestId: params.execution.requestId,
+      toolName: params.execution.action.toolName,
+      conversationKey: scope?.conversationKey,
+      profileSignature: scope?.profileSignature,
+    });
     return {
       content: [
         {
           type: "text",
-          text: `No pending Zotero MCP confirmation found for ${requestId}`,
+          text:
+            "Zotero MCP confirmation UI is unavailable for this Codex turn. " +
+            "Start a new Codex turn from Zotero and try again.",
         },
       ],
       isError: true,
     };
   }
-  pendingConfirmations.delete(requestId);
-  const approved = args.approved === true;
-  const execution = approved
-    ? await pending.execution.execute(args.data)
-    : pending.execution.deny(args.data);
+
+  logZoteroMcp("Zotero MCP confirmation requested", {
+    requestId: params.execution.requestId,
+    toolName: params.execution.action.toolName,
+    conversationKey: scope?.conversationKey,
+    profileSignature: scope?.profileSignature,
+  });
+  const resolution = await handler({
+    requestId: params.execution.requestId,
+    action: params.execution.action,
+    toolName: params.execution.action.toolName,
+    scope: scope ? { ...scope } : null,
+  });
+  logZoteroMcp("Zotero MCP confirmation resolved", {
+    requestId: params.execution.requestId,
+    toolName: params.execution.action.toolName,
+    approved: resolution.approved,
+    actionId: resolution.actionId,
+  });
+  const execution = resolution.approved
+    ? await params.execution.execute(resolution.data)
+    : params.execution.deny(resolution.data);
   return formatToolResult(execution);
 }
 
@@ -754,12 +850,7 @@ async function handleToolsCall(
   headers?: Record<string, string>,
   id?: string | number | null,
 ): Promise<McpToolCallResult> {
-  pruneExpiredConfirmations();
   const { name, arguments: rawArgs } = params;
-
-  if (name === CONFIRM_TOOL_NAME) {
-    return handleConfirmTool(rawArgs);
-  }
 
   const scopeArgs = extractMcpScopeArgs(rawArgs);
   const toolLabel = getMcpToolPresentationLabel(deps, name);
@@ -790,11 +881,7 @@ async function handleToolsCall(
   };
 
   const tool = deps.toolRegistry.getTool(name);
-  if (
-    !tool ||
-    !CURATED_READ_TOOL_NAMES.has(name) ||
-    tool.spec.mutability !== "read"
-  ) {
+  if (!tool || !isMcpExposedTool(tool.spec)) {
     completeActivity({ ok: false, error: "Tool unavailable in native mode" });
     return {
       content: [
@@ -815,15 +902,25 @@ async function handleToolsCall(
         arguments: scopeArgs.toolArgs,
       },
       createToolContext(rawArgs, headers),
+      { forceConfirmation: tool.spec.mutability === "write" },
     );
 
     if (prepared.kind === "confirmation") {
-      const result = formatConfirmationRequired(prepared);
-      completeActivity({ ok: !result.isError });
+      const result = await requestZoteroMcpConfirmation({
+        execution: prepared,
+        headers,
+      });
+      completeActivity({
+        ok: !result.isError,
+        error: extractToolCallErrorText(result),
+      });
       return result;
     }
     const result = formatToolResult(prepared.execution);
-    completeActivity({ ok: !result.isError });
+    completeActivity({
+      ok: !result.isError,
+      error: extractToolCallErrorText(result),
+    });
     return result;
   } catch (error) {
     completeActivity({
@@ -978,7 +1075,7 @@ export function registerMcpServer(deps: McpServerDeps): void {
  * Removes the MCP endpoint from Zotero's server (call on plugin shutdown).
  */
 export function unregisterMcpServer(): void {
-  pendingConfirmations.clear();
   scopedZoteroMcpScopes.clear();
+  zoteroMcpConfirmationHandlers.clear();
   delete Zotero.Server.Endpoints[ZOTERO_MCP_ENDPOINT_PATH];
 }

@@ -1,5 +1,6 @@
 import { assert } from "chai";
 import {
+  resolveCodexNativeApprovalRequest,
   resolveSafeCodexNativeApprovalRequest,
   runCodexAppServerNativeTurn,
 } from "../src/codexAppServer/nativeClient";
@@ -121,20 +122,91 @@ describe("Codex app-server native client", function () {
       originalZotero;
     destroyCachedCodexAppServerProcess("native-client-test");
     destroyCachedCodexAppServerProcess("native-client-resume-test");
+    destroyCachedCodexAppServerProcess("native-client-approval-request-test");
+    destroyCachedCodexAppServerProcess("native-client-guardian-review-test");
+    destroyCachedCodexAppServerProcess("native-client-thread-reuse-test");
   });
 
-  it("auto-approves only Zotero read-only MCP approval prompts", function () {
-    assert.deepEqual(
-      resolveSafeCodexNativeApprovalRequest({
+  it("auto-approves trusted Zotero MCP approval prompts except self-confirmation", function () {
+    const legacyReadDecision = resolveSafeCodexNativeApprovalRequest({
         method: "tool/requestUserInput",
         params: {
           serverName: "llm_for_zotero_profile_1234",
           toolName: "query_library",
           questions: [{ header: "Allow", question: "Use query_library?" }],
         },
-      }),
-      { approved: true },
-    );
+      });
+    assert.equal(legacyReadDecision?.approved, true);
+    assert.deepEqual(legacyReadDecision?.response, { approved: true });
+
+    const legacyWriteDecision = resolveSafeCodexNativeApprovalRequest({
+        method: "tool/requestUserInput",
+        params: {
+          serverName: "llm_for_zotero_profile_1234",
+          toolName: "edit_current_note",
+          questions: [{ header: "Allow", question: "Use edit_current_note?" }],
+        },
+      });
+    assert.equal(legacyWriteDecision?.approved, true);
+    assert.deepEqual(legacyWriteDecision?.response, { approved: true });
+
+    const currentWriteDecision = resolveCodexNativeApprovalRequest({
+      method: "item/tool/requestUserInput",
+      params: {
+        serverName: "llm_for_zotero_profile_1234",
+        toolName: "edit_current_note",
+        questions: [
+          {
+            id: "allow",
+            header: "Allow",
+            question: "Allow llm_for_zotero to use edit_current_note?",
+            options: [
+              { label: "Allow", description: "Allow trusted access." },
+              { label: "Deny", description: "Deny access." },
+            ],
+          },
+        ],
+      },
+    });
+    assert.equal(currentWriteDecision.approved, true);
+    assert.deepEqual(currentWriteDecision.response, {
+      answers: { allow: { answers: ["Allow"] } },
+    });
+
+    const suffixedApprovalDecision = resolveCodexNativeApprovalRequest({
+      method: "item/tool/requestUserInput",
+      params: {
+        serverName: "llm_for_zotero_profile_1234",
+        toolName: "edit_current_note",
+        questions: [
+          {
+            id: "mcp_access",
+            header: "Allow",
+            question: "Allow llm_for_zotero to use edit_current_note?",
+            options: [
+              { label: "Reject" },
+              { label: "Allow once (Recommended)" },
+            ],
+          },
+        ],
+      },
+    });
+    assert.equal(suffixedApprovalDecision.approved, true);
+    assert.deepEqual(suffixedApprovalDecision.response, {
+      answers: { mcp_access: { answers: ["Allow once (Recommended)"] } },
+    });
+
+    const turnApprovalDecision = resolveSafeCodexNativeApprovalRequest({
+        method: "turn/approval/request",
+        params: {
+          serverName: "llm_for_zotero_profile_1234",
+          toolName: "edit_current_note",
+          message: "Allow llm_for_zotero to use edit_current_note?",
+        },
+      });
+    assert.equal(turnApprovalDecision?.approved, true);
+    assert.deepEqual(turnApprovalDecision?.response, { approved: true });
+
     assert.isNull(
       resolveSafeCodexNativeApprovalRequest({
         method: "tool/requestUserInput",
@@ -144,6 +216,20 @@ describe("Codex app-server native client", function () {
         },
       }),
     );
+    const disallowedSelfConfirm = resolveCodexNativeApprovalRequest({
+      method: "tool/requestUserInput",
+      params: {
+        serverName: "llm_for_zotero_profile_1234",
+        toolName: "zotero_confirm_action",
+      },
+    });
+    assert.equal(disallowedSelfConfirm.approved, false);
+    assert.deepEqual(disallowedSelfConfirm.response, {
+      approved: false,
+      error:
+        "Zotero only auto-approves trusted llm_for_zotero MCP access. " +
+        "Built-in Codex approvals are disabled.",
+    });
     assert.isNull(
       resolveSafeCodexNativeApprovalRequest({
         method: "tool/requestUserInput",
@@ -155,12 +241,44 @@ describe("Codex app-server native client", function () {
     );
   });
 
+  it("returns schema-valid denials for current native approval request methods", function () {
+    assert.deepEqual(
+      resolveCodexNativeApprovalRequest({
+        method: "item/commandExecution/requestApproval",
+        params: { command: "date" },
+      }).response,
+      { decision: "decline" },
+    );
+    assert.deepEqual(
+      resolveCodexNativeApprovalRequest({
+        method: "item/fileChange/requestApproval",
+        params: { path: "/tmp/example.txt" },
+      }).response,
+      { decision: "decline" },
+    );
+    assert.deepEqual(
+      resolveCodexNativeApprovalRequest({
+        method: "item/permissions/requestApproval",
+        params: { permissions: ["filesystem.write"] },
+      }).response,
+      { permissions: {}, scope: "turn" },
+    );
+    assert.deepEqual(
+      resolveCodexNativeApprovalRequest({
+        method: "mcpServer/elicitation/request",
+        params: { serverName: "other_server", message: "Need input" },
+      }).response,
+      { action: "decline", content: null, _meta: null },
+    );
+  });
+
   it("starts persistent native threads and injects legacy UI history once", async function () {
     const stdout = new MockStdout();
     const methods: string[] = [];
     let threadStartParams: Record<string, unknown> | null = null;
     let mcpServerName = "";
     let injectedItems: unknown = null;
+    let turnStartParams: Record<string, unknown> | null = null;
     let turnInput: unknown = null;
     let persistedThreadId = "";
     const prefStore = new Map<string, unknown>();
@@ -278,6 +396,7 @@ describe("Codex app-server native client", function () {
                     continue;
                   }
                   if (message.method === "turn/start") {
+                    turnStartParams = message.params || null;
                     turnInput = message.params?.input ?? null;
                     stdout.push(
                       `${JSON.stringify({ id: message.id, result: { turn: { id: "turn-1" } } })}\n`,
@@ -346,6 +465,8 @@ describe("Codex app-server native client", function () {
     assert.notInclude(methods, "config/mcpServer/reload");
     assert.equal(threadStartParams?.ephemeral, false);
     assert.equal(threadStartParams?.persistExtendedHistory, true);
+    assert.equal(threadStartParams?.approvalPolicy, "on-request");
+    assert.equal(threadStartParams?.approvalsReviewer, "user");
     assert.equal(threadStartParams?.serviceName, "llm_for_zotero");
     assert.notProperty(threadStartParams || {}, "dynamicTools");
     assert.isString(threadStartParams?.developerInstructions);
@@ -372,10 +493,19 @@ describe("Codex app-server native client", function () {
       serverConfig.url,
       "http://127.0.0.1:23119/llm-for-zotero/mcp",
     );
+    assert.equal(serverConfig.default_tools_approval_mode, "approve");
     assert.include(serverConfig.http_headers.Authorization, "Bearer ");
     assert.isString(serverConfig.http_headers[ZOTERO_MCP_SCOPE_HEADER]);
     assert.include(serverConfig.enabled_tools, "query_library");
     assert.include(serverConfig.enabled_tools, "read_library");
+    assert.include(serverConfig.enabled_tools, "edit_current_note");
+    assert.notInclude(serverConfig.enabled_tools, "zotero_confirm_action");
+    assert.equal(
+      serverConfig.tools.edit_current_note.approval_mode,
+      "approve",
+    );
+    assert.equal(serverConfig.tools.query_library.approval_mode, "approve");
+    assert.notProperty(serverConfig.tools, "zotero_confirm_action");
     assert.deepEqual(injectedItems, [
       {
         type: "message",
@@ -389,6 +519,8 @@ describe("Codex app-server native client", function () {
       },
     ]);
     assert.isArray(turnInput);
+    assert.equal(turnStartParams?.approvalPolicy, "on-request");
+    assert.equal(turnStartParams?.approvalsReviewer, "user");
     const textInput = (turnInput as Array<Record<string, unknown>>).find(
       (part) => part.type === "text",
     );
@@ -411,6 +543,7 @@ describe("Codex app-server native client", function () {
     const methods: string[] = [];
     let resumeParams: Record<string, unknown> | null = null;
     let mcpServerName = "";
+    let turnStartParams: Record<string, unknown> | null = null;
     let turnInput: unknown = null;
     let injectCalled = false;
     const prefStore = new Map<string, unknown>();
@@ -519,6 +652,7 @@ describe("Codex app-server native client", function () {
                     continue;
                   }
                   if (message.method === "turn/start") {
+                    turnStartParams = message.params || null;
                     turnInput = message.params?.input ?? null;
                     stdout.push(
                       `${JSON.stringify({ id: message.id, result: { turn: { id: "turn-2" } } })}\n`,
@@ -575,6 +709,8 @@ describe("Codex app-server native client", function () {
     assert.equal(resumeParams?.threadId, "thread-native-1");
     assert.equal(resumeParams?.model, "gpt-5.4");
     assert.equal(resumeParams?.persistExtendedHistory, true);
+    assert.equal(resumeParams?.approvalPolicy, "on-request");
+    assert.equal(resumeParams?.approvalsReviewer, "user");
     assert.notProperty(resumeParams || {}, "serviceName");
     assert.isString(resumeParams?.developerInstructions);
     assert.include(
@@ -590,6 +726,14 @@ describe("Codex app-server native client", function () {
     const servers = resumeConfig.mcp_servers as Record<string, any>;
     assert.lengthOf(Object.keys(servers), 1);
     assert.equal(servers[Object.keys(servers)[0]].required, true);
+    assert.include(
+      servers[Object.keys(servers)[0]].enabled_tools,
+      "edit_current_note",
+    );
+    assert.notInclude(
+      servers[Object.keys(servers)[0]].enabled_tools,
+      "zotero_confirm_action",
+    );
     assert.includeMembers(methods, [
       "initialize",
       "thread/resume",
@@ -601,6 +745,8 @@ describe("Codex app-server native client", function () {
     assert.notInclude(methods, "config/mcpServer/reload");
     assert.notInclude(methods, "thread/start");
     assert.isFalse(injectCalled);
+    assert.equal(turnStartParams?.approvalPolicy, "on-request");
+    assert.equal(turnStartParams?.approvalsReviewer, "user");
     const textInput = (turnInput as Array<Record<string, unknown>>).find(
       (part) => part.type === "text",
     );
@@ -610,6 +756,529 @@ describe("Codex app-server native client", function () {
     assert.notInclude(text, "Fresh context.");
     assert.notInclude(text, "Earlier question.");
     assert.equal(result.diagnostics?.historyVerified, true);
+  });
+
+  it("handles current tool user-input requests before native MCP write calls", async function () {
+    const stdout = new MockStdout();
+    const methods: string[] = [];
+    let mcpServerName = "";
+    let approvalResponse: Record<string, unknown> | null = null;
+    const prefStore = new Map<string, unknown>();
+
+    if (globalThis.process?.env) {
+      globalThis.process.env.CODEX_PATH = "/mock/codex";
+    }
+    (globalThis as typeof globalThis & { Zotero: typeof Zotero }).Zotero = {
+      ...(originalZotero || {}),
+      isWin: true,
+      Profile: { dir: "/tmp/zotero-native-client-profile-approval" },
+      Prefs: {
+        get: (key: string) => {
+          if (key === "httpServer.port") return 23119;
+          return prefStore.get(key);
+        },
+        set: (key: string, value: unknown) => {
+          prefStore.set(key, value);
+        },
+      },
+    } as typeof Zotero;
+    (
+      globalThis as typeof globalThis & {
+        ChromeUtils?: {
+          importESModule: (
+            path: string,
+          ) => { Subprocess: { call: () => Promise<unknown> } };
+        };
+      }
+    ).ChromeUtils = {
+      importESModule: () => ({
+        Subprocess: {
+          call: async () => ({
+            stdout,
+            stdin: {
+              write: (chunk: string) => {
+                for (const line of chunk.split("\n")) {
+                  if (!line.trim()) continue;
+                  const message = JSON.parse(line) as {
+                    id?: number;
+                    method?: string;
+                    params?: Record<string, unknown> & { input?: unknown };
+                    result?: unknown;
+                    error?: unknown;
+                  };
+                  if (!message.method) {
+                    if (message.id === 900) {
+                      approvalResponse = message as Record<string, unknown>;
+                      queueMicrotask(() => {
+                        stdout.push(
+                          `${JSON.stringify({ method: "item/started", params: { turnId: "turn-approval", item: { id: "tool-1", type: "mcp_tool_call", toolName: "edit_current_note", serverName: mcpServerName, arguments: { mode: "create", target: "standalone" } } } })}\n`,
+                        );
+                        stdout.push(
+                          `${JSON.stringify({ method: "item/completed", params: { turnId: "turn-approval", item: { id: "tool-1", type: "mcp_tool_call", toolName: "edit_current_note", serverName: mcpServerName, summary: "Created standalone note." } } })}\n`,
+                        );
+                        stdout.push(
+                          `${JSON.stringify({ method: "item/agentMessage/delta", params: { turnId: "turn-approval", delta: "Created the standalone note." } })}\n`,
+                        );
+                        stdout.push(
+                          `${JSON.stringify({ method: "turn/completed", params: { turnId: "turn-approval", status: "completed" } })}\n`,
+                        );
+                      });
+                    }
+                    continue;
+                  }
+                  if (message.method === "initialized") continue;
+                  methods.push(message.method);
+                  if (message.method === "initialize") {
+                    stdout.push(
+                      `${JSON.stringify({ id: message.id, result: {} })}\n`,
+                    );
+                    continue;
+                  }
+                  if (message.method === "config/read") {
+                    stdout.push(
+                      `${JSON.stringify({ id: message.id, result: { mcp_servers: mcpServerName ? { [mcpServerName]: { url: "http://127.0.0.1:23119/llm-for-zotero/mcp" } } : {} } })}\n`,
+                    );
+                    continue;
+                  }
+                  if (message.method === "mcpServerStatus/list") {
+                    stdout.push(
+                      `${JSON.stringify({ id: message.id, result: { servers: [{ name: mcpServerName, status: "ready", tools: [{ name: "query_library" }, { name: "read_library" }, { name: "edit_current_note" }] }] } })}\n`,
+                    );
+                    continue;
+                  }
+                  if (message.method === "skills/list") {
+                    stdout.push(
+                      `${JSON.stringify({ id: message.id, result: { skills: [] } })}\n`,
+                    );
+                    continue;
+                  }
+                  if (message.method === "plugin/list") {
+                    stdout.push(
+                      `${JSON.stringify({ id: message.id, result: { plugins: [] } })}\n`,
+                    );
+                    continue;
+                  }
+                  if (message.method === "thread/start") {
+                    const config = (message.params?.config || {}) as {
+                      mcp_servers?: Record<string, unknown>;
+                    };
+                    mcpServerName = Object.keys(config.mcp_servers || {})[0] || "";
+                    stdout.push(
+                      `${JSON.stringify({ id: message.id, result: { thread: { id: "thread-approval", source: "appServer" } } })}\n`,
+                    );
+                    continue;
+                  }
+                  if (message.method === "thread/name/set") {
+                    stdout.push(
+                      `${JSON.stringify({ id: message.id, result: {} })}\n`,
+                    );
+                    continue;
+                  }
+                  if (message.method === "turn/start") {
+                    stdout.push(
+                      `${JSON.stringify({ id: message.id, result: { turn: { id: "turn-approval" } } })}\n`,
+                    );
+                    queueMicrotask(() => {
+                      stdout.push(
+                        `${JSON.stringify({ id: 900, method: "item/tool/requestUserInput", params: { turnId: "turn-approval", itemId: "tool-approval-1", serverName: mcpServerName, toolName: "edit_current_note", questions: [{ id: "allow", header: "Allow", question: "Allow llm_for_zotero to use edit_current_note?", options: [{ label: "Allow", description: "Allow trusted access." }, { label: "Deny", description: "Deny access." }] }] } })}\n`,
+                      );
+                    });
+                    continue;
+                  }
+                  if (message.method === "thread/read") {
+                    stdout.push(
+                      `${JSON.stringify({ id: message.id, result: { thread: { id: "thread-approval" }, turns: [{ id: "turn-approval" }] } })}\n`,
+                    );
+                    continue;
+                  }
+                  throw new Error(`unexpected method ${message.method}`);
+                }
+              },
+            },
+            kill: () => undefined,
+          }),
+        },
+      }),
+    };
+
+    const result = await runCodexAppServerNativeTurn({
+      processKey: "native-client-approval-request-test",
+      codexPath: "/mock/codex",
+      scope: {
+        conversationKey: 6_000_000_003,
+        libraryID: 1,
+        kind: "global",
+        title: "Write note",
+      },
+      model: "gpt-5.4",
+      messages: [{ role: "user", content: "Create a standalone note." }],
+      hooks: {
+        loadProviderSessionId: async () => undefined,
+        persistProviderSessionId: async () => undefined,
+      },
+    });
+
+    assert.equal(result.text, "Created the standalone note.");
+    assert.include(methods, "turn/start");
+    assert.isNotNull(approvalResponse);
+    assert.notProperty(approvalResponse || {}, "error");
+    assert.deepEqual(approvalResponse?.result, {
+      answers: { allow: { answers: ["Allow"] } },
+    });
+  });
+
+  it("approves trusted Zotero MCP guardian denials before the tool is rejected", async function () {
+    const stdout = new MockStdout();
+    const methods: string[] = [];
+    let mcpServerName = "";
+    let guardianApprovalParams: Record<string, unknown> | null = null;
+    const prefStore = new Map<string, unknown>();
+
+    if (globalThis.process?.env) {
+      globalThis.process.env.CODEX_PATH = "/mock/codex";
+    }
+    (globalThis as typeof globalThis & { Zotero: typeof Zotero }).Zotero = {
+      ...(originalZotero || {}),
+      isWin: true,
+      Profile: { dir: "/tmp/zotero-native-client-profile-guardian" },
+      Prefs: {
+        get: (key: string) => {
+          if (key === "httpServer.port") return 23119;
+          return prefStore.get(key);
+        },
+        set: (key: string, value: unknown) => {
+          prefStore.set(key, value);
+        },
+      },
+    } as typeof Zotero;
+    (
+      globalThis as typeof globalThis & {
+        ChromeUtils?: {
+          importESModule: (
+            path: string,
+          ) => { Subprocess: { call: () => Promise<unknown> } };
+        };
+      }
+    ).ChromeUtils = {
+      importESModule: () => ({
+        Subprocess: {
+          call: async () => ({
+            stdout,
+            stdin: {
+              write: (chunk: string) => {
+                for (const line of chunk.split("\n")) {
+                  if (!line.trim()) continue;
+                  const message = JSON.parse(line) as {
+                    id?: number;
+                    method?: string;
+                    params?: Record<string, unknown>;
+                  };
+                  if (!message.method || message.method === "initialized") {
+                    continue;
+                  }
+                  methods.push(message.method);
+                  if (message.method === "initialize") {
+                    stdout.push(
+                      `${JSON.stringify({ id: message.id, result: {} })}\n`,
+                    );
+                    continue;
+                  }
+                  if (message.method === "config/read") {
+                    stdout.push(
+                      `${JSON.stringify({ id: message.id, result: { mcp_servers: mcpServerName ? { [mcpServerName]: { url: "http://127.0.0.1:23119/llm-for-zotero/mcp" } } : {} } })}\n`,
+                    );
+                    continue;
+                  }
+                  if (message.method === "mcpServerStatus/list") {
+                    stdout.push(
+                      `${JSON.stringify({ id: message.id, result: { servers: [{ name: mcpServerName, status: "ready", tools: [{ name: "query_library" }, { name: "read_library" }, { name: "edit_current_note" }] }] } })}\n`,
+                    );
+                    continue;
+                  }
+                  if (message.method === "skills/list") {
+                    stdout.push(
+                      `${JSON.stringify({ id: message.id, result: { skills: [] } })}\n`,
+                    );
+                    continue;
+                  }
+                  if (message.method === "plugin/list") {
+                    stdout.push(
+                      `${JSON.stringify({ id: message.id, result: { plugins: [] } })}\n`,
+                    );
+                    continue;
+                  }
+                  if (message.method === "thread/start") {
+                    const config = (message.params?.config || {}) as {
+                      mcp_servers?: Record<string, unknown>;
+                    };
+                    mcpServerName = Object.keys(config.mcp_servers || {})[0] || "";
+                    stdout.push(
+                      `${JSON.stringify({ id: message.id, result: { thread: { id: "thread-guardian", source: "appServer" } } })}\n`,
+                    );
+                    continue;
+                  }
+                  if (message.method === "thread/name/set") {
+                    stdout.push(
+                      `${JSON.stringify({ id: message.id, result: {} })}\n`,
+                    );
+                    continue;
+                  }
+                  if (message.method === "turn/start") {
+                    stdout.push(
+                      `${JSON.stringify({ id: message.id, result: { turn: { id: "turn-guardian" } } })}\n`,
+                    );
+                    queueMicrotask(() => {
+                      stdout.push(
+                        `${JSON.stringify({ method: "item/autoApprovalReview/completed", params: { threadId: "thread-guardian", turnId: "turn-guardian", reviewId: "review-1", targetItemId: "tool-1", decisionSource: "agent", review: { status: "denied", riskLevel: "medium", userAuthorization: "low", rationale: "MCP write tool requires approval." }, action: { type: "mcpToolCall", server: mcpServerName, toolName: "edit_current_note", connectorId: null, connectorName: null, toolTitle: "Edit Current Note" } } })}\n`,
+                      );
+                    });
+                    continue;
+                  }
+                  if (message.method === "thread/approveGuardianDeniedAction") {
+                    guardianApprovalParams = message.params || null;
+                    stdout.push(
+                      `${JSON.stringify({ id: message.id, result: {} })}\n`,
+                    );
+                    queueMicrotask(() => {
+                      stdout.push(
+                        `${JSON.stringify({ method: "item/started", params: { turnId: "turn-guardian", item: { id: "tool-1", type: "mcp_tool_call", toolName: "edit_current_note", serverName: mcpServerName } } })}\n`,
+                      );
+                      stdout.push(
+                        `${JSON.stringify({ method: "item/completed", params: { turnId: "turn-guardian", item: { id: "tool-1", type: "mcp_tool_call", toolName: "edit_current_note", serverName: mcpServerName, summary: "Created attached note." } } })}\n`,
+                      );
+                      stdout.push(
+                        `${JSON.stringify({ method: "item/agentMessage/delta", params: { turnId: "turn-guardian", delta: "Created the item note." } })}\n`,
+                      );
+                      stdout.push(
+                        `${JSON.stringify({ method: "turn/completed", params: { turnId: "turn-guardian", status: "completed" } })}\n`,
+                      );
+                    });
+                    continue;
+                  }
+                  if (message.method === "thread/read") {
+                    stdout.push(
+                      `${JSON.stringify({ id: message.id, result: { thread: { id: "thread-guardian" }, turns: [{ id: "turn-guardian" }] } })}\n`,
+                    );
+                    continue;
+                  }
+                  throw new Error(`unexpected method ${message.method}`);
+                }
+              },
+            },
+            kill: () => undefined,
+          }),
+        },
+      }),
+    };
+
+    const result = await runCodexAppServerNativeTurn({
+      processKey: "native-client-guardian-review-test",
+      codexPath: "/mock/codex",
+      scope: {
+        conversationKey: 6_000_000_005,
+        libraryID: 1,
+        kind: "global",
+        title: "Write note",
+      },
+      model: "gpt-5.4",
+      messages: [{ role: "user", content: "Create an item note." }],
+      hooks: {
+        loadProviderSessionId: async () => undefined,
+        persistProviderSessionId: async () => undefined,
+      },
+    });
+
+    assert.equal(result.text, "Created the item note.");
+    assert.include(methods, "thread/approveGuardianDeniedAction");
+    assert.equal(guardianApprovalParams?.threadId, "thread-guardian");
+    assert.deepInclude(guardianApprovalParams?.event as Record<string, unknown>, {
+      target_item_id: "tool-1",
+      risk_level: "medium",
+      user_authorization: "low",
+      rationale: "MCP write tool requires approval.",
+      decision_source: "agent",
+    });
+    assert.deepEqual(
+      (guardianApprovalParams?.event as { action?: unknown }).action,
+      {
+        type: "mcp_tool_call",
+        server: mcpServerName,
+        tool_name: "edit_current_note",
+        connector_id: null,
+        connector_name: null,
+        tool_title: "Edit Current Note",
+      },
+    );
+  });
+
+  it("reuses the stored native thread for normal sends with the same conversation", async function () {
+    const stdout = new MockStdout();
+    const methods: string[] = [];
+    let mcpServerName = "";
+    let storedThreadId = "";
+    let turnCount = 0;
+    const prefStore = new Map<string, unknown>();
+
+    if (globalThis.process?.env) {
+      globalThis.process.env.CODEX_PATH = "/mock/codex";
+    }
+    (globalThis as typeof globalThis & { Zotero: typeof Zotero }).Zotero = {
+      ...(originalZotero || {}),
+      isWin: true,
+      Profile: { dir: "/tmp/zotero-native-client-profile-thread-reuse" },
+      Prefs: {
+        get: (key: string) => {
+          if (key === "httpServer.port") return 23119;
+          return prefStore.get(key);
+        },
+        set: (key: string, value: unknown) => {
+          prefStore.set(key, value);
+        },
+      },
+    } as typeof Zotero;
+    (
+      globalThis as typeof globalThis & {
+        ChromeUtils?: {
+          importESModule: (
+            path: string,
+          ) => { Subprocess: { call: () => Promise<unknown> } };
+        };
+      }
+    ).ChromeUtils = {
+      importESModule: () => ({
+        Subprocess: {
+          call: async () => ({
+            stdout,
+            stdin: {
+              write: (chunk: string) => {
+                for (const line of chunk.split("\n")) {
+                  if (!line.trim()) continue;
+                  const message = JSON.parse(line) as {
+                    id?: number;
+                    method?: string;
+                    params?: Record<string, unknown>;
+                  };
+                  if (!message.method || message.method === "initialized") {
+                    continue;
+                  }
+                  methods.push(message.method);
+                  if (message.method === "initialize") {
+                    stdout.push(
+                      `${JSON.stringify({ id: message.id, result: {} })}\n`,
+                    );
+                    continue;
+                  }
+                  if (message.method === "config/read") {
+                    stdout.push(
+                      `${JSON.stringify({ id: message.id, result: { mcp_servers: mcpServerName ? { [mcpServerName]: { url: "http://127.0.0.1:23119/llm-for-zotero/mcp" } } : {} } })}\n`,
+                    );
+                    continue;
+                  }
+                  if (message.method === "mcpServerStatus/list") {
+                    stdout.push(
+                      `${JSON.stringify({ id: message.id, result: { servers: [{ name: mcpServerName, status: "ready", tools: [{ name: "query_library" }, { name: "read_library" }] }] } })}\n`,
+                    );
+                    continue;
+                  }
+                  if (message.method === "skills/list") {
+                    stdout.push(
+                      `${JSON.stringify({ id: message.id, result: { skills: [] } })}\n`,
+                    );
+                    continue;
+                  }
+                  if (message.method === "plugin/list") {
+                    stdout.push(
+                      `${JSON.stringify({ id: message.id, result: { plugins: [] } })}\n`,
+                    );
+                    continue;
+                  }
+                  if (message.method === "thread/start") {
+                    const config = (message.params?.config || {}) as {
+                      mcp_servers?: Record<string, unknown>;
+                    };
+                    mcpServerName = Object.keys(config.mcp_servers || {})[0] || "";
+                    stdout.push(
+                      `${JSON.stringify({ id: message.id, result: { thread: { id: "thread-reuse", source: "appServer" } } })}\n`,
+                    );
+                    continue;
+                  }
+                  if (message.method === "thread/resume") {
+                    stdout.push(
+                      `${JSON.stringify({ id: message.id, result: { thread: { id: "thread-reuse", source: "appServer" } } })}\n`,
+                    );
+                    continue;
+                  }
+                  if (message.method === "thread/name/set") {
+                    stdout.push(
+                      `${JSON.stringify({ id: message.id, result: {} })}\n`,
+                    );
+                    continue;
+                  }
+                  if (message.method === "turn/start") {
+                    turnCount += 1;
+                    const turnId = `turn-reuse-${turnCount}`;
+                    stdout.push(
+                      `${JSON.stringify({ id: message.id, result: { turn: { id: turnId } } })}\n`,
+                    );
+                    queueMicrotask(() => {
+                      stdout.push(
+                        `${JSON.stringify({ method: "item/agentMessage/delta", params: { turnId, delta: `Answer ${turnCount}` } })}\n`,
+                      );
+                      stdout.push(
+                        `${JSON.stringify({ method: "turn/completed", params: { turnId, status: "completed" } })}\n`,
+                      );
+                    });
+                    continue;
+                  }
+                  if (message.method === "thread/read") {
+                    stdout.push(
+                      `${JSON.stringify({ id: message.id, result: { thread: { id: "thread-reuse" }, turns: [{ id: `turn-reuse-${turnCount}` }] } })}\n`,
+                    );
+                    continue;
+                  }
+                  throw new Error(`unexpected method ${message.method}`);
+                }
+              },
+            },
+            kill: () => undefined,
+          }),
+        },
+      }),
+    };
+
+    const common = {
+      processKey: "native-client-thread-reuse-test",
+      codexPath: "/mock/codex",
+      scope: {
+        conversationKey: 6_000_000_004,
+        libraryID: 1,
+        kind: "global" as const,
+        title: "Thread reuse",
+      },
+      model: "gpt-5.4",
+      hooks: {
+        loadProviderSessionId: async () => storedThreadId || undefined,
+        persistProviderSessionId: async (threadId: string) => {
+          storedThreadId = threadId;
+        },
+      },
+    };
+
+    const first = await runCodexAppServerNativeTurn({
+      ...common,
+      messages: [{ role: "user", content: "First question." }],
+    });
+    const second = await runCodexAppServerNativeTurn({
+      ...common,
+      messages: [{ role: "user", content: "Second question." }],
+    });
+
+    assert.equal(first.threadId, "thread-reuse");
+    assert.equal(second.threadId, "thread-reuse");
+    assert.equal(first.resumed, false);
+    assert.equal(second.resumed, true);
+    assert.equal(methods.filter((method) => method === "thread/start").length, 1);
+    assert.equal(methods.filter((method) => method === "thread/resume").length, 1);
   });
 
   it("aborts native turns before model generation when required MCP tools are missing", async function () {

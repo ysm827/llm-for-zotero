@@ -975,6 +975,7 @@ describe("codexAppServerProcess", function () {
             server: { name: "llm_for_zotero" },
             args: { entity: "items", mode: "list" },
             summary: "Found 3 items.",
+            error: { message: "Tool failed after review denial." },
           },
         },
       });
@@ -1023,6 +1024,7 @@ describe("codexAppServerProcess", function () {
       title: "Query library",
       serverName: "llm_for_zotero",
       summary: "Found 3 items.",
+      error: "Tool failed after review denial.",
     });
     assert.deepEqual((completed[0] as { arguments?: unknown }).arguments, {
       entity: "items",

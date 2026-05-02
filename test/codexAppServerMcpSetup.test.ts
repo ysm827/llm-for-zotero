@@ -5,6 +5,7 @@ import {
   installOrUpdateCodexZoteroMcpConfig,
   readCodexNativeMcpSetupStatus,
 } from "../src/codexAppServer/mcpSetup";
+import { getZoteroMcpAllowedToolNames } from "../src/agent/mcp/server";
 import type { CodexAppServerProcess } from "../src/utils/codexAppServerProcess";
 
 describe("Codex app-server MCP setup", function () {
@@ -87,16 +88,19 @@ describe("Codex app-server MCP setup", function () {
     const value = (writeCall?.params as { value?: Record<string, unknown> })
       .value;
     assert.equal(value?.url, "http://127.0.0.1:24680/llm-for-zotero/mcp");
-    assert.deepEqual(value?.enabled_tools, [
-      "query_library",
-      "read_library",
-      "read_paper",
-      "search_paper",
-      "search_literature_online",
-      "read_attachment",
-      "view_pdf_pages",
-      "zotero_confirm_action",
-    ]);
+    assert.equal(value?.default_tools_approval_mode, "approve");
+    assert.deepEqual(value?.enabled_tools, getZoteroMcpAllowedToolNames());
+    assert.include(value?.enabled_tools as string[], "edit_current_note");
+    assert.include(value?.enabled_tools as string[], "run_command");
+    assert.notInclude(value?.enabled_tools as string[], "zotero_confirm_action");
+    const toolApprovals = value?.tools as Record<
+      string,
+      { approval_mode?: string }
+    >;
+    assert.equal(toolApprovals.query_library.approval_mode, "approve");
+    assert.equal(toolApprovals.edit_current_note.approval_mode, "approve");
+    assert.equal(toolApprovals.run_command.approval_mode, "approve");
+    assert.notProperty(toolApprovals, "zotero_confirm_action");
     assert.deepEqual(value?.http_headers, {
       Authorization: `Bearer ${prefStore.get(
         "extensions.zotero.llmforzotero.codexZoteroMcpBearerToken",
@@ -227,8 +231,32 @@ describe("Codex app-server MCP setup", function () {
       servers[scoped.serverName].http_headers["X-LLM-For-Zotero-Scope"],
       "scope-token-123",
     );
+    assert.equal(
+      servers[scoped.serverName].default_tools_approval_mode,
+      "approve",
+    );
     assert.include(servers[scoped.serverName].enabled_tools, "query_library");
     assert.include(servers[scoped.serverName].enabled_tools, "read_library");
+    assert.include(
+      servers[scoped.serverName].enabled_tools,
+      "edit_current_note",
+    );
+    assert.equal(
+      servers[scoped.serverName].tools.edit_current_note.approval_mode,
+      "approve",
+    );
+    assert.equal(
+      servers[scoped.serverName].tools.run_command.approval_mode,
+      "approve",
+    );
+    assert.notInclude(
+      servers[scoped.serverName].enabled_tools,
+      "zotero_confirm_action",
+    );
+    assert.notProperty(
+      servers[scoped.serverName].tools,
+      "zotero_confirm_action",
+    );
   });
 
   it("rejects native turns when required Zotero MCP tools are missing", function () {
