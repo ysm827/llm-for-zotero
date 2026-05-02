@@ -49,7 +49,9 @@ export const ZOTERO_MCP_SAFE_READ_TOOL_NAMES = [
   "read_attachment",
   "view_pdf_pages",
 ] as const;
-const CURATED_READ_TOOL_NAMES = new Set<string>(ZOTERO_MCP_SAFE_READ_TOOL_NAMES);
+const CURATED_READ_TOOL_NAMES = new Set<string>(
+  ZOTERO_MCP_SAFE_READ_TOOL_NAMES,
+);
 const READ_ONLY_TOOL_ANNOTATIONS = {
   readOnlyHint: true,
   openWorldHint: false,
@@ -111,6 +113,47 @@ const scopedZoteroMcpScopes = new Map<
   { createdAt: number; expiresAt: number; scope: ZoteroMcpActiveScope }
 >();
 let activeZoteroMcpScope: ZoteroMcpActiveScope | null = null;
+
+export type ZoteroMcpToolActivityEvent = {
+  requestId: string;
+  phase: "started" | "completed";
+  toolName: string;
+  toolLabel?: string;
+  serverName: string;
+  arguments?: unknown;
+  ok?: boolean;
+  error?: string;
+  profileSignature?: string;
+  conversationKey?: number;
+  libraryID?: number;
+  kind?: "global" | "paper";
+  timestamp: number;
+};
+
+type ZoteroMcpToolActivityObserver = (
+  event: ZoteroMcpToolActivityEvent,
+) => void;
+
+const zoteroMcpToolActivityObservers = new Set<ZoteroMcpToolActivityObserver>();
+
+export function addZoteroMcpToolActivityObserver(
+  observer: ZoteroMcpToolActivityObserver,
+): () => void {
+  zoteroMcpToolActivityObservers.add(observer);
+  return () => {
+    zoteroMcpToolActivityObservers.delete(observer);
+  };
+}
+
+function emitZoteroMcpToolActivity(event: ZoteroMcpToolActivityEvent): void {
+  for (const observer of zoteroMcpToolActivityObservers) {
+    try {
+      observer(event);
+    } catch {
+      /* observer errors must not affect MCP tool execution */
+    }
+  }
+}
 
 function getZoteroPrefs(): {
   get?: (key: string, global?: boolean) => unknown;
@@ -192,13 +235,17 @@ function normalizeServerNamePart(value: unknown): string {
 
 export function getZoteroMcpServerName(profileSignature?: string): string {
   const suffix = normalizeServerNamePart(profileSignature);
-  return suffix ? `${ZOTERO_MCP_SERVER_NAME}_${suffix}` : ZOTERO_MCP_SERVER_NAME;
+  return suffix
+    ? `${ZOTERO_MCP_SERVER_NAME}_${suffix}`
+    : ZOTERO_MCP_SERVER_NAME;
 }
 
-export function buildZoteroMcpConfigValue(params: {
-  scopeToken?: string;
-  required?: boolean;
-} = {}): Record<string, unknown> {
+export function buildZoteroMcpConfigValue(
+  params: {
+    scopeToken?: string;
+    required?: boolean;
+  } = {},
+): Record<string, unknown> {
   const token = getOrCreateZoteroMcpBearerToken();
   const scopeToken = normalizeText(params.scopeToken, 256);
   return {
@@ -446,7 +493,11 @@ function decorateMcpToolDescription(description: string): string {
 }
 
 function decorateMcpToolSchema(inputSchema: object): object {
-  if (!inputSchema || typeof inputSchema !== "object" || Array.isArray(inputSchema)) {
+  if (
+    !inputSchema ||
+    typeof inputSchema !== "object" ||
+    Array.isArray(inputSchema)
+  ) {
     return inputSchema;
   }
   const record = inputSchema as Record<string, unknown>;
@@ -503,6 +554,62 @@ function resolveScopedMcpScope(
     );
   }
   return entry.scope;
+}
+
+function resolveMcpToolActivityScope(
+  headers: Record<string, string> | undefined,
+): ZoteroMcpActiveScope | null {
+  try {
+    return resolveScopedMcpScope(headers);
+  } catch {
+    return null;
+  }
+}
+
+function formatMcpToolActivityRequestId(
+  id: string | number | null | undefined,
+): string {
+  if (typeof id === "string" && id.trim()) return `jsonrpc:${id.trim()}`;
+  if (typeof id === "number" && Number.isFinite(id)) return `jsonrpc:${id}`;
+  return `mcp:${Date.now()}:${Math.random().toString(36).slice(2, 10)}`;
+}
+
+function getMcpToolPresentationLabel(
+  deps: McpServerDeps,
+  toolName: string,
+): string | undefined {
+  const label = deps.toolRegistry
+    .getTool(toolName)
+    ?.presentation?.label?.trim();
+  return label || undefined;
+}
+
+function buildMcpToolActivityEvent(params: {
+  id: string | number | null | undefined;
+  phase: "started" | "completed";
+  toolName: string;
+  toolLabel?: string;
+  args?: unknown;
+  ok?: boolean;
+  error?: string;
+  headers?: Record<string, string>;
+}): ZoteroMcpToolActivityEvent {
+  const scope = resolveMcpToolActivityScope(params.headers);
+  return {
+    requestId: formatMcpToolActivityRequestId(params.id),
+    phase: params.phase,
+    toolName: params.toolName,
+    toolLabel: params.toolLabel,
+    serverName: ZOTERO_MCP_SERVER_NAME,
+    arguments: params.args,
+    ok: params.ok,
+    error: params.error,
+    profileSignature: scope?.profileSignature,
+    conversationKey: scope?.conversationKey,
+    libraryID: scope?.libraryID,
+    kind: scope?.kind,
+    timestamp: Date.now(),
+  };
 }
 
 function createToolContext(
@@ -645,6 +752,7 @@ async function handleToolsCall(
   params: McpToolCallParams,
   deps: McpServerDeps,
   headers?: Record<string, string>,
+  id?: string | number | null,
 ): Promise<McpToolCallResult> {
   pruneExpiredConfirmations();
   const { name, arguments: rawArgs } = params;
@@ -653,12 +761,41 @@ async function handleToolsCall(
     return handleConfirmTool(rawArgs);
   }
 
+  const scopeArgs = extractMcpScopeArgs(rawArgs);
+  const toolLabel = getMcpToolPresentationLabel(deps, name);
+  emitZoteroMcpToolActivity(
+    buildMcpToolActivityEvent({
+      id,
+      phase: "started",
+      toolName: name,
+      toolLabel,
+      args: scopeArgs.toolArgs,
+      headers,
+    }),
+  );
+
+  const completeActivity = (result: { ok: boolean; error?: string }) => {
+    emitZoteroMcpToolActivity(
+      buildMcpToolActivityEvent({
+        id,
+        phase: "completed",
+        toolName: name,
+        toolLabel,
+        args: scopeArgs.toolArgs,
+        ok: result.ok,
+        error: result.error,
+        headers,
+      }),
+    );
+  };
+
   const tool = deps.toolRegistry.getTool(name);
   if (
     !tool ||
     !CURATED_READ_TOOL_NAMES.has(name) ||
     tool.spec.mutability !== "read"
   ) {
+    completeActivity({ ok: false, error: "Tool unavailable in native mode" });
     return {
       content: [
         {
@@ -670,19 +807,31 @@ async function handleToolsCall(
     };
   }
 
-  const prepared = await deps.toolRegistry.prepareExecution(
-    {
-      id: `mcp-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`,
-      name,
-      arguments: extractMcpScopeArgs(rawArgs).toolArgs,
-    },
-    createToolContext(rawArgs, headers),
-  );
+  try {
+    const prepared = await deps.toolRegistry.prepareExecution(
+      {
+        id: `mcp-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`,
+        name,
+        arguments: scopeArgs.toolArgs,
+      },
+      createToolContext(rawArgs, headers),
+    );
 
-  if (prepared.kind === "confirmation") {
-    return formatConfirmationRequired(prepared);
+    if (prepared.kind === "confirmation") {
+      const result = formatConfirmationRequired(prepared);
+      completeActivity({ ok: !result.isError });
+      return result;
+    }
+    const result = formatToolResult(prepared.execution);
+    completeActivity({ ok: !result.isError });
+    return result;
+  } catch (error) {
+    completeActivity({
+      ok: false,
+      error: error instanceof Error ? error.message : String(error),
+    });
+    throw error;
   }
-  return formatToolResult(prepared.execution);
 }
 
 async function handleRequest(
@@ -755,6 +904,7 @@ async function handleRequest(
         params as McpToolCallParams,
         deps,
         headers,
+        id ?? null,
       );
       return makeJsonRpcHttpResponse(makeResult(id ?? null, result));
     }
@@ -816,11 +966,7 @@ export function registerMcpServer(deps: McpServerDeps): void {
           ? options.data
           : JSON.stringify(options.data);
 
-      const response = await handleRequest(
-        body,
-        capturedDeps,
-        options.headers,
-      );
+      const response = await handleRequest(body, capturedDeps, options.headers);
       return [response.status, response.contentType, response.body];
     };
   }

@@ -8,10 +8,12 @@ import type {
 } from "../shared/llm";
 import type { CodexConversationKind, PaperContextRef } from "../shared/types";
 import {
+  addZoteroMcpToolActivityObserver,
   ZOTERO_MCP_SAFE_READ_TOOL_NAMES,
   ZOTERO_MCP_SERVER_NAME,
   registerScopedZoteroMcpScope,
   setActiveZoteroMcpScope,
+  type ZoteroMcpToolActivityEvent,
 } from "../agent/mcp/server";
 import {
   buildLegacyCodexAppServerChatInput,
@@ -159,7 +161,9 @@ export function resolveSafeCodexNativeApprovalRequest(
   return { approved: true };
 }
 
-function extractCodexAppServerThreadSource(result: unknown): string | undefined {
+function extractCodexAppServerThreadSource(
+  result: unknown,
+): string | undefined {
   if (!result || typeof result !== "object") return undefined;
   const source = (result as { thread?: unknown }).thread || result;
   if (!source || typeof source !== "object") return undefined;
@@ -207,7 +211,8 @@ function formatPaperContextLine(
     `contextItemId=${paperContext.contextItemId}`,
   ];
   if (paperContext.title) pieces.push(`title="${paperContext.title}"`);
-  if (paperContext.firstCreator) pieces.push(`firstCreator="${paperContext.firstCreator}"`);
+  if (paperContext.firstCreator)
+    pieces.push(`firstCreator="${paperContext.firstCreator}"`);
   if (paperContext.year) pieces.push(`year="${paperContext.year}"`);
   if (paperContext.attachmentTitle) {
     pieces.push(`attachmentTitle="${paperContext.attachmentTitle}"`);
@@ -341,9 +346,7 @@ function buildNativeMessages(params: {
   const latestUser = visibleMessages[latestUserIndex]!;
   if (!params.prefixLatestUserWithContext) {
     return [
-      ...(systemText
-        ? [{ role: "system" as const, content: systemText }]
-        : []),
+      ...(systemText ? [{ role: "system" as const, content: systemText }] : []),
       ...history,
       latestUser,
     ];
@@ -415,7 +418,10 @@ async function startNativeThread(params: {
   let developerInstructionsAccepted = true;
   let threadResult: unknown;
   try {
-    threadResult = await params.proc.sendRequest("thread/start", threadStartParams);
+    threadResult = await params.proc.sendRequest(
+      "thread/start",
+      threadStartParams,
+    );
   } catch (error) {
     if (
       !params.developerInstructions ||
@@ -429,7 +435,10 @@ async function startNativeThread(params: {
     ztoolkit.log(
       "Codex app-server native: thread/start developerInstructions unsupported; using visible context fallback",
     );
-    threadResult = await params.proc.sendRequest("thread/start", fallbackParams);
+    threadResult = await params.proc.sendRequest(
+      "thread/start",
+      fallbackParams,
+    );
   }
   const threadId = extractCodexAppServerThreadId(threadResult);
   if (!threadId) {
@@ -590,11 +599,13 @@ function registerNativeApprovalRequestHandlers(params: {
   };
 }
 
-export async function listCodexAppServerModels(params: {
-  codexPath?: string;
-  includeHidden?: boolean;
-  processKey?: string;
-} = {}): Promise<unknown> {
+export async function listCodexAppServerModels(
+  params: {
+    codexPath?: string;
+    includeHidden?: boolean;
+    processKey?: string;
+  } = {},
+): Promise<unknown> {
   const codexPath = resolveCodexAppServerBinaryPath(params.codexPath);
   const proc = await getOrCreateCodexAppServerProcess(
     params.processKey || CODEX_APP_SERVER_NATIVE_PROCESS_KEY,
@@ -721,13 +732,12 @@ export async function runCodexAppServerNativeTurn(params: {
   processKey?: string;
   hooks?: CodexNativeStoreHooks;
   onDelta?: (delta: string) => void;
-  onAgentMessageDelta?: (
-    event: CodexAppServerAgentMessageDeltaEvent,
-  ) => void;
+  onAgentMessageDelta?: (event: CodexAppServerAgentMessageDeltaEvent) => void;
   onReasoning?: (event: ReasoningEvent) => void;
   onUsage?: (usage: UsageStats) => void;
   onItemStarted?: (event: CodexAppServerItemEvent) => void;
   onItemCompleted?: (event: CodexAppServerItemEvent) => void;
+  onMcpToolActivity?: (event: ZoteroMcpToolActivityEvent) => void;
   onTurnCompleted?: (event: { turnId: string; status?: string }) => void;
   onMcpSetupWarning?: (message: string) => void;
   onDiagnostics?: (diagnostics: CodexNativeDiagnostics) => void;
@@ -883,38 +893,60 @@ export async function runCodexAppServerNativeTurn(params: {
       const input = await resolveCodexAppServerTurnInputWithFallback({
         proc,
         threadId: thread.threadId,
-        historyItemsToInject: thread.resumed ? [] : preparedTurn.historyItemsToInject,
+        historyItemsToInject: thread.resumed
+          ? []
+          : preparedTurn.historyItemsToInject,
         turnInput: preparedTurn.turnInput,
-        legacyInputFactory: () => buildLegacyCodexAppServerChatInput(nativeMessages),
+        legacyInputFactory: () =>
+          buildLegacyCodexAppServerChatInput(nativeMessages),
         logContext: "native",
       });
-      const turnResult = await proc.sendRequest("turn/start", {
-        threadId: thread.threadId,
-        input,
-        model: params.model,
-        approvalPolicy: "never",
-        ...reasoningParams,
-      });
-      const turnId = extractCodexAppServerTurnId(turnResult);
-      if (!turnId) {
-        throw new Error("Codex app-server did not return a turn ID");
+      const unregisterMcpToolActivity = params.onMcpToolActivity
+        ? addZoteroMcpToolActivityObserver((event) => {
+            const sameConversation =
+              !event.conversationKey ||
+              !params.scope.conversationKey ||
+              event.conversationKey === params.scope.conversationKey;
+            const sameProfile =
+              !event.profileSignature ||
+              !profileSignature ||
+              event.profileSignature === profileSignature;
+            if (!sameConversation || !sameProfile) return;
+            params.onMcpToolActivity?.(event);
+          })
+        : () => undefined;
+      let text = "";
+      try {
+        const turnResult = await proc.sendRequest("turn/start", {
+          threadId: thread.threadId,
+          input,
+          model: params.model,
+          approvalPolicy: "never",
+          ...reasoningParams,
+        });
+        const turnId = extractCodexAppServerTurnId(turnResult);
+        if (!turnId) {
+          throw new Error("Codex app-server did not return a turn ID");
+        }
+        text = await waitForCodexAppServerTurnCompletion({
+          proc,
+          threadId: thread.threadId,
+          turnId,
+          onTextDelta: params.onDelta,
+          onAgentMessageDelta: params.onAgentMessageDelta,
+          onReasoning: params.onReasoning,
+          onUsage: params.onUsage,
+          onItemStarted: params.onItemStarted,
+          onItemCompleted: params.onItemCompleted,
+          onTurnCompleted: params.onTurnCompleted,
+          signal: params.signal,
+          interruptOnAbort: true,
+          cacheKey: processKey,
+          processOptions: { codexPath },
+        });
+      } finally {
+        unregisterMcpToolActivity();
       }
-      const text = await waitForCodexAppServerTurnCompletion({
-        proc,
-        threadId: thread.threadId,
-        turnId,
-        onTextDelta: params.onDelta,
-        onAgentMessageDelta: params.onAgentMessageDelta,
-        onReasoning: params.onReasoning,
-        onUsage: params.onUsage,
-        onItemStarted: params.onItemStarted,
-        onItemCompleted: params.onItemCompleted,
-        onTurnCompleted: params.onTurnCompleted,
-        signal: params.signal,
-        interruptOnAbort: true,
-        cacheKey: processKey,
-        processOptions: { codexPath },
-      });
       const historyVerified = await verifyCodexAppServerThreadHistory({
         proc,
         threadId: thread.threadId,

@@ -2225,8 +2225,7 @@ function summarizeAgentTraceToolCall(
     resolveToolPresentationSummary(
       getToolDefinition(name)?.presentation?.summaries?.onCall,
       { label, args, request },
-    ) ||
-    (skillName ? `Using Skill: ${skillName}` : `Using ${label}`);
+    ) || (skillName ? `Using Skill: ${skillName}` : `Using ${label}`);
 
   // Show code block for shell commands and file I/O
   let codeBlock: string | undefined;
@@ -2368,6 +2367,34 @@ function summarizeAgentTraceToolResult(
   };
 }
 
+function summarizeCodexToolActivity(input: {
+  phase: "started" | "completed";
+  toolName?: string;
+  toolLabel?: string;
+  serverName?: string;
+  text?: string;
+}): AgentTraceSummaryRow {
+  const explicitText = readAgentTraceText(input.text);
+  if (explicitText) {
+    return {
+      kind: "tool",
+      icon: "⌘",
+      text: explicitText,
+    };
+  }
+  const toolName = readAgentTraceText(input.toolName);
+  const label =
+    readAgentTraceText(input.toolLabel) ||
+    (toolName ? toolLabelFromName(toolName) : "") ||
+    "Zotero MCP tool";
+  const verb = input.phase === "completed" ? "Used" : "Using";
+  return {
+    kind: "tool",
+    icon: "⌘",
+    text: `${verb} ${label}`,
+  };
+}
+
 function isGenericAgentStatusText(text: string): boolean {
   const normalized = text.trim().toLowerCase();
   return (
@@ -2384,8 +2411,10 @@ function isHiddenClaudeStartupStatus(text: string): boolean {
     text === "Detected updated context" ||
     text === "Initializing Claude session" ||
     text === "Rebuilding Claude session after runtime change" ||
-    text === "Session signature mismatch detected. Retrying with a fresh Claude session." ||
-    text === "Claude runtime changed. Rebuilding this conversation on the new runtime while keeping local context." ||
+    text ===
+      "Session signature mismatch detected. Retrying with a fresh Claude session." ||
+    text ===
+      "Claude runtime changed. Rebuilding this conversation on the new runtime while keeping local context." ||
     /^Claude bridge URL:/i.test(text) ||
     text === "Claude bridge URL is empty. Falling back to local runtime."
   );
@@ -2437,6 +2466,27 @@ function compactAgentTraceEvents(
             previous.payload.details,
             entry.payload.details,
           ),
+        },
+      };
+      continue;
+    }
+    if (
+      entry.payload.type === "codex_tool_activity" &&
+      previous?.payload.type === "codex_tool_activity" &&
+      entry.payload.itemId === previous.payload.itemId
+    ) {
+      compact[compact.length - 1] = {
+        ...entry,
+        payload: {
+          ...previous.payload,
+          ...entry.payload,
+          toolName: entry.payload.toolName || previous.payload.toolName,
+          toolLabel: entry.payload.toolLabel || previous.payload.toolLabel,
+          serverName: entry.payload.serverName || previous.payload.serverName,
+          args:
+            entry.payload.args !== undefined
+              ? entry.payload.args
+              : previous.payload.args,
         },
       };
       continue;
@@ -2515,8 +2565,8 @@ export function buildAgentTraceDisplayItems(
       text: isCodexTrace
         ? "Codex received the request"
         : requestChips.length
-        ? "Request and attached context received"
-        : "Request received",
+          ? "Request and attached context received"
+          : "Request received",
     },
     chips: requestChips,
   });
@@ -2581,15 +2631,22 @@ export function buildAgentTraceDisplayItems(
           undefined;
         if (!text) break;
         const hasExplicitStepId = Boolean(
-          typeof entry.payload.stepId === "string" && entry.payload.stepId.trim(),
+          typeof entry.payload.stepId === "string" &&
+          entry.payload.stepId.trim(),
         );
         const reasoningKey = hasExplicitStepId
           ? getReasoningTraceKey(entry.payload)
           : `step:${fallbackReasoningStep}`;
-        let existing: Extract<AgentTraceDisplayItem, { type: "reasoning" }> | null = null;
+        let existing: Extract<
+          AgentTraceDisplayItem,
+          { type: "reasoning" }
+        > | null = null;
         for (let itemIndex = items.length - 1; itemIndex >= 0; itemIndex -= 1) {
           const candidate = items[itemIndex];
-          if (candidate.type === "reasoning" && candidate.key === reasoningKey) {
+          if (
+            candidate.type === "reasoning" &&
+            candidate.key === reasoningKey
+          ) {
             existing = candidate;
             break;
           }
@@ -2652,6 +2709,28 @@ export function buildAgentTraceDisplayItems(
             }
           }
         }
+        break;
+      }
+      case "codex_tool_activity": {
+        const toolName =
+          readAgentTraceText(entry.payload.toolName) || undefined;
+        items.push({
+          type: "action",
+          row: summarizeCodexToolActivity({
+            phase: entry.payload.phase,
+            toolName,
+            toolLabel: entry.payload.toolLabel,
+            serverName: entry.payload.serverName,
+            text: entry.payload.text,
+          }),
+          chips: toolName
+            ? buildAgentTraceToolChips(
+                toolName,
+                entry.payload.args,
+                userMessage,
+              )
+            : undefined,
+        });
         break;
       }
       case "confirmation_required":

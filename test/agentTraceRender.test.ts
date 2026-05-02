@@ -4,6 +4,7 @@ import {
   getPendingActionButtonLayout,
 } from "../src/modules/contextPanel/agentTrace/render";
 import {
+  renderAssistantMarkdownHtmlForChat,
   shouldAttachAssistantResponseContextMenu,
   shouldDecorateInterleavedAgentTraceCitations,
   shouldSuppressAssistantResponseContextMenu,
@@ -14,6 +15,31 @@ import type {
 } from "../src/agent/types";
 
 describe("agentTrace render", function () {
+  it("uses rendered Markdown HTML for streaming assistant text", function () {
+    const html = renderAssistantMarkdownHtmlForChat(
+      [
+        "# Result",
+        "",
+        "- **Bold** [link](https://example.com)",
+        "",
+        "`code`",
+        "",
+        "| A | B |",
+        "|---|---|",
+        "| 1 | 2 |",
+      ].join("\n"),
+    );
+
+    assert.include(html, "<h2");
+    assert.include(html, "<strong>Bold</strong>");
+    assert.include(html, "<a ");
+    assert.include(html, "<code>code</code>");
+    const tableHtml = renderAssistantMarkdownHtmlForChat(
+      "| A | B |\n|---|---|\n| 1 | 2 |",
+    );
+    assert.include(tableHtml, "<table");
+  });
+
   it("preserves whitespace when compacting reasoning deltas", function () {
     const events: AgentRunEventRecord[] = [
       {
@@ -143,9 +169,7 @@ describe("agentTrace render", function () {
     });
     const progressMessages = items
       .filter(
-        (
-          item,
-        ): item is Extract<(typeof items)[number], { type: "message" }> =>
+        (item): item is Extract<(typeof items)[number], { type: "message" }> =>
           item.type === "message",
       )
       .map((item) => item.text);
@@ -154,6 +178,89 @@ describe("agentTrace render", function () {
       "I'm searching the Zotero library.",
       "Next I'm opening the matching records.",
     ]);
+  });
+
+  it("renders concrete Codex MCP tool activity rows", function () {
+    const events: AgentRunEventRecord[] = [
+      {
+        runId: "run-1",
+        seq: 1,
+        eventType: "codex_tool_activity",
+        payload: {
+          type: "codex_tool_activity",
+          itemId: "tool-1",
+          phase: "started",
+          toolName: "query_library",
+          serverName: "llm_for_zotero",
+          args: { entity: "items" },
+        },
+        createdAt: 1,
+      },
+      {
+        runId: "run-1",
+        seq: 2,
+        eventType: "codex_tool_activity",
+        payload: {
+          type: "codex_tool_activity",
+          itemId: "tool-1",
+          phase: "completed",
+          toolName: "query_library",
+          serverName: "llm_for_zotero",
+          args: { entity: "items" },
+        },
+        createdAt: 2,
+      },
+    ];
+
+    const { items } = buildAgentTraceDisplayItems(events, null, {
+      role: "assistant",
+      text: "",
+      timestamp: 1,
+      runMode: "agent",
+      modelProviderLabel: "Codex",
+    });
+    const actionTexts = items
+      .filter(
+        (item): item is Extract<(typeof items)[number], { type: "action" }> =>
+          item.type === "action",
+      )
+      .map((item) => item.row.text);
+
+    assert.notInclude(actionTexts, "Using Query Library");
+    assert.include(actionTexts, "Used Query Library");
+  });
+
+  it("falls back to a Zotero MCP tool label when Codex omits the exact tool name", function () {
+    const events: AgentRunEventRecord[] = [
+      {
+        runId: "run-1",
+        seq: 1,
+        eventType: "codex_tool_activity",
+        payload: {
+          type: "codex_tool_activity",
+          itemId: "tool-unknown",
+          phase: "started",
+          serverName: "llm_for_zotero",
+        },
+        createdAt: 1,
+      },
+    ];
+
+    const { items } = buildAgentTraceDisplayItems(events, null, {
+      role: "assistant",
+      text: "",
+      timestamp: 1,
+      runMode: "agent",
+      modelProviderLabel: "Codex",
+    });
+    const actionTexts = items
+      .filter(
+        (item): item is Extract<(typeof items)[number], { type: "action" }> =>
+          item.type === "action",
+      )
+      .map((item) => item.row.text);
+
+    assert.include(actionTexts, "Using Zotero MCP tool");
   });
 
   it("compacts same app-server reasoning item IDs into one thinking step", function () {
@@ -264,8 +371,7 @@ describe("agentTrace render", function () {
     );
     assert.isFalse(
       items.some(
-        (item) =>
-          item.type === "action" && item.row.text === "Running agent",
+        (item) => item.type === "action" && item.row.text === "Running agent",
       ),
     );
   });
@@ -309,9 +415,7 @@ describe("agentTrace render", function () {
     ];
 
     const { items } = buildAgentTraceDisplayItems(events, null);
-    const reasoningItems = items.filter(
-      (item) => item.type === "reasoning",
-    );
+    const reasoningItems = items.filter((item) => item.type === "reasoning");
 
     assert.lengthOf(reasoningItems, 2);
     assert.deepInclude(reasoningItems[0], {
@@ -590,17 +694,13 @@ describe("agentTrace render", function () {
       },
     ];
 
-    const { items, isInterleaved } = buildAgentTraceDisplayItems(
-      events,
-      null,
-      {
-        role: "assistant",
-        text: "This paper is about working memory.",
-        timestamp: 1,
-        runMode: "agent",
-        modelProviderLabel: "Codex",
-      },
-    );
+    const { items, isInterleaved } = buildAgentTraceDisplayItems(events, null, {
+      role: "assistant",
+      text: "This paper is about working memory.",
+      timestamp: 1,
+      runMode: "agent",
+      modelProviderLabel: "Codex",
+    });
     const inlineTexts = items
       .filter(
         (
@@ -761,17 +861,13 @@ describe("agentTrace render", function () {
       },
     ];
 
-    const { items, isInterleaved } = buildAgentTraceDisplayItems(
-      events,
-      null,
-      {
-        role: "assistant",
-        text: finalText,
-        timestamp: 1,
-        runMode: "agent",
-        modelProviderLabel: "Codex",
-      },
-    );
+    const { items, isInterleaved } = buildAgentTraceDisplayItems(events, null, {
+      role: "assistant",
+      text: finalText,
+      timestamp: 1,
+      runMode: "agent",
+      modelProviderLabel: "Codex",
+    });
     const finalInlineText = items.find(
       (item) => item.type === "inline_text" && item.text === finalText,
     );
@@ -882,7 +978,9 @@ describe("agentTrace render", function () {
     const { items, isInterleaved } = buildAgentTraceDisplayItems(events, null);
     const inlineTexts = items
       .filter(
-        (item): item is Extract<(typeof items)[number], { type: "inline_text" }> =>
+        (
+          item,
+        ): item is Extract<(typeof items)[number], { type: "inline_text" }> =>
           item.type === "inline_text",
       )
       .map((item) => item.text);

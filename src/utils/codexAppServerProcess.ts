@@ -50,6 +50,12 @@ export type CodexAppServerItemEvent = {
   status?: string;
   summary?: string;
   details?: string;
+  name?: string;
+  toolName?: string;
+  title?: string;
+  serverName?: string;
+  arguments?: unknown;
+  raw?: Record<string, unknown>;
 };
 
 export type CodexAppServerAgentMessageDeltaEvent = {
@@ -702,14 +708,59 @@ function normalizeCodexAppServerText(value: unknown): string {
   );
 }
 
-function extractCodexAppServerItem(rawParams: unknown): {
-  id?: string;
-  type?: string;
-  role?: string;
-  status?: string;
-  summary?: string;
-  details?: string;
-} | null {
+function normalizeCodexAppServerFieldText(
+  value: unknown,
+  maxLength = 240,
+): string | undefined {
+  const text = normalizeCodexAppServerText(value).replace(/\s+/g, " ").trim();
+  return text ? text.slice(0, maxLength) : undefined;
+}
+
+function readCodexAppServerObjectName(value: unknown): string | undefined {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return normalizeCodexAppServerFieldText(value);
+  }
+  const record = value as Record<string, unknown>;
+  return (
+    normalizeCodexAppServerFieldText(record.name) ||
+    normalizeCodexAppServerFieldText(record.toolName) ||
+    normalizeCodexAppServerFieldText(record.title) ||
+    normalizeCodexAppServerFieldText(record.id)
+  );
+}
+
+function copyCodexAppServerRawMetadata(
+  source: Record<string, unknown>,
+): Record<string, unknown> | undefined {
+  const keys = [
+    "id",
+    "type",
+    "role",
+    "status",
+    "name",
+    "tool",
+    "toolName",
+    "tool_name",
+    "title",
+    "server",
+    "serverName",
+    "server_name",
+    "mcpServerName",
+    "arguments",
+    "args",
+    "input",
+  ];
+  const raw: Record<string, unknown> = {};
+  for (const key of keys) {
+    if (!Object.prototype.hasOwnProperty.call(source, key)) continue;
+    raw[key] = source[key];
+  }
+  return Object.keys(raw).length ? raw : undefined;
+}
+
+function extractCodexAppServerItem(
+  rawParams: unknown,
+): CodexAppServerItemEvent | null {
   if (!rawParams || typeof rawParams !== "object") return null;
   const source =
     rawParams &&
@@ -718,6 +769,7 @@ function extractCodexAppServerItem(rawParams: unknown): {
       ? (rawParams as { item: unknown }).item
       : rawParams;
   if (!source || typeof source !== "object") return null;
+  const sourceRecord = source as Record<string, unknown>;
   const item = source as {
     id?: unknown;
     type?: unknown;
@@ -727,6 +779,18 @@ function extractCodexAppServerItem(rawParams: unknown): {
     content?: unknown;
     text?: unknown;
     reasoning?: unknown;
+    name?: unknown;
+    tool?: unknown;
+    toolName?: unknown;
+    tool_name?: unknown;
+    title?: unknown;
+    server?: unknown;
+    serverName?: unknown;
+    server_name?: unknown;
+    mcpServerName?: unknown;
+    arguments?: unknown;
+    args?: unknown;
+    input?: unknown;
   };
   const status = typeof item.status === "string" ? item.status.trim() : "";
   return {
@@ -749,6 +813,19 @@ function extractCodexAppServerItem(rawParams: unknown): {
       normalizeCodexAppServerText(item.reasoning) ||
       normalizeCodexAppServerText(item.text) ||
       undefined,
+    name: normalizeCodexAppServerFieldText(item.name),
+    toolName:
+      readCodexAppServerObjectName(item.toolName) ||
+      readCodexAppServerObjectName(item.tool_name) ||
+      readCodexAppServerObjectName(item.tool),
+    title: normalizeCodexAppServerFieldText(item.title),
+    serverName:
+      readCodexAppServerObjectName(item.serverName) ||
+      readCodexAppServerObjectName(item.server_name) ||
+      readCodexAppServerObjectName(item.mcpServerName) ||
+      readCodexAppServerObjectName(item.server),
+    arguments: item.arguments ?? item.args ?? item.input,
+    raw: copyCodexAppServerRawMetadata(sourceRecord),
   };
 }
 

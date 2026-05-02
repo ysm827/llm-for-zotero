@@ -1,5 +1,6 @@
 import { assert } from "chai";
 import {
+  addZoteroMcpToolActivityObserver,
   getOrCreateZoteroMcpBearerToken,
   getZoteroMcpServerUrl,
   registerScopedZoteroMcpScope,
@@ -215,6 +216,85 @@ describe("Zotero MCP server", function () {
       name: "query_library",
       input: { entity: "items" },
     });
+  });
+
+  it("emits exact MCP tool activity for native Codex trace fallback", async function () {
+    const registry = new AgentToolRegistry();
+    registry.register(createReadTool("read_library"));
+    registerMcpServer({
+      toolRegistry: registry,
+      zoteroGateway: {} as never,
+    });
+    const scoped = registerScopedZoteroMcpScope(
+      {
+        profileSignature: "profile-dev",
+        conversationKey: 789,
+        libraryID: 7,
+        kind: "paper",
+        activeItemId: 77,
+      },
+      { token: "activity-scope-token" },
+    );
+    const events: Array<{
+      requestId: string;
+      phase: "started" | "completed";
+      toolName: string;
+      arguments?: unknown;
+      conversationKey?: number;
+      libraryID?: number;
+    }> = [];
+    const unregister = addZoteroMcpToolActivityObserver((event) => {
+      events.push(event);
+    });
+
+    try {
+      const response = await invokeMcpEndpoint({
+        token: getOrCreateZoteroMcpBearerToken(),
+        headers: { [ZOTERO_MCP_SCOPE_HEADER]: scoped.token },
+        body: {
+          jsonrpc: "2.0",
+          id: "tool-call-1",
+          method: "tools/call",
+          params: {
+            name: "read_library",
+            arguments: { sections: ["metadata"], libraryID: 999 },
+          },
+        },
+      });
+      assert.equal(response[0], 200);
+    } finally {
+      unregister();
+      scoped.clear();
+    }
+
+    assert.deepEqual(
+      events.map((event) => ({
+        requestId: event.requestId,
+        phase: event.phase,
+        toolName: event.toolName,
+        arguments: event.arguments,
+        conversationKey: event.conversationKey,
+        libraryID: event.libraryID,
+      })),
+      [
+        {
+          requestId: "jsonrpc:tool-call-1",
+          phase: "started",
+          toolName: "read_library",
+          arguments: { sections: ["metadata"] },
+          conversationKey: 789,
+          libraryID: 7,
+        },
+        {
+          requestId: "jsonrpc:tool-call-1",
+          phase: "completed",
+          toolName: "read_library",
+          arguments: { sections: ["metadata"] },
+          conversationKey: 789,
+          libraryID: 7,
+        },
+      ],
+    );
   });
 
   it("uses explicit MCP scope args as context defaults without passing them to validators", async function () {

@@ -288,6 +288,17 @@ export type AgentEvent =
       status?: "running" | "completed";
     }
   | {
+      type: "codex_tool_activity";
+      itemId: string;
+      phase: "started" | "completed";
+      toolName?: string;
+      toolLabel?: string;
+      serverName?: string;
+      args?: unknown;
+      ok?: boolean;
+      text?: string;
+    }
+  | {
       type: "usage";
       inputTokens: number;
       outputTokens: number;

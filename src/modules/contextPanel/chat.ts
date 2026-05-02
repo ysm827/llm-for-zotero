@@ -1,5 +1,11 @@
 import { renderMarkdown, renderMarkdownForNote } from "../../utils/markdown";
-import { getWelcomeHtml, getWebChatWelcomeHtml, getStandaloneLibraryChatStartPageHtml, getPaperChatStartPageHtml, getNoteEditingStartPageHtml } from "../../utils/i18n";
+import {
+  getWelcomeHtml,
+  getWebChatWelcomeHtml,
+  getStandaloneLibraryChatStartPageHtml,
+  getPaperChatStartPageHtml,
+  getNoteEditingStartPageHtml,
+} from "../../utils/i18n";
 import {
   appendMessage as appendStoredMessage,
   clearConversation as clearStoredConversation,
@@ -127,10 +133,7 @@ import {
   selectedRuntimeModeCache,
   pdfTextCache,
 } from "./state";
-import {
-  agentRunTraceCache,
-  agentRunTraceLoadingTasks,
-} from "./agentState";
+import { agentRunTraceCache, agentRunTraceLoadingTasks } from "./agentState";
 import {
   sanitizeText,
   formatTime,
@@ -411,7 +414,10 @@ function resolveAutoLoadedPaperContextForItem(
   if (activeNoteSession?.noteKind === "standalone") {
     return null;
   }
-  if (activeNoteSession?.noteKind === "item" && activeNoteSession.parentItemId) {
+  if (
+    activeNoteSession?.noteKind === "item" &&
+    activeNoteSession.parentItemId
+  ) {
     const parentItem = Zotero.Items.get(activeNoteSession.parentItemId) || null;
     if (!parentItem?.isRegularItem?.()) return null;
     const activeContextItem = getActiveContextAttachmentFromTabs();
@@ -429,13 +435,15 @@ function resolveAutoLoadedPaperContextForItem(
 
 function resolveLibraryDisplayName(libraryID: number): string | undefined {
   if (!Number.isFinite(libraryID) || libraryID <= 0) return undefined;
-  const libraries = (Zotero as unknown as {
-    Libraries?: {
-      getName?: (libraryID: number) => string;
-      get?: (libraryID: number) => { name?: string } | null | undefined;
-      userLibraryID?: number;
-    };
-  }).Libraries;
+  const libraries = (
+    Zotero as unknown as {
+      Libraries?: {
+        getName?: (libraryID: number) => string;
+        get?: (libraryID: number) => { name?: string } | null | undefined;
+        userLibraryID?: number;
+      };
+    }
+  ).Libraries;
   try {
     const directName = libraries?.getName?.(libraryID);
     if (typeof directName === "string" && directName.trim()) {
@@ -552,21 +560,11 @@ function renderUserBubbleContent(
   }
 }
 
-function looksLikeStreamingMarkdownTable(text: string): boolean {
-  const lines = text.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
-  for (let index = 0; index < lines.length - 1; index += 1) {
-    const line = lines[index];
-    const next = lines[index + 1];
-    if (!line.startsWith("|")) continue;
-    if (!next?.startsWith("|")) continue;
-    if (next === "|" || /^\|?[\s:-]+(?:\|[\s:-]+)*\|?$/.test(next)) {
-      return true;
-    }
-    if (line.includes("|") && next.includes("|")) {
-      return true;
-    }
-  }
-  return false;
+export function renderAssistantMarkdownHtmlForChat(
+  text: string,
+  options?: { resolveImage?: (src: string) => string | null },
+): string {
+  return renderMarkdown(sanitizeText(text), options);
 }
 
 function attachRenderedCopyButtons(root: ParentNode, doc: Document): void {
@@ -639,9 +637,7 @@ export function shouldDecorateInterleavedAgentTraceCitations(params: {
   streaming?: boolean;
 }): boolean {
   return Boolean(
-    params.agentTraceEl &&
-      params.agentUsesInterleavedText &&
-      !params.streaming,
+    params.agentTraceEl && params.agentUsesInterleavedText && !params.streaming,
   );
 }
 
@@ -793,10 +789,19 @@ const followBottomStabilizers = new Map<
 
 /** Cumulative API token usage per conversation key for the current session. */
 const sessionTokenTotals = new Map<number, number>();
-const contextUsageSnapshots = new Map<number, { contextTokens: number; contextWindow?: number }>();
-function getContextInputWindow(effectiveRequestConfig: EffectiveRequestConfig): number | undefined {
+const contextUsageSnapshots = new Map<
+  number,
+  { contextTokens: number; contextWindow?: number }
+>();
+function getContextInputWindow(
+  effectiveRequestConfig: EffectiveRequestConfig,
+): number | undefined {
   const advancedCap = effectiveRequestConfig.advanced?.inputTokenCap;
-  if (typeof advancedCap === "number" && Number.isFinite(advancedCap) && advancedCap > 0) {
+  if (
+    typeof advancedCap === "number" &&
+    Number.isFinite(advancedCap) &&
+    advancedCap > 0
+  ) {
     return advancedCap;
   }
   return getModelInputTokenLimit(effectiveRequestConfig.model || "");
@@ -1042,7 +1047,7 @@ async function loadStoredConversationByKey(
     ? loadClaudeConversation(conversationKey, limit)
     : isCodexConversationKey(conversationKey)
       ? loadCodexConversation(conversationKey, limit)
-    : loadConversation(conversationKey, limit);
+      : loadConversation(conversationKey, limit);
 }
 
 async function updateStoredLatestUserMessageByConversation(
@@ -1069,11 +1074,13 @@ async function updateStoredLatestAssistantMessageByConversation(
     await updateLatestClaudeConversationAssistantMessage(conversationKey, {
       ...message,
       contextTokens:
-        Number.isFinite(Number(message.contextTokens)) && Number(message.contextTokens) > 0
+        Number.isFinite(Number(message.contextTokens)) &&
+        Number(message.contextTokens) > 0
           ? Math.floor(Number(message.contextTokens))
           : latestContextSnapshot?.contextTokens,
       contextWindow:
-        Number.isFinite(Number(message.contextWindow)) && Number(message.contextWindow) > 0
+        Number.isFinite(Number(message.contextWindow)) &&
+        Number(message.contextWindow) > 0
           ? Math.floor(Number(message.contextWindow))
           : latestContextSnapshot?.contextWindow,
     });
@@ -1084,11 +1091,13 @@ async function updateStoredLatestAssistantMessageByConversation(
     await updateLatestCodexAssistantMessage(conversationKey, {
       ...message,
       contextTokens:
-        Number.isFinite(Number(message.contextTokens)) && Number(message.contextTokens) > 0
+        Number.isFinite(Number(message.contextTokens)) &&
+        Number(message.contextTokens) > 0
           ? Math.floor(Number(message.contextTokens))
           : latestContextSnapshot?.contextTokens,
       contextWindow:
-        Number.isFinite(Number(message.contextWindow)) && Number(message.contextWindow) > 0
+        Number.isFinite(Number(message.contextWindow)) &&
+        Number(message.contextWindow) > 0
           ? Math.floor(Number(message.contextWindow))
           : latestContextSnapshot?.contextWindow,
     });
@@ -1236,10 +1245,16 @@ export async function ensureConversationLoaded(
         conversationKey,
         PERSISTED_HISTORY_LIMIT,
       );
-      const panelMessages = storedMessages.map((message) => toPanelMessage(message));
+      const panelMessages = storedMessages.map((message) =>
+        toPanelMessage(message),
+      );
       const latestAssistantWithContext = [...storedMessages]
         .reverse()
-        .find((message) => message.role === "assistant" && typeof message.contextTokens === "number");
+        .find(
+          (message) =>
+            message.role === "assistant" &&
+            typeof message.contextTokens === "number",
+        );
       if (latestAssistantWithContext?.contextTokens) {
         contextUsageSnapshots.set(conversationKey, {
           contextTokens: latestAssistantWithContext.contextTokens,
@@ -1291,7 +1306,9 @@ async function ensureAgentRunTraceLoaded(
   await task;
 }
 
-function getCachedAgentRunEvents(runId: string | undefined): AgentRunEventRecord[] {
+function getCachedAgentRunEvents(
+  runId: string | undefined,
+): AgentRunEventRecord[] {
   const normalizedRunId = (runId || "").trim();
   if (!normalizedRunId) return [];
   return agentRunTraceCache.get(normalizedRunId) || [];
@@ -1637,7 +1654,12 @@ export type EffectiveRequestConfig = {
 
 function isCodexAppServerConversationRequest(params: {
   item: Zotero.Item;
-  authMode?: "api_key" | "codex_auth" | "codex_app_server" | "copilot_auth" | "webchat";
+  authMode?:
+    | "api_key"
+    | "codex_auth"
+    | "codex_app_server"
+    | "copilot_auth"
+    | "webchat";
   providerProtocol?: ProviderProtocol;
   modelProviderLabel?: string;
 }): boolean {
@@ -1652,7 +1674,12 @@ function isCodexAppServerConversationRequest(params: {
 
 function resolveEffectiveConversationSystem(params: {
   item: Zotero.Item;
-  authMode?: "api_key" | "codex_auth" | "codex_app_server" | "copilot_auth" | "webchat";
+  authMode?:
+    | "api_key"
+    | "codex_auth"
+    | "codex_app_server"
+    | "copilot_auth"
+    | "webchat";
   providerProtocol?: ProviderProtocol;
   modelProviderLabel?: string;
 }): ConversationSystem {
@@ -1673,19 +1700,24 @@ function resolveEffectiveRequestConfig(params: {
   model?: string;
   apiBase?: string;
   apiKey?: string;
-  authMode?: "api_key" | "codex_auth" | "codex_app_server" | "copilot_auth" | "webchat";
+  authMode?:
+    | "api_key"
+    | "codex_auth"
+    | "codex_app_server"
+    | "copilot_auth"
+    | "webchat";
   providerProtocol?: ProviderProtocol;
   modelEntryId?: string;
   modelProviderLabel?: string;
   reasoning?: LLMReasoningConfig;
   advanced?: AdvancedModelParams;
 }): EffectiveRequestConfig {
-  if (
-    isCodexAppServerConversationRequest(params)
-  ) {
-    const model = (params.model || getCodexRuntimeModelPref()).trim() || "gpt-5.4";
+  if (isCodexAppServerConversationRequest(params)) {
+    const model =
+      (params.model || getCodexRuntimeModelPref()).trim() || "gpt-5.4";
     const reasoningMode = getCodexReasoningModePref();
-    const reasoning = params.reasoning ||
+    const reasoning =
+      params.reasoning ||
       (reasoningMode === "auto"
         ? undefined
         : {
@@ -1707,9 +1739,9 @@ function resolveEffectiveRequestConfig(params: {
 
   const hasExplicitProviderMetadata = Boolean(
     params.modelProviderLabel ||
-      params.providerProtocol ||
-      params.authMode ||
-      params.modelEntryId,
+    params.providerProtocol ||
+    params.authMode ||
+    params.modelEntryId,
   );
   const fallbackEntry = hasExplicitProviderMetadata
     ? null
@@ -1724,8 +1756,7 @@ function resolveEffectiveRequestConfig(params: {
           apiBase: params.apiBase ?? "",
           apiKey: params.apiKey ?? "",
           authMode: params.authMode || "api_key",
-          providerProtocol:
-            params.providerProtocol || "anthropic_messages",
+          providerProtocol: params.providerProtocol || "anthropic_messages",
           providerLabel: params.modelProviderLabel,
           advanced: params.advanced,
         }
@@ -1824,7 +1855,11 @@ function resolveCodexNativeConversationScope(params: {
   const paperTitle =
     sanitizeText(
       paperContext?.title ||
-        String(baseItem?.getField?.("title") || params.item.getField?.("title") || ""),
+        String(
+          baseItem?.getField?.("title") ||
+            params.item.getField?.("title") ||
+            "",
+        ),
     ) || undefined;
   return {
     profileSignature: getCodexProfileSignature(),
@@ -1900,13 +1935,15 @@ async function buildContextPlanForRequest(params: {
     if (!rawActiveContextItem || !params.pdfModePaperKeys?.size) return false;
     const autoLoaded = resolveAutoLoadedPaperContextForItem(params.item);
     if (!autoLoaded) return false;
-    return params.pdfModePaperKeys.has(`${autoLoaded.itemId}:${autoLoaded.contextItemId}`);
+    return params.pdfModePaperKeys.has(
+      `${autoLoaded.itemId}:${autoLoaded.contextItemId}`,
+    );
   })();
-  const activeContextItem = activeContextItemInPdfMode ? null : rawActiveContextItem;
+  const activeContextItem = activeContextItemInPdfMode
+    ? null
+    : rawActiveContextItem;
   const conversationMode: "open" | "paper" =
-    resolveDisplayConversationKind(params.item) === "global"
-      ? "open"
-      : "paper";
+    resolveDisplayConversationKind(params.item) === "global" ? "open" : "paper";
   const systemPrompt = getStringPref("systemPrompt") || undefined;
 
   const plan = await resolveMultiContextPlan({
@@ -1916,7 +1953,10 @@ async function buildContextPlanForRequest(params: {
     contextPrefix: "",
     // Exclude PDF-mode papers from the text retrieval pipeline
     paperContexts: params.pdfModePaperKeys?.size
-      ? params.paperContexts.filter((p) => !params.pdfModePaperKeys!.has(`${p.itemId}:${p.contextItemId}`))
+      ? params.paperContexts.filter(
+          (p) =>
+            !params.pdfModePaperKeys!.has(`${p.itemId}:${p.contextItemId}`),
+        )
       : params.paperContexts,
     fullTextPaperContexts: params.fullTextPaperContexts,
     collectionContexts: params.selectedCollectionContexts,
@@ -1959,16 +1999,16 @@ async function buildContextPlanForRequest(params: {
     contextBudgetTokens: plan.contextBudget.contextBudgetTokens,
     usedContextTokens: plan.usedContextTokens,
   });
-  const noteContext = buildActiveNoteContextBlock(
-    params.item,
-  ).trim();
+  const noteContext = buildActiveNoteContextBlock(params.item).trim();
   const planContext = sanitizeText(plan.contextText || "").trim();
   // Include provider-uploaded PDF content (Qwen fileid://, Kimi extracted text)
   const uploadedPdfContext = (params.pdfUploadSystemMessages || [])
     .map((msg) => sanitizeText(msg).trim())
     .filter(Boolean)
     .join("\n\n");
-  const combinedContext = [noteContext, planContext, uploadedPdfContext].filter(Boolean).join("\n\n");
+  const combinedContext = [noteContext, planContext, uploadedPdfContext]
+    .filter(Boolean)
+    .join("\n\n");
 
   // Extract MinerU figure images from the context (if applicable).
   // Skip for text-only models (e.g. DeepSeek) that reject image_url content.
@@ -1984,8 +2024,14 @@ async function buildContextPlanForRequest(params: {
       }
     }
     // Also include @-referenced papers with MinerU cache
-    for (const paper of [...params.paperContexts, ...params.fullTextPaperContexts]) {
-      if (paper.contextItemId && !mineruAttachmentIds.includes(paper.contextItemId)) {
+    for (const paper of [
+      ...params.paperContexts,
+      ...params.fullTextPaperContexts,
+    ]) {
+      if (
+        paper.contextItemId &&
+        !mineruAttachmentIds.includes(paper.contextItemId)
+      ) {
         const pdfCtx = pdfTextCache.get(paper.contextItemId);
         if (pdfCtx?.sourceType === "mineru") {
           mineruAttachmentIds.push(paper.contextItemId);
@@ -2044,20 +2090,32 @@ function waitForUiStep(): Promise<void> {
 
 const ROSE_LOADER_SVG_NS = "http://www.w3.org/2000/svg";
 
-function mountClaudeRoseThreeLoader(host: HTMLElement, startedAt: number): void {
+function mountClaudeRoseThreeLoader(
+  host: HTMLElement,
+  startedAt: number,
+): void {
   const doc = host.ownerDocument;
   if (!doc) return;
   const win = doc.defaultView;
   if (!win) return;
 
-  const svg = doc.createElementNS(ROSE_LOADER_SVG_NS, "svg") as unknown as SVGSVGElement;
+  const svg = doc.createElementNS(
+    ROSE_LOADER_SVG_NS,
+    "svg",
+  ) as unknown as SVGSVGElement;
   svg.setAttribute("viewBox", "0 0 100 100");
   svg.setAttribute("fill", "none");
   svg.setAttribute("aria-hidden", "true");
   svg.classList.add("llm-rose-loader-svg");
 
-  const group = doc.createElementNS(ROSE_LOADER_SVG_NS, "g") as unknown as SVGGElement;
-  const path = doc.createElementNS(ROSE_LOADER_SVG_NS, "path") as unknown as SVGPathElement;
+  const group = doc.createElementNS(
+    ROSE_LOADER_SVG_NS,
+    "g",
+  ) as unknown as SVGGElement;
+  const path = doc.createElementNS(
+    ROSE_LOADER_SVG_NS,
+    "path",
+  ) as unknown as SVGPathElement;
   path.setAttribute("stroke", "currentColor");
   path.setAttribute("stroke-linecap", "round");
   path.setAttribute("stroke-linejoin", "round");
@@ -2076,7 +2134,10 @@ function mountClaudeRoseThreeLoader(host: HTMLElement, startedAt: number): void 
   const spiralBreath = 0.45;
   const spirald = 3.0;
   const particles = Array.from({ length: particleCount }, () => {
-    const circle = doc.createElementNS(ROSE_LOADER_SVG_NS, "circle") as unknown as SVGCircleElement;
+    const circle = doc.createElementNS(
+      ROSE_LOADER_SVG_NS,
+      "circle",
+    ) as unknown as SVGCircleElement;
     circle.setAttribute("fill", "currentColor");
     group.appendChild(circle);
     return circle;
@@ -2126,7 +2187,10 @@ function mountClaudeRoseThreeLoader(host: HTMLElement, startedAt: number): void 
     const elapsedMs = Date.now() - startedAt;
     const progress = (elapsedMs % durationMs) / durationMs;
     const detailScale = getDetailScale(elapsedMs);
-    group.setAttribute("transform", `rotate(${getRotation(elapsedMs).toFixed(3)} 50 50)`);
+    group.setAttribute(
+      "transform",
+      `rotate(${getRotation(elapsedMs).toFixed(3)} 50 50)`,
+    );
     path.setAttribute("d", buildPath(detailScale));
     for (let index = 0; index < particles.length; index += 1) {
       const tailOffset = index / Math.max(1, particleCount - 1);
@@ -2191,7 +2255,10 @@ function takeAssistantSnapshot(message: Message): AssistantMessageSnapshot {
     modelEntryId: message.modelEntryId,
     modelProviderLabel: message.modelProviderLabel,
     pendingAgentTraceEvents: message.pendingAgentTraceEvents
-      ? message.pendingAgentTraceEvents.map((entry) => ({ ...entry, payload: { ...entry.payload } }))
+      ? message.pendingAgentTraceEvents.map((entry) => ({
+          ...entry,
+          payload: { ...entry.payload },
+        }))
       : undefined,
     reasoningSummary: message.reasoningSummary,
     reasoningDetails: message.reasoningDetails,
@@ -2211,7 +2278,10 @@ function restoreAssistantSnapshot(
   message.modelEntryId = snapshot.modelEntryId;
   message.modelProviderLabel = snapshot.modelProviderLabel;
   message.pendingAgentTraceEvents = snapshot.pendingAgentTraceEvents
-    ? snapshot.pendingAgentTraceEvents.map((entry) => ({ ...entry, payload: { ...entry.payload } }))
+    ? snapshot.pendingAgentTraceEvents.map((entry) => ({
+        ...entry,
+        payload: { ...entry.payload },
+      }))
     : undefined;
   message.reasoningSummary = snapshot.reasoningSummary;
   message.reasoningDetails = snapshot.reasoningDetails;
@@ -2249,11 +2319,27 @@ type CodexNativeTraceItemEvent = {
   role?: string;
   summary?: string;
   details?: string;
+  name?: string;
+  toolName?: string;
+  title?: string;
+  serverName?: string;
+  arguments?: unknown;
+  raw?: Record<string, unknown>;
 };
 
 type CodexNativeTraceDeltaEvent = {
   itemId?: string;
   delta: string;
+};
+
+type CodexNativeMcpToolActivityEvent = {
+  requestId: string;
+  phase: "started" | "completed";
+  toolName: string;
+  toolLabel?: string;
+  serverName?: string;
+  arguments?: unknown;
+  ok?: boolean;
 };
 
 function isCodexNativeAgentMessageItem(
@@ -2265,6 +2351,101 @@ function isCodexNativeAgentMessageItem(
     itemType === "agentmessage" ||
     itemType === "assistantmessage" ||
     (itemType === "message" && (role === "assistant" || role === "agent"))
+  );
+}
+
+function isCodexNativeToolItem(event: CodexNativeTraceItemEvent): boolean {
+  const itemType = (event.type || "").replace(/[-_\s]+/g, "").toLowerCase();
+  return (
+    itemType.includes("toolcall") ||
+    itemType.includes("tooluse") ||
+    itemType.includes("mcptool")
+  );
+}
+
+function readCodexNativeRawName(value: unknown): string {
+  if (typeof value === "string") return sanitizeText(value).trim();
+  if (!value || typeof value !== "object" || Array.isArray(value)) return "";
+  const record = value as Record<string, unknown>;
+  for (const key of ["name", "toolName", "tool_name", "title", "id"]) {
+    const text = sanitizeText(String(record[key] || "")).trim();
+    if (text) return text;
+  }
+  return "";
+}
+
+function readCodexNativeRawField(
+  event: CodexNativeTraceItemEvent,
+  keys: string[],
+): unknown {
+  const raw = event.raw || {};
+  for (const key of keys) {
+    if (Object.prototype.hasOwnProperty.call(raw, key)) return raw[key];
+  }
+  return undefined;
+}
+
+function looksLikeCodexNativeToolName(value: string): boolean {
+  return /^[a-zA-Z][a-zA-Z0-9_./:-]*$/.test(value.trim());
+}
+
+function resolveCodexNativeToolName(
+  event: CodexNativeTraceItemEvent,
+): string | undefined {
+  const candidates = [
+    event.toolName,
+    readCodexNativeRawName(
+      readCodexNativeRawField(event, ["toolName", "tool_name", "tool"]),
+    ),
+    event.name && looksLikeCodexNativeToolName(event.name) ? event.name : "",
+    readCodexNativeRawName(readCodexNativeRawField(event, ["name"])),
+  ];
+  for (const candidate of candidates) {
+    const text = sanitizeText(candidate || "").trim();
+    if (text && looksLikeCodexNativeToolName(text)) return text;
+  }
+  return undefined;
+}
+
+function resolveCodexNativeToolLabel(
+  event: CodexNativeTraceItemEvent,
+): string | undefined {
+  const name = sanitizeText(event.name || "").trim();
+  const title = sanitizeText(event.title || "").trim();
+  const rawTitle = sanitizeText(
+    String(readCodexNativeRawField(event, ["title"]) || ""),
+  ).trim();
+  for (const candidate of [title, rawTitle, name]) {
+    if (candidate && !looksLikeCodexNativeToolName(candidate)) {
+      return candidate;
+    }
+  }
+  return undefined;
+}
+
+function resolveCodexNativeToolServerName(
+  event: CodexNativeTraceItemEvent,
+): string | undefined {
+  return (
+    sanitizeText(event.serverName || "").trim() ||
+    readCodexNativeRawName(
+      readCodexNativeRawField(event, [
+        "serverName",
+        "server_name",
+        "mcpServerName",
+        "server",
+      ]),
+    ) ||
+    undefined
+  );
+}
+
+function resolveCodexNativeToolArguments(
+  event: CodexNativeTraceItemEvent,
+): unknown {
+  return (
+    event.arguments ??
+    readCodexNativeRawField(event, ["arguments", "args", "input"])
   );
 }
 
@@ -2295,6 +2476,8 @@ function createCodexNativeActivityTraceController(
     `codex-native-${Math.floor(assistantMessage.timestamp || Date.now())}`;
   const events: AgentRunEventRecord[] = [];
   const progressEventIndexes = new Map<string, number>();
+  const toolEventIndexes = new Map<string, number>();
+  const mcpRequestToolItemIds = new Map<string, string>();
   let seq = 0;
   let lastAgentMessageItemId = "";
 
@@ -2308,9 +2491,12 @@ function createCodexNativeActivityTraceController(
 
   const rebuildProgressIndexes = () => {
     progressEventIndexes.clear();
+    toolEventIndexes.clear();
     events.forEach((entry, index) => {
       if (entry.payload.type === "codex_progress") {
         progressEventIndexes.set(entry.payload.itemId, index);
+      } else if (entry.payload.type === "codex_tool_activity") {
+        toolEventIndexes.set(entry.payload.itemId, index);
       }
     });
   };
@@ -2374,6 +2560,104 @@ function createCodexNativeActivityTraceController(
     return true;
   };
 
+  const findRecentCompatibleToolActivity = (
+    phase: "started" | "completed",
+    serverName?: string,
+    toolName?: string,
+    toolLabel?: string,
+  ): string | null => {
+    const now = Date.now();
+    for (let index = events.length - 1; index >= 0; index -= 1) {
+      const entry = events[index];
+      if (now - entry.createdAt > 8000) break;
+      if (entry?.payload.type !== "codex_tool_activity") continue;
+      if (entry.payload.phase !== phase) continue;
+      if (
+        serverName &&
+        entry.payload.serverName &&
+        entry.payload.serverName !== serverName
+      ) {
+        continue;
+      }
+      if (!entry.payload.toolName && !entry.payload.toolLabel) {
+        return entry.payload.itemId;
+      }
+      if (toolName && entry.payload.toolName === toolName) {
+        return entry.payload.itemId;
+      }
+      if (toolLabel && entry.payload.toolLabel === toolLabel) {
+        return entry.payload.itemId;
+      }
+      if (!toolName && !toolLabel) {
+        return entry.payload.itemId;
+      }
+    }
+    return null;
+  };
+
+  const upsertToolActivity = (
+    activity: {
+      itemId: string;
+      phase: "started" | "completed";
+      toolName?: string;
+      toolLabel?: string;
+      serverName?: string;
+      args?: unknown;
+      ok?: boolean;
+      text?: string;
+    },
+    options: { matchRecentUnknown?: boolean } = {},
+  ): string | null => {
+    const cleanItemId = sanitizeText(activity.itemId || "").trim();
+    if (!cleanItemId) return null;
+    const cleanToolName = sanitizeText(activity.toolName || "").trim();
+    const cleanToolLabel = sanitizeText(activity.toolLabel || "").trim();
+    const cleanServerName = sanitizeText(activity.serverName || "").trim();
+    const matchedUnknown =
+      options.matchRecentUnknown && (cleanToolName || cleanToolLabel)
+        ? findRecentCompatibleToolActivity(
+            activity.phase,
+            cleanServerName,
+            cleanToolName,
+            cleanToolLabel,
+          )
+        : null;
+    const itemId = matchedUnknown || cleanItemId;
+    const existingIndex = toolEventIndexes.get(itemId);
+    const payload: AgentEvent = {
+      type: "codex_tool_activity",
+      itemId,
+      phase: activity.phase,
+      ...(cleanToolName ? { toolName: cleanToolName } : {}),
+      ...(cleanToolLabel ? { toolLabel: cleanToolLabel } : {}),
+      ...(cleanServerName ? { serverName: cleanServerName } : {}),
+      ...(activity.args !== undefined ? { args: activity.args } : {}),
+      ...(typeof activity.ok === "boolean" ? { ok: activity.ok } : {}),
+      ...(activity.text ? { text: activity.text } : {}),
+    };
+    if (existingIndex !== undefined) {
+      const existing = events[existingIndex];
+      if (existing?.payload.type !== "codex_tool_activity") return null;
+      events[existingIndex] = {
+        ...existing,
+        payload: {
+          ...existing.payload,
+          ...payload,
+          toolName: payload.toolName || existing.payload.toolName,
+          toolLabel: payload.toolLabel || existing.payload.toolLabel,
+          serverName: payload.serverName || existing.payload.serverName,
+          args:
+            payload.args !== undefined ? payload.args : existing.payload.args,
+        },
+        createdAt: Date.now(),
+      };
+      return itemId;
+    }
+    toolEventIndexes.set(itemId, events.length);
+    events.push(createEvent(payload));
+    return itemId;
+  };
+
   const appendStatus = (text: string): boolean => {
     const clean = compactCodexNativeTraceLine(text);
     if (!clean) return false;
@@ -2393,6 +2677,26 @@ function createCodexNativeActivityTraceController(
     phase: "started" | "completed",
   ): void => {
     if (isCodexNativeAgentMessageItem(event)) return;
+    if (isCodexNativeToolItem(event)) {
+      const itemId =
+        sanitizeText(event.id || "").trim() || `codex-tool-${phase}-${seq + 1}`;
+      const updatedItemId = upsertToolActivity({
+        itemId,
+        phase,
+        toolName: resolveCodexNativeToolName(event),
+        toolLabel: resolveCodexNativeToolLabel(event),
+        serverName: resolveCodexNativeToolServerName(event),
+        args: resolveCodexNativeToolArguments(event),
+        ok:
+          phase === "completed"
+            ? !/failed|error|cancelled/i.test(
+                sanitizeText(event.summary || event.details || ""),
+              )
+            : undefined,
+      });
+      if (updatedItemId) sync();
+      return;
+    }
     const itemType = humanizeCodexNativeItemType(event.type);
     if (!itemType || itemType === "reasoning") return;
     const summary =
@@ -2408,12 +2712,47 @@ function createCodexNativeActivityTraceController(
   ): boolean => {
     const itemId = sanitizeText(event.itemId || "").trim();
     if (!itemId) return false;
-    const changed = upsertProgressText(itemId, event.delta, "append", "running");
+    const changed = upsertProgressText(
+      itemId,
+      event.delta,
+      "append",
+      "running",
+    );
     if (changed) sync();
     return true;
   };
 
-  const noteAgentMessageCompleted = (event: CodexNativeTraceItemEvent): void => {
+  const noteMcpToolActivity = (
+    event: CodexNativeMcpToolActivityEvent,
+  ): void => {
+    const requestId = sanitizeText(event.requestId || "").trim();
+    const existingItemId = requestId
+      ? mcpRequestToolItemIds.get(requestId)
+      : undefined;
+    const fallbackItemId =
+      existingItemId ||
+      (requestId ? `mcp:${requestId}` : `mcp-tool-${event.phase}-${seq + 1}`);
+    const updatedItemId = upsertToolActivity(
+      {
+        itemId: fallbackItemId,
+        phase: event.phase,
+        toolName: event.toolName,
+        toolLabel: event.toolLabel,
+        serverName: event.serverName,
+        args: event.arguments,
+        ok: event.ok,
+      },
+      { matchRecentUnknown: !existingItemId },
+    );
+    if (requestId && updatedItemId) {
+      mcpRequestToolItemIds.set(requestId, updatedItemId);
+    }
+    if (updatedItemId) sync();
+  };
+
+  const noteAgentMessageCompleted = (
+    event: CodexNativeTraceItemEvent,
+  ): void => {
     if (!isCodexNativeAgentMessageItem(event)) return;
     const itemId = sanitizeText(event.id || "").trim();
     if (!itemId) return;
@@ -2440,7 +2779,8 @@ function createCodexNativeActivityTraceController(
         const entry = events[index];
         if (
           entry?.payload.type === "codex_progress" &&
-          normalizeCodexNativeTraceCompare(entry.payload.text) === normalizedFinal
+          normalizeCodexNativeTraceCompare(entry.payload.text) ===
+            normalizedFinal
         ) {
           changed = removeEventAt(index) || changed;
         }
@@ -2458,6 +2798,7 @@ function createCodexNativeActivityTraceController(
     appendAgentMessageDelta,
     appendItemStatus,
     finish,
+    noteMcpToolActivity,
     noteAgentMessageCompleted,
   };
 }
@@ -2466,7 +2807,14 @@ function applyWebChatAnswerSnapshot(
   message: Message,
   text: string,
   snapshot: {
-    runState?: "submitted" | "active" | "settling" | "done" | "incomplete" | "error" | null;
+    runState?:
+      | "submitted"
+      | "active"
+      | "settling"
+      | "done"
+      | "incomplete"
+      | "error"
+      | null;
     completionReason?: "settled" | "forced_cancel" | "timeout" | "error" | null;
     remoteChatUrl?: string | null;
     remoteChatId?: string | null;
@@ -2494,7 +2842,14 @@ function applyWebChatThinkingSnapshot(
   message: Message,
   text: string,
   snapshot: {
-    runState?: "submitted" | "active" | "settling" | "done" | "incomplete" | "error" | null;
+    runState?:
+      | "submitted"
+      | "active"
+      | "settling"
+      | "done"
+      | "incomplete"
+      | "error"
+      | null;
     completionReason?: "settled" | "forced_cancel" | "timeout" | "error" | null;
   },
 ): void {
@@ -2784,15 +3139,14 @@ function includeAutoLoadedPaperContext(
       autoLoadedPaperContext,
       ...normalizedPaperContexts,
     ]),
-    fullTextPaperContexts:
-      isExcludedFromTextPipeline
-        ? normalizedFullTextPaperContexts
-        : fullTextPaperContexts === undefined
-          ? normalizePaperContexts([
-              autoLoadedPaperContext,
-              ...normalizedFullTextPaperContexts,
-            ])
-          : normalizedFullTextPaperContexts,
+    fullTextPaperContexts: isExcludedFromTextPipeline
+      ? normalizedFullTextPaperContexts
+      : fullTextPaperContexts === undefined
+        ? normalizePaperContexts([
+            autoLoadedPaperContext,
+            ...normalizedFullTextPaperContexts,
+          ])
+        : normalizedFullTextPaperContexts,
   };
 }
 
@@ -2878,7 +3232,10 @@ function syncComposeContextForInlineEdit(
     if (key.startsWith(modePrefix)) paperContextModeOverrides.delete(key);
   }
   for (const paperContext of fullTextPaperContexts) {
-    paperContextModeOverrides.set(`${item.id}:${buildPaperKey(paperContext)}`, "full-next");
+    paperContextModeOverrides.set(
+      `${item.id}:${buildPaperKey(paperContext)}`,
+      "full-next",
+    );
   }
 
   activeContextPanelStateSync.get(body)?.();
@@ -2888,13 +3245,30 @@ export async function editLatestUserMessageAndRetry(
   opts: import("./types").EditRetryOptions,
 ): Promise<EditLatestTurnResult> {
   const {
-    body, item, displayQuestion, selectedTexts, selectedTextSources,
-    selectedTextPaperContexts, selectedTextNoteContexts, screenshotImages,
-    paperContexts, fullTextPaperContexts, selectedCollectionContexts, attachments,
+    body,
+    item,
+    displayQuestion,
+    selectedTexts,
+    selectedTextSources,
+    selectedTextPaperContexts,
+    selectedTextNoteContexts,
+    screenshotImages,
+    paperContexts,
+    fullTextPaperContexts,
+    selectedCollectionContexts,
+    attachments,
     pdfUploadSystemMessages,
     targetRuntimeMode,
-    expected, model, apiBase, apiKey, authMode, providerProtocol,
-    modelEntryId, modelProviderLabel, reasoning, advanced,
+    expected,
+    model,
+    apiBase,
+    apiKey,
+    authMode,
+    providerProtocol,
+    modelEntryId,
+    modelProviderLabel,
+    reasoning,
+    advanced,
   } = opts;
   await ensureConversationLoaded(item);
   const conversationKey = getConversationKey(item);
@@ -2960,8 +3334,9 @@ export async function editLatestUserMessageAndRetry(
   const normalizedPaperContexts = normalizeEditablePaperContexts(paperContexts);
   const normalizedFullTextPaperContexts =
     normalizeEditableFullTextPaperContexts(fullTextPaperContexts);
-  const selectedCollectionContextsForMessage =
-    normalizeCollectionContexts(selectedCollectionContexts);
+  const selectedCollectionContextsForMessage = normalizeCollectionContexts(
+    selectedCollectionContexts,
+  );
   const pdfExcludeKeys = derivePdfModePaperKeys(attachments, item);
   const {
     paperContexts: paperContextsForMessage,
@@ -3102,7 +3477,12 @@ export async function retryLatestAssistantResponse(
   model?: string,
   apiBase?: string,
   apiKey?: string,
-  authMode?: "api_key" | "codex_auth" | "codex_app_server" | "copilot_auth" | "webchat",
+  authMode?:
+    | "api_key"
+    | "codex_auth"
+    | "codex_app_server"
+    | "copilot_auth"
+    | "webchat",
   providerProtocol?: ProviderProtocol,
   modelEntryId?: string,
   modelProviderLabel?: string,
@@ -3241,7 +3621,10 @@ export async function retryLatestAssistantResponse(
   try {
     const llmHistory = buildLLMHistoryMessages(historyForLLM);
     const recentPaperContexts = collectRecentPaperContexts(historyForLLM);
-    const retryPdfKeys = derivePdfModePaperKeys(retryPair.userMessage.attachments, item);
+    const retryPdfKeys = derivePdfModePaperKeys(
+      retryPair.userMessage.attachments,
+      item,
+    );
 
     // Create AbortController early so the signal is available during context
     // planning.
@@ -3271,16 +3654,18 @@ export async function retryLatestAssistantResponse(
     retryPair.userMessage.paperContexts = contextPlan.paperContexts.length
       ? contextPlan.paperContexts
       : undefined;
-    retryPair.userMessage.fullTextPaperContexts =
-      contextPlan.fullTextPaperContexts.length
-        ? contextPlan.fullTextPaperContexts
+    retryPair.userMessage.fullTextPaperContexts = contextPlan
+      .fullTextPaperContexts.length
+      ? contextPlan.fullTextPaperContexts
       : undefined;
     retryPair.userMessage.citationPaperContexts = mergeCitationPaperContexts(
       retryPair.userMessage.selectedTextPaperContexts,
       contextPlan.citationPaperContexts,
     );
     retryPair.userMessage.selectedCollectionContexts =
-      selectedCollectionContexts.length ? selectedCollectionContexts : undefined;
+      selectedCollectionContexts.length
+        ? selectedCollectionContexts
+        : undefined;
     await updateStoredLatestUserMessageByConversation(conversationKey, {
       text: retryPair.userMessage.text,
       timestamp: retryPair.userMessage.timestamp,
@@ -3307,10 +3692,7 @@ export async function retryLatestAssistantResponse(
 
     const queueRefresh = createQueuedRefresh(refreshChatSafely);
     const codexActivityTrace = isCodexNativeTurn
-      ? createCodexNativeActivityTraceController(
-          assistantMessage,
-          queueRefresh,
-        )
+      ? createCodexNativeActivityTraceController(assistantMessage, queueRefresh)
       : null;
     if (getCancelledRequestId(conversationKey) >= thisRequestId) {
       getAbortController(conversationKey)?.abort();
@@ -3378,10 +3760,7 @@ export async function retryLatestAssistantResponse(
       queueRefresh();
     };
     const handleUsage = (usage: UsageStats) => {
-      const total = accumulateSessionTokens(
-        conversationKey,
-        usage.totalTokens,
-      );
+      const total = accumulateSessionTokens(conversationKey, usage.totalTokens);
       const contextWindow =
         resolveConversationSystemForItem(item) === "claude_code"
           ? getContextInputWindow(effectiveRequestConfig)
@@ -3448,6 +3827,22 @@ export async function retryLatestAssistantResponse(
                 setStatusSafely(`Codex: ${itemType} completed`, "sending");
               }
             },
+            onMcpToolActivity: (event) => {
+              codexActivityTrace?.noteMcpToolActivity(event);
+              const label =
+                sanitizeText(event.toolLabel || "").trim() ||
+                sanitizeText(event.toolName || "")
+                  .replace(/_/g, " ")
+                  .trim();
+              if (label) {
+                setStatusSafely(
+                  event.phase === "completed"
+                    ? `Codex: used ${label}`
+                    : `Codex: using ${label}`,
+                  "sending",
+                );
+              }
+            },
             onMcpSetupWarning: (message) => {
               setStatusSafely(message, "error");
             },
@@ -3458,7 +3853,8 @@ export async function retryLatestAssistantResponse(
               );
             },
             onApprovalRequest: (request) => {
-              const safeDecision = resolveSafeCodexNativeApprovalRequest(request);
+              const safeDecision =
+                resolveSafeCodexNativeApprovalRequest(request);
               if (safeDecision) {
                 setStatusSafely(
                   "Codex approved Zotero read-only MCP access",
@@ -3507,7 +3903,9 @@ export async function retryLatestAssistantResponse(
     assistantMessage.reasoningSummary = streamedReasoningSummary;
     assistantMessage.reasoningDetails = streamedReasoningDetails;
     assistantMessage.reasoningOpen = isReasoningExpandedByDefault();
-    assistantMessage.compactMarker = /^\/compact(?:\s|$)/i.test(question.trim());
+    assistantMessage.compactMarker = /^\/compact(?:\s|$)/i.test(
+      question.trim(),
+    );
     if (assistantMessage.compactMarker && !assistantMessage.text.trim()) {
       assistantMessage.text = "Conversation compacted";
     }
@@ -3557,7 +3955,8 @@ export async function retryLatestAssistantResponse(
     setPendingRequestId(conversationKey, 0);
     if (effectiveRequestConfig.providerProtocol !== "web_sync") {
       scheduleQueuedInputDrain(body, {
-        conversationSystem: resolveConversationSystemForItem(item) || "upstream",
+        conversationSystem:
+          resolveConversationSystemForItem(item) || "upstream",
         conversationKey,
       });
     }
@@ -3589,7 +3988,12 @@ export async function editUserTurnAndRetry(opts: {
   model?: string;
   apiBase?: string;
   apiKey?: string;
-  authMode?: "api_key" | "codex_auth" | "codex_app_server" | "copilot_auth" | "webchat";
+  authMode?:
+    | "api_key"
+    | "codex_auth"
+    | "codex_app_server"
+    | "copilot_auth"
+    | "webchat";
   providerProtocol?: ProviderProtocol;
   modelEntryId?: string;
   modelProviderLabel?: string;
@@ -3597,14 +4001,31 @@ export async function editUserTurnAndRetry(opts: {
   advanced?: AdvancedModelParams;
 }): Promise<void> {
   const {
-    body, item, userTimestamp, assistantTimestamp, newText,
-    selectedTexts, selectedTextSources, selectedTextPaperContexts,
-    selectedTextNoteContexts, screenshotImages, paperContexts,
-    fullTextPaperContexts, selectedCollectionContexts, attachments,
+    body,
+    item,
+    userTimestamp,
+    assistantTimestamp,
+    newText,
+    selectedTexts,
+    selectedTextSources,
+    selectedTextPaperContexts,
+    selectedTextNoteContexts,
+    screenshotImages,
+    paperContexts,
+    fullTextPaperContexts,
+    selectedCollectionContexts,
+    attachments,
     pdfUploadSystemMessages,
     targetRuntimeMode,
-    model, apiBase, apiKey, authMode, providerProtocol,
-    modelEntryId, modelProviderLabel, reasoning, advanced,
+    model,
+    apiBase,
+    apiKey,
+    authMode,
+    providerProtocol,
+    modelEntryId,
+    modelProviderLabel,
+    reasoning,
+    advanced,
   } = opts;
   await ensureConversationLoaded(item);
   const conversationKey = getConversationKey(item);
@@ -3679,13 +4100,13 @@ export async function editUserTurnAndRetry(opts: {
           p.assistantTs,
         );
       } else if (isCodexConversationKey(conversationKey)) {
-        await deleteCodexTurnMessages(
+        await deleteCodexTurnMessages(conversationKey, p.userTs, p.assistantTs);
+      } else {
+        await deleteStoredTurnMessages(
           conversationKey,
           p.userTs,
           p.assistantTs,
         );
-      } else {
-        await deleteStoredTurnMessages(conversationKey, p.userTs, p.assistantTs);
       }
     } catch (err) {
       ztoolkit.log("LLM: Failed to delete subsequent stored turn", err);
@@ -3724,8 +4145,9 @@ export async function editUserTurnAndRetry(opts: {
   const normalizedPaperContexts = normalizeEditablePaperContexts(paperContexts);
   const normalizedFullTextPaperContexts =
     normalizeEditableFullTextPaperContexts(fullTextPaperContexts);
-  const selectedCollectionContextsForMessage =
-    normalizeCollectionContexts(selectedCollectionContexts);
+  const selectedCollectionContextsForMessage = normalizeCollectionContexts(
+    selectedCollectionContexts,
+  );
   const pdfExcludeKeysEdit = derivePdfModePaperKeys(attachments, item);
   const {
     paperContexts: paperContextsForMessage,
@@ -3769,9 +4191,10 @@ export async function editUserTurnAndRetry(opts: {
   userMsg.fullTextPaperContexts = fullTextPaperContextsForMessage.length
     ? fullTextPaperContextsForMessage
     : undefined;
-  userMsg.selectedCollectionContexts = selectedCollectionContextsForMessage.length
-    ? selectedCollectionContextsForMessage
-    : undefined;
+  userMsg.selectedCollectionContexts =
+    selectedCollectionContextsForMessage.length
+      ? selectedCollectionContextsForMessage
+      : undefined;
   userMsg.paperContextsExpanded = false;
   userMsg.attachments = attachmentsForMessage.length
     ? attachmentsForMessage
@@ -3893,7 +4316,9 @@ async function enrichPaperContextsWithMineruCache(
       if (await hasCachedMineruMd(paper.contextItemId)) {
         mineruCacheDir = getMineruItemDir(paper.contextItemId);
       }
-    } catch { /* ignore */ }
+    } catch {
+      /* ignore */
+    }
     enriched.push(mineruCacheDir ? { ...paper, mineruCacheDir } : paper);
   }
   return enriched;
@@ -3931,7 +4356,9 @@ async function buildAgentRuntimeRequest(
     claudeEffortLevel:
       typeof params.effectiveRequestConfig.reasoning?.level === "string"
         ? ((params.effectiveRequestConfig.reasoning.level === "xhigh"
-            ? (getClaudeReasoningModePref() === "max" ? "max" : "xhigh")
+            ? getClaudeReasoningModePref() === "max"
+              ? "max"
+              : "xhigh"
             : params.effectiveRequestConfig.reasoning.level) as
             | "low"
             | "medium"
@@ -3974,7 +4401,8 @@ function buildAgentEngineDeps(
     agentRunTraceCache,
     cancelledRequestId: (ck: number) => getCancelledRequestId(ck),
     currentAbortController: (ck: number) => getAbortController(ck),
-    setCurrentAbortController: (ck: number, ctrl: AbortController | null) => setAbortController(ck, ctrl),
+    setCurrentAbortController: (ck: number, ctrl: AbortController | null) =>
+      setAbortController(ck, ctrl),
     getAbortControllerCtor,
     nextRequestId,
     setPendingRequestId,
@@ -4042,7 +4470,12 @@ async function retryLatestAgentResponse(
   model?: string,
   apiBase?: string,
   apiKey?: string,
-  authMode?: "api_key" | "codex_auth" | "codex_app_server" | "copilot_auth" | "webchat",
+  authMode?:
+    | "api_key"
+    | "codex_auth"
+    | "codex_app_server"
+    | "copilot_auth"
+    | "webchat",
   providerProtocol?: ProviderProtocol,
   modelEntryId?: string,
   modelProviderLabel?: string,
@@ -4079,7 +4512,12 @@ async function sendAgentQuestion(opts: {
   model?: string;
   apiBase?: string;
   apiKey?: string;
-  authMode?: "api_key" | "codex_auth" | "codex_app_server" | "copilot_auth" | "webchat";
+  authMode?:
+    | "api_key"
+    | "codex_auth"
+    | "codex_app_server"
+    | "copilot_auth"
+    | "webchat";
   providerProtocol?: ProviderProtocol;
   modelEntryId?: string;
   modelProviderLabel?: string;
@@ -4105,13 +4543,32 @@ async function sendAgentQuestion(opts: {
   );
 }
 
-export async function sendQuestion(opts: import("./types").SendQuestionOptions) {
+export async function sendQuestion(
+  opts: import("./types").SendQuestionOptions,
+) {
   const {
-    body, item, question, images, model, apiBase, apiKey, reasoning, advanced,
-    displayQuestion, selectedTexts, selectedTextSources, selectedTextPaperContexts,
-    selectedTextNoteContexts, paperContexts, fullTextPaperContexts,
-    selectedCollectionContexts, attachments,
-    runtimeMode = "chat", agentRunId, skipAgentDispatch = false, pdfModePaperKeys,
+    body,
+    item,
+    question,
+    images,
+    model,
+    apiBase,
+    apiKey,
+    reasoning,
+    advanced,
+    displayQuestion,
+    selectedTexts,
+    selectedTextSources,
+    selectedTextPaperContexts,
+    selectedTextNoteContexts,
+    paperContexts,
+    fullTextPaperContexts,
+    selectedCollectionContexts,
+    attachments,
+    runtimeMode = "chat",
+    agentRunId,
+    skipAgentDispatch = false,
+    pdfModePaperKeys,
   } = opts;
   const effectiveConversationSystem = resolveEffectiveConversationSystem({
     item,
@@ -4180,7 +4637,8 @@ export async function sendQuestion(opts: import("./types").SendQuestionOptions) 
     chatHistory.set(provisionalConversationKey, []);
   }
   const provisionalHistory = chatHistory.get(provisionalConversationKey)!;
-  const reuseAgentFallbackPlaceholder = effectiveRuntimeMode === "agent" && skipAgentDispatch;
+  const reuseAgentFallbackPlaceholder =
+    effectiveRuntimeMode === "agent" && skipAgentDispatch;
   const existingFallbackUser =
     reuseAgentFallbackPlaceholder && provisionalHistory.length >= 2
       ? provisionalHistory[provisionalHistory.length - 2]
@@ -4216,7 +4674,10 @@ export async function sendQuestion(opts: import("./types").SendQuestionOptions) 
     provisionalConversationKey,
     ui,
   );
-  optimisticHelpers.setStatusSafely("Checking the request against the attached context.", "sending");
+  optimisticHelpers.setStatusSafely(
+    "Checking the request against the attached context.",
+    "sending",
+  );
   optimisticHelpers.refreshChatSafely();
 
   const conversationKey = getConversationKey(item);
@@ -4285,7 +4746,9 @@ export async function sendQuestion(opts: import("./types").SendQuestionOptions) 
     item,
     normalizedPaperContexts,
     normalizedFullTextPaperContexts,
-    pdfModePaperKeys && pdfModePaperKeys.size > 0 ? pdfModePaperKeys : undefined,
+    pdfModePaperKeys && pdfModePaperKeys.size > 0
+      ? pdfModePaperKeys
+      : undefined,
   );
   const citationPaperContextsForMessage = mergeCitationPaperContexts(
     selectedTextPaperContextsForMessage,
@@ -4320,8 +4783,8 @@ export async function sendQuestion(opts: import("./types").SendQuestionOptions) 
     )
       ? selectedTextPaperContextsForMessage
       : undefined,
-    selectedTextNoteContexts: selectedTextNoteContextsForMessage.some(
-      (entry) => Boolean(entry),
+    selectedTextNoteContexts: selectedTextNoteContextsForMessage.some((entry) =>
+      Boolean(entry),
     )
       ? selectedTextNoteContextsForMessage
       : undefined,
@@ -4433,8 +4896,11 @@ export async function sendQuestion(opts: import("./types").SendQuestionOptions) 
     const webChatQueueRefresh = createQueuedRefresh(refreshChatSafely);
     try {
       // Determine webchat target from the model name (e.g., "chatgpt.com" → "chatgpt", "chat.deepseek.com" → "deepseek")
-      const { getWebChatTargetByModelName } = await import("../../webchat/types");
-      const webchatTargetEntry = getWebChatTargetByModelName(effectiveRequestConfig.model || "");
+      const { getWebChatTargetByModelName } =
+        await import("../../webchat/types");
+      const webchatTargetEntry = getWebChatTargetByModelName(
+        effectiveRequestConfig.model || "",
+      );
       const webchatTarget = webchatTargetEntry?.id || "chatgpt";
       const webchatLabel = webchatTargetEntry?.label || "ChatGPT";
       setStatusSafely(`Sending to ${webchatLabel}…`, "sending");
@@ -4455,7 +4921,10 @@ export async function sendQuestion(opts: import("./types").SendQuestionOptions) 
         host: getRelayBaseUrl(),
         sendPdf: opts.webchatSendPdf === true,
         forceNewChat: opts.webchatForceNewChat === true,
-        images: screenshotImagesForMessage.length > 0 ? screenshotImagesForMessage : undefined,
+        images:
+          screenshotImagesForMessage.length > 0
+            ? screenshotImagesForMessage
+            : undefined,
         chatgptMode,
         target: webchatTarget,
         signal: getAbortController(conversationKey)?.signal,
@@ -4469,13 +4938,19 @@ export async function sendQuestion(opts: import("./types").SendQuestionOptions) 
         },
       });
 
-      if (getCancelledRequestId(conversationKey) >= thisRequestId || Boolean(getAbortController(conversationKey)?.signal.aborted)) {
+      if (
+        getCancelledRequestId(conversationKey) >= thisRequestId ||
+        Boolean(getAbortController(conversationKey)?.signal.aborted)
+      ) {
         await markCancelled();
         return;
       }
 
-      assistantMessage.text = sanitizeText(answer.text) || assistantMessage.text || "No response.";
-      assistantMessage.reasoningDetails = sanitizeText(answer.thinking || "") || assistantMessage.reasoningDetails;
+      assistantMessage.text =
+        sanitizeText(answer.text) || assistantMessage.text || "No response.";
+      assistantMessage.reasoningDetails =
+        sanitizeText(answer.thinking || "") ||
+        assistantMessage.reasoningDetails;
       assistantMessage.reasoningOpen = assistantMessage.reasoningDetails
         ? isReasoningExpandedByDefault()
         : false;
@@ -4487,8 +4962,10 @@ export async function sendQuestion(opts: import("./types").SendQuestionOptions) 
         answer.completionReason ||
         (answer.runState === "done" ? "settled" : null);
       // [webchat] Persist the ChatGPT conversation URL so refresh can navigate back
-      if (answer.remoteChatUrl) assistantMessage.webchatChatUrl = answer.remoteChatUrl;
-      if (answer.remoteChatId) assistantMessage.webchatChatId = answer.remoteChatId;
+      if (answer.remoteChatUrl)
+        assistantMessage.webchatChatUrl = answer.remoteChatUrl;
+      if (answer.remoteChatId)
+        assistantMessage.webchatChatId = answer.remoteChatId;
       assistantMessage.streaming = false;
 
       refreshChatSafely();
@@ -4513,7 +4990,7 @@ export async function sendQuestion(opts: import("./types").SendQuestionOptions) 
       const errMsg = (err as Error).message || "Error";
       const hasSnapshot = Boolean(
         sanitizeText(assistantMessage.text || "") ||
-          sanitizeText(assistantMessage.reasoningDetails || ""),
+        sanitizeText(assistantMessage.reasoningDetails || ""),
       );
       if (hasSnapshot) {
         assistantMessage.webchatRunState = "incomplete";
@@ -4538,7 +5015,8 @@ export async function sendQuestion(opts: import("./types").SendQuestionOptions) 
   try {
     const rawLLMHistory = buildLLMHistoryMessages(historyForLLM);
     // Apply auto-summary compression when the history grows long.
-    const llmHistory = applyHistoryCompression(conversationKey, rawLLMHistory) ?? rawLLMHistory;
+    const llmHistory =
+      applyHistoryCompression(conversationKey, rawLLMHistory) ?? rawLLMHistory;
     const recentPaperContexts = collectRecentPaperContexts(historyForLLM);
 
     // Create AbortController early so the signal is available during context
@@ -4569,9 +5047,8 @@ export async function sendQuestion(opts: import("./types").SendQuestionOptions) 
     userMessage.paperContexts = contextPlan.paperContexts.length
       ? contextPlan.paperContexts
       : undefined;
-    userMessage.fullTextPaperContexts =
-      contextPlan.fullTextPaperContexts.length
-        ? contextPlan.fullTextPaperContexts
+    userMessage.fullTextPaperContexts = contextPlan.fullTextPaperContexts.length
+      ? contextPlan.fullTextPaperContexts
       : undefined;
     userMessage.citationPaperContexts = mergeCitationPaperContexts(
       userMessage.selectedTextPaperContexts,
@@ -4602,10 +5079,7 @@ export async function sendQuestion(opts: import("./types").SendQuestionOptions) 
 
     const queueRefresh = createQueuedRefresh(refreshChatSafely);
     const codexActivityTrace = isCodexNativeTurn
-      ? createCodexNativeActivityTraceController(
-          assistantMessage,
-          queueRefresh,
-        )
+      ? createCodexNativeActivityTraceController(assistantMessage, queueRefresh)
       : null;
 
     if (getCancelledRequestId(conversationKey) >= thisRequestId) {
@@ -4669,10 +5143,7 @@ export async function sendQuestion(opts: import("./types").SendQuestionOptions) 
       queueRefresh();
     };
     const handleUsage = (usage: UsageStats) => {
-      const total = accumulateSessionTokens(
-        conversationKey,
-        usage.totalTokens,
-      );
+      const total = accumulateSessionTokens(conversationKey, usage.totalTokens);
       const contextWindow =
         resolveConversationSystemForItem(item) === "claude_code"
           ? getContextInputWindow(effectiveRequestConfig)
@@ -4729,6 +5200,22 @@ export async function sendQuestion(opts: import("./types").SendQuestionOptions) 
                 setStatusSafely(`Codex: ${itemType} completed`, "sending");
               }
             },
+            onMcpToolActivity: (event) => {
+              codexActivityTrace?.noteMcpToolActivity(event);
+              const label =
+                sanitizeText(event.toolLabel || "").trim() ||
+                sanitizeText(event.toolName || "")
+                  .replace(/_/g, " ")
+                  .trim();
+              if (label) {
+                setStatusSafely(
+                  event.phase === "completed"
+                    ? `Codex: used ${label}`
+                    : `Codex: using ${label}`,
+                  "sending",
+                );
+              }
+            },
             onMcpSetupWarning: (message) => {
               setStatusSafely(message, "error");
             },
@@ -4739,7 +5226,8 @@ export async function sendQuestion(opts: import("./types").SendQuestionOptions) 
               );
             },
             onApprovalRequest: (request) => {
-              const safeDecision = resolveSafeCodexNativeApprovalRequest(request);
+              const safeDecision =
+                resolveSafeCodexNativeApprovalRequest(request);
               if (safeDecision) {
                 setStatusSafely(
                   "Codex approved Zotero read-only MCP access",
@@ -4780,9 +5268,13 @@ export async function sendQuestion(opts: import("./types").SendQuestionOptions) 
     assistantMessage.text =
       sanitizeText(answer) || assistantMessage.text || "No response.";
     codexActivityTrace?.finish(assistantMessage.text);
-    assistantMessage.runMode = isCodexNativeTurn ? "agent" : effectiveRuntimeMode;
+    assistantMessage.runMode = isCodexNativeTurn
+      ? "agent"
+      : effectiveRuntimeMode;
     assistantMessage.agentRunId = agentRunId || assistantMessage.agentRunId;
-    assistantMessage.compactMarker = /^\/compact(?:\s|$)/i.test(question.trim());
+    assistantMessage.compactMarker = /^\/compact(?:\s|$)/i.test(
+      question.trim(),
+    );
     if (assistantMessage.compactMarker && !assistantMessage.text.trim()) {
       assistantMessage.text = "Conversation compacted";
     }
@@ -5025,11 +5517,13 @@ export function refreshChat(body: Element, item?: Zotero.Item | null) {
     const snapshot = contextUsageSnapshots.get(conversationKey);
     if (isClaudeConversationSystemActive()) {
       const contextTokens =
-        typeof snapshot?.contextTokens === "number" && snapshot.contextTokens > 0
+        typeof snapshot?.contextTokens === "number" &&
+        snapshot.contextTokens > 0
           ? snapshot.contextTokens
           : 0;
       const contextWindow =
-        typeof snapshot?.contextWindow === "number" && snapshot.contextWindow > 0
+        typeof snapshot?.contextWindow === "number" &&
+        snapshot.contextWindow > 0
           ? snapshot.contextWindow
           : undefined;
       setTokenUsage(
@@ -5039,7 +5533,9 @@ export function refreshChat(body: Element, item?: Zotero.Item | null) {
         body.querySelector("#llm-claude-context-gauge") as HTMLElement | null,
       );
     } else {
-      const contextWindow = getContextInputWindow(resolveEffectiveRequestConfig({ item }));
+      const contextWindow = getContextInputWindow(
+        resolveEffectiveRequestConfig({ item }),
+      );
       const seededTokens = getOrSeedSessionTokens(conversationKey, history);
       setTokenUsage(
         tokenUsageEl,
@@ -5054,11 +5550,19 @@ export function refreshChat(body: Element, item?: Zotero.Item | null) {
     // [webchat] Show webchat-specific welcome instead of generic instructions
     const effectiveRequestConfig = resolveEffectiveRequestConfig({ item });
     if (effectiveRequestConfig.providerProtocol === "web_sync") {
-      const { getWebChatTargetByModelName } = require("../../webchat/types") as typeof import("../../webchat/types");
-      const targetEntry = getWebChatTargetByModelName(effectiveRequestConfig.model || "");
-      chatBox.innerHTML = getWebChatWelcomeHtml(targetEntry?.label, targetEntry?.modelName);
+      const { getWebChatTargetByModelName } =
+        require("../../webchat/types") as typeof import("../../webchat/types");
+      const targetEntry = getWebChatTargetByModelName(
+        effectiveRequestConfig.model || "",
+      );
+      chatBox.innerHTML = getWebChatWelcomeHtml(
+        targetEntry?.label,
+        targetEntry?.modelName,
+      );
     } else {
-      const isStandalone = panelRoot?.dataset?.standalone === "true" || (body as HTMLElement).dataset?.standalone === "true";
+      const isStandalone =
+        panelRoot?.dataset?.standalone === "true" ||
+        (body as HTMLElement).dataset?.standalone === "true";
       const isNoteEditing = !!resolveActiveNoteSession(item);
       if (isNoteEditing) {
         chatBox.innerHTML = getNoteEditingStartPageHtml();
@@ -5093,7 +5597,9 @@ export function refreshChat(body: Element, item?: Zotero.Item | null) {
     ? latestRetryPair.userIndex + 1
     : -1;
   // [webchat] Resolve provider protocol once for editability checks
-  const renderProviderProtocol = resolveEffectiveRequestConfig({ item }).providerProtocol;
+  const renderProviderProtocol = resolveEffectiveRequestConfig({
+    item,
+  }).providerProtocol;
   const conversationIsIdle = !history.some((m) => m.streaming);
   for (const [index, msg] of history.entries()) {
     const isUser = msg.role === "user";
@@ -5126,7 +5632,8 @@ export function refreshChat(body: Element, item?: Zotero.Item | null) {
 
       const screenshotImages = Array.isArray(msg.screenshotImages)
         ? msg.screenshotImages.filter(
-            (entry) => Boolean(entry) && !entry.startsWith("data:application/pdf"),
+            (entry) =>
+              Boolean(entry) && !entry.startsWith("data:application/pdf"),
           )
         : [];
       let screenshotExpanded: HTMLDivElement | null = null;
@@ -5282,7 +5789,8 @@ export function refreshChat(body: Element, item?: Zotero.Item | null) {
       if (selectedCollectionContexts.length) {
         const collectionsBar = doc.createElement("button") as HTMLButtonElement;
         collectionsBar.type = "button";
-        collectionsBar.className = "llm-user-papers-bar llm-user-collections-bar";
+        collectionsBar.className =
+          "llm-user-papers-bar llm-user-collections-bar";
 
         const collectionsIcon = doc.createElement("span") as HTMLSpanElement;
         collectionsIcon.className = "llm-user-papers-icon";
@@ -5291,13 +5799,17 @@ export function refreshChat(body: Element, item?: Zotero.Item | null) {
         const collectionsLabel = doc.createElement("span") as HTMLSpanElement;
         collectionsLabel.className = "llm-user-papers-label";
         collectionsLabel.textContent =
-          selectedCollectionContexts.length === 1 ? "Collection" : "Collections";
+          selectedCollectionContexts.length === 1
+            ? "Collection"
+            : "Collections";
         collectionsLabel.title = selectedCollectionContexts
           .map((entry) => entry.name)
           .join("\n");
         collectionsBar.append(collectionsIcon, collectionsLabel);
 
-        const collectionsExpandedEl = doc.createElement("div") as HTMLDivElement;
+        const collectionsExpandedEl = doc.createElement(
+          "div",
+        ) as HTMLDivElement;
         collectionsExpandedEl.className =
           "llm-user-papers-expanded llm-user-collections-expanded";
         collectionsExpanded = collectionsExpandedEl;
@@ -5327,10 +5839,15 @@ export function refreshChat(body: Element, item?: Zotero.Item | null) {
         const applyCollectionsState = () => {
           const expanded = Boolean(msg.collectionContextsExpanded);
           collectionsBar.classList.toggle("expanded", expanded);
-          collectionsBar.setAttribute("aria-expanded", expanded ? "true" : "false");
+          collectionsBar.setAttribute(
+            "aria-expanded",
+            expanded ? "true" : "false",
+          );
           collectionsExpandedEl.hidden = !expanded;
           collectionsExpandedEl.style.display = expanded ? "block" : "none";
-          collectionsBar.title = expanded ? "Collapse collections" : "Expand collections";
+          collectionsBar.title = expanded
+            ? "Collapse collections"
+            : "Expand collections";
         };
         const toggleCollectionsExpanded = () => {
           msg.collectionContextsExpanded = !msg.collectionContextsExpanded;
@@ -5363,7 +5880,9 @@ export function refreshChat(body: Element, item?: Zotero.Item | null) {
       // Determine which papers were sent in PDF mode (have pdf-paper-* attachments)
       const pdfPaperContextItemIds = new Set(
         (Array.isArray(msg.attachments) ? msg.attachments : [])
-          .filter((a) => typeof a?.id === "string" && a.id.startsWith("pdf-paper-"))
+          .filter(
+            (a) => typeof a?.id === "string" && a.id.startsWith("pdf-paper-"),
+          )
           .map((a) => {
             const m = a.id.match(/^pdf-paper-(\d+)-/);
             return m ? Number(m[1]) : 0;
@@ -5418,7 +5937,9 @@ export function refreshChat(body: Element, item?: Zotero.Item | null) {
 
           // Content source mode badge
           const isPdf = pdfPaperContextItemIds.has(paperContext.contextItemId);
-          const isFullText = fullTextPaperKeys.has(`${paperContext.itemId}:${paperContext.contextItemId}`);
+          const isFullText = fullTextPaperKeys.has(
+            `${paperContext.itemId}:${paperContext.contextItemId}`,
+          );
           if (isPdf || isFullText) {
             const badge = doc.createElement("span") as HTMLSpanElement;
             badge.className = `llm-user-papers-item-badge llm-user-papers-item-badge-${isPdf ? "pdf" : "text"}`;
@@ -5474,7 +5995,10 @@ export function refreshChat(body: Element, item?: Zotero.Item | null) {
               entry.category !== "image" &&
               typeof entry.name === "string" &&
               // Exclude PDF-paper attachments (shown under paper context instead)
-              !(typeof entry.id === "string" && entry.id.startsWith("pdf-paper-")),
+              !(
+                typeof entry.id === "string" &&
+                entry.id.startsWith("pdf-paper-")
+              ),
           )
         : [];
       hasUserContext = hasUserContext || fileAttachments.length > 0;
@@ -5791,12 +6315,15 @@ export function refreshChat(body: Element, item?: Zotero.Item | null) {
         index > 0 && history[index - 1]?.role === "user"
           ? history[index - 1]
           : null;
-      const isClaudeStreamingConversation = resolveConversationSystemForItem(item) === "claude_code";
+      const isClaudeStreamingConversation =
+        resolveConversationSystemForItem(item) === "claude_code";
       const agentRunId = msg.agentRunId?.trim();
       const hasCachedTrace = agentRunId
         ? agentRunTraceCache.has(agentRunId)
         : false;
-      const cachedTraceEvents = agentRunId ? getCachedAgentRunEvents(agentRunId) : [];
+      const cachedTraceEvents = agentRunId
+        ? getCachedAgentRunEvents(agentRunId)
+        : [];
       const traceEvents = cachedTraceEvents.length
         ? cachedTraceEvents
         : msg.pendingAgentTraceEvents || [];
@@ -5808,13 +6335,15 @@ export function refreshChat(body: Element, item?: Zotero.Item | null) {
               message: msg,
               userMessage: previousUserMessage,
               events: traceEvents,
-              onTraceMissing: agentRunId
-                && !hasCachedTrace
-                ? () => {
-                    void ensureAgentRunTraceLoaded(agentRunId, body, item);
-                  }
-                : undefined,
-              onInterleavedText: () => { agentUsesInterleavedText = true; },
+              onTraceMissing:
+                agentRunId && !hasCachedTrace
+                  ? () => {
+                      void ensureAgentRunTraceLoaded(agentRunId, body, item);
+                    }
+                  : undefined,
+              onInterleavedText: () => {
+                agentUsesInterleavedText = true;
+              },
             })
           : null;
       if (hasAnswerText && !agentUsesInterleavedText) {
@@ -5823,22 +6352,24 @@ export function refreshChat(body: Element, item?: Zotero.Item | null) {
         if (msg.compactMarker) {
           bubble.textContent = safeText || "Conversation compacted";
           bubble.classList.add("llm-compact-marker");
-        } else if (msg.streaming && looksLikeStreamingMarkdownTable(safeText)) {
-          bubble.textContent = safeText;
-        } else try {
-          // Build image resolver for MinerU figures (if applicable)
-          const contextSource = resolveContextSourceItem(item);
-          const ctxItem = contextSource.contextItem;
-          const pdfCtx = ctxItem ? pdfTextCache.get(ctxItem.id) : null;
-          const resolveImage = pdfCtx?.sourceType === "mineru" && ctxItem
-            ? buildImageResolver(ctxItem.id)
-            : undefined;
-          bubble.innerHTML = renderMarkdown(safeText, { resolveImage });
-          attachRenderedCopyButtons(bubble, doc);
-        } catch (err) {
-          ztoolkit.log("LLM render error:", err);
-          bubble.textContent = safeText;
-        }
+        } else
+          try {
+            // Build image resolver for MinerU figures (if applicable)
+            const contextSource = resolveContextSourceItem(item);
+            const ctxItem = contextSource.contextItem;
+            const pdfCtx = ctxItem ? pdfTextCache.get(ctxItem.id) : null;
+            const resolveImage =
+              pdfCtx?.sourceType === "mineru" && ctxItem
+                ? buildImageResolver(ctxItem.id)
+                : undefined;
+            bubble.innerHTML = renderAssistantMarkdownHtmlForChat(safeText, {
+              resolveImage,
+            });
+            attachRenderedCopyButtons(bubble, doc);
+          } catch (err) {
+            ztoolkit.log("LLM render error:", err);
+            bubble.textContent = safeText;
+          }
         if (!msg.streaming) {
           try {
             const pairedUserMessage =
@@ -5878,15 +6409,14 @@ export function refreshChat(body: Element, item?: Zotero.Item | null) {
         modelName.textContent = formatDisplayModelName(
           msg.modelName,
           msg.modelProviderLabel,
-          { suppressProviderPrefix: resolveConversationSystemForItem(item) === "claude_code" },
+          {
+            suppressProviderPrefix:
+              resolveConversationSystemForItem(item) === "claude_code",
+          },
         );
         modelHeader.appendChild(modelName);
 
-        if (
-          !hasAnswerText &&
-          msg.streaming &&
-          isClaudeStreamingConversation
-        ) {
+        if (!hasAnswerText && msg.streaming && isClaudeStreamingConversation) {
           const roseLoader = doc.createElement("span") as HTMLSpanElement;
           roseLoader.className = "llm-rose-loader llm-rose-loader-inline";
           mountClaudeRoseThreeLoader(
@@ -5902,8 +6432,7 @@ export function refreshChat(body: Element, item?: Zotero.Item | null) {
       const hasReasoningSummary = Boolean(msg.reasoningSummary?.trim());
       const hasReasoningDetails = Boolean(msg.reasoningDetails?.trim());
       const showTopReasoningPanel =
-        (hasReasoningSummary || hasReasoningDetails) &&
-        msg.runMode !== "agent";
+        (hasReasoningSummary || hasReasoningDetails) && msg.runMode !== "agent";
       if (showTopReasoningPanel) {
         const details = doc.createElement("details") as HTMLDetailsElement;
         details.className = "llm-agent-reasoning";
@@ -6085,8 +6614,10 @@ export function refreshChat(body: Element, item?: Zotero.Item | null) {
         refreshBtn.addEventListener("click", async () => {
           refreshBtn.disabled = true;
           try {
-            const { refreshCurrentConversation } = await import("../../webchat/client");
-            const { getRelayBaseUrl } = await import("../../webchat/relayServer");
+            const { refreshCurrentConversation } =
+              await import("../../webchat/client");
+            const { getRelayBaseUrl } =
+              await import("../../webchat/relayServer");
             const scraped = await refreshCurrentConversation(
               getRelayBaseUrl(),
               msg.webchatChatUrl || null,
@@ -6094,22 +6625,32 @@ export function refreshChat(body: Element, item?: Zotero.Item | null) {
             );
             if (scraped.length > 0) {
               const refreshed: Message[] = scraped.map((m) => ({
-                role: (m.kind === "user" ? "user" : "assistant") as "user" | "assistant",
+                role: (m.kind === "user" ? "user" : "assistant") as
+                  | "user"
+                  | "assistant",
                 text: m.text || "",
                 timestamp: Date.now(),
-                modelName: m.kind === "bot" ? (msg.modelName || "chatgpt.com") : undefined,
+                modelName:
+                  m.kind === "bot" ? msg.modelName || "chatgpt.com" : undefined,
                 modelProviderLabel: m.kind === "bot" ? "WebChat" : undefined,
                 reasoningDetails: m.thinking || undefined,
               }));
               chatHistory.set(conversationKey, refreshed);
               refreshChat(body, item);
             } else {
-              refreshBtn.title = "No messages found — chat site may be on a different page";
-              setTimeout(() => { refreshBtn.title = "Re-fetch this conversation from webchat"; refreshBtn.disabled = false; }, 2000);
+              refreshBtn.title =
+                "No messages found — chat site may be on a different page";
+              setTimeout(() => {
+                refreshBtn.title = "Re-fetch this conversation from webchat";
+                refreshBtn.disabled = false;
+              }, 2000);
             }
           } catch {
             refreshBtn.title = "Refresh failed";
-            setTimeout(() => { refreshBtn.title = "Re-fetch this conversation from webchat"; refreshBtn.disabled = false; }, 2000);
+            setTimeout(() => {
+              refreshBtn.title = "Re-fetch this conversation from webchat";
+              refreshBtn.disabled = false;
+            }, 2000);
           }
         });
         webchatStatusRow.appendChild(refreshBtn);

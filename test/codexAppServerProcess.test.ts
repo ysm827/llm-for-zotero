@@ -933,6 +933,109 @@ describe("codexAppServerProcess", function () {
     ]);
   });
 
+  it("preserves tool metadata from app-server item events", async function () {
+    const proc = createProcess();
+    const started: unknown[] = [];
+    const completed: unknown[] = [];
+
+    setTimeout(() => {
+      void (
+        proc as unknown as {
+          handleMessage: (msg: Record<string, unknown>) => void;
+        }
+      ).handleMessage({
+        method: "item/started",
+        params: {
+          turnId: "turn-tool-items",
+          item: {
+            id: "tool-1",
+            type: "mcp_tool_call",
+            name: "query_library",
+            title: "Query library",
+            serverName: "llm_for_zotero",
+            arguments: { entity: "items", mode: "list" },
+          },
+        },
+      });
+    }, 5);
+    setTimeout(() => {
+      void (
+        proc as unknown as {
+          handleMessage: (msg: Record<string, unknown>) => void;
+        }
+      ).handleMessage({
+        method: "item/completed",
+        params: {
+          turnId: "turn-tool-items",
+          item: {
+            id: "tool-1",
+            type: "mcp_tool_call",
+            tool: { name: "query_library" },
+            title: "Query library",
+            server: { name: "llm_for_zotero" },
+            args: { entity: "items", mode: "list" },
+            summary: "Found 3 items.",
+          },
+        },
+      });
+    }, 10);
+    setTimeout(() => {
+      void (
+        proc as unknown as {
+          handleMessage: (msg: Record<string, unknown>) => void;
+        }
+      ).handleMessage({
+        method: "turn/completed",
+        params: {
+          turnId: "turn-tool-items",
+          status: "completed",
+        },
+      });
+    }, 15);
+
+    await waitForCodexAppServerTurnCompletion({
+      proc,
+      turnId: "turn-tool-items",
+      onItemStarted: async (event) => {
+        started.push(event);
+      },
+      onItemCompleted: async (event) => {
+        completed.push(event);
+      },
+      timeoutMs: 50,
+    });
+
+    assert.deepInclude(started[0] as Record<string, unknown>, {
+      id: "tool-1",
+      type: "mcp_tool_call",
+      name: "query_library",
+      title: "Query library",
+      serverName: "llm_for_zotero",
+    });
+    assert.deepEqual((started[0] as { arguments?: unknown }).arguments, {
+      entity: "items",
+      mode: "list",
+    });
+    assert.deepInclude(completed[0] as Record<string, unknown>, {
+      id: "tool-1",
+      type: "mcp_tool_call",
+      toolName: "query_library",
+      title: "Query library",
+      serverName: "llm_for_zotero",
+      summary: "Found 3 items.",
+    });
+    assert.deepEqual((completed[0] as { arguments?: unknown }).arguments, {
+      entity: "items",
+      mode: "list",
+    });
+    assert.deepInclude(
+      (completed[0] as { raw?: Record<string, unknown> }).raw || {},
+      {
+        title: "Query library",
+      },
+    );
+  });
+
   it("emits token usage updates for the active turn", async function () {
     const proc = createProcess();
     const usage: Array<{
