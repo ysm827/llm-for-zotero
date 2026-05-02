@@ -106,6 +106,56 @@ describe("agentTrace render", function () {
     );
   });
 
+  it("renders Codex progress messages as separate activity messages", function () {
+    const events: AgentRunEventRecord[] = [
+      {
+        runId: "run-1",
+        seq: 1,
+        eventType: "codex_progress",
+        payload: {
+          type: "codex_progress",
+          itemId: "msg-progress",
+          text: "I'm searching the Zotero library.",
+          status: "running",
+        },
+        createdAt: 1,
+      },
+      {
+        runId: "run-1",
+        seq: 2,
+        eventType: "codex_progress",
+        payload: {
+          type: "codex_progress",
+          itemId: "msg-next",
+          text: "Next I'm opening the matching records.",
+          status: "running",
+        },
+        createdAt: 2,
+      },
+    ];
+
+    const { items } = buildAgentTraceDisplayItems(events, null, {
+      role: "assistant",
+      text: "",
+      timestamp: 1,
+      runMode: "agent",
+      modelProviderLabel: "Codex",
+    });
+    const progressMessages = items
+      .filter(
+        (
+          item,
+        ): item is Extract<(typeof items)[number], { type: "message" }> =>
+          item.type === "message",
+      )
+      .map((item) => item.text);
+
+    assert.includeMembers(progressMessages, [
+      "I'm searching the Zotero library.",
+      "Next I'm opening the matching records.",
+    ]);
+  });
+
   it("compacts same app-server reasoning item IDs into one thinking step", function () {
     const events: AgentRunEventRecord[] = [
       {

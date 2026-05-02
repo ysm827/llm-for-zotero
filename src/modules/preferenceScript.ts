@@ -107,11 +107,17 @@ import {
 import {
   getCodexReasoningModePref,
   getCodexRuntimeModelPref,
+  isCodexZoteroMcpToolsEnabled,
   isCodexAppServerModeEnabled,
   setCodexAppServerModeEnabled,
+  setCodexZoteroMcpToolsEnabled,
   setCodexReasoningModePref,
   setCodexRuntimeModelPref,
 } from "../codexAppServer/prefs";
+import {
+  installOrUpdateCodexZoteroMcpConfig,
+  readCodexNativeMcpSetupStatus,
+} from "../codexAppServer/mcpSetup";
 import type { CodexReasoningMode } from "../codexAppServer/constants";
 import { getClaudeProfileSignature } from "../claudeCode/projectSkills";
 import {
@@ -663,6 +669,15 @@ export async function registerPrefsScripts(_window: Window | undefined | null) {
   ) as HTMLButtonElement | null;
   const codexAppServerStatus = doc.querySelector(
     `#${config.addonRef}-codex-app-server-status`,
+  ) as HTMLSpanElement | null;
+  const codexAppServerMcpEnableInput = doc.querySelector(
+    `#${config.addonRef}-codex-app-server-mcp-enable`,
+  ) as HTMLInputElement | null;
+  const codexAppServerMcpSetupBtn = doc.querySelector(
+    `#${config.addonRef}-codex-app-server-mcp-setup`,
+  ) as HTMLButtonElement | null;
+  const codexAppServerMcpStatus = doc.querySelector(
+    `#${config.addonRef}-codex-app-server-mcp-status`,
   ) as HTMLSpanElement | null;
 
   if (!modelSections) return;
@@ -2007,6 +2022,85 @@ export async function registerPrefsScripts(_window: Window | undefined | null) {
         }
       })();
     });
+  }
+
+  const renderCodexMcpStatus = (
+    message: string,
+    color = "var(--fill-secondary, #888)",
+  ) => {
+    if (!codexAppServerMcpStatus) return;
+    codexAppServerMcpStatus.style.display = "inline";
+    codexAppServerMcpStatus.style.color = color;
+    codexAppServerMcpStatus.textContent = message;
+  };
+
+  if (codexAppServerMcpEnableInput) {
+    codexAppServerMcpEnableInput.checked = isCodexZoteroMcpToolsEnabled();
+    codexAppServerMcpEnableInput.addEventListener("change", () => {
+      setCodexZoteroMcpToolsEnabled(codexAppServerMcpEnableInput.checked);
+      renderCodexMcpStatus(
+        codexAppServerMcpEnableInput.checked
+          ? t("Zotero MCP tools will be configured before native Codex turns.")
+          : t("Zotero MCP tools disabled for native Codex turns."),
+      );
+    });
+  }
+
+  if (codexAppServerMcpSetupBtn) {
+    codexAppServerMcpSetupBtn.addEventListener("click", () => {
+      void (async () => {
+        codexAppServerMcpSetupBtn.disabled = true;
+        renderCodexMcpStatus(t("Configuring Zotero MCP tools…"));
+        try {
+          const status = await installOrUpdateCodexZoteroMcpConfig({
+            codexPath: "",
+          });
+          setCodexZoteroMcpToolsEnabled(true);
+          if (codexAppServerMcpEnableInput) {
+            codexAppServerMcpEnableInput.checked = true;
+          }
+          const toolCount = status.toolNames.length;
+          renderCodexMcpStatus(
+            toolCount > 0
+              ? t(`Zotero MCP connected with ${toolCount} tools.`)
+              : t("Zotero MCP config written. Codex is reloading tools."),
+            "green",
+          );
+        } catch (error) {
+          renderCodexMcpStatus(
+            `${t("Zotero MCP setup failed: ")}${
+              error instanceof Error ? error.message : String(error)
+            }`,
+            "red",
+          );
+        } finally {
+          codexAppServerMcpSetupBtn.disabled = false;
+        }
+      })();
+    });
+  }
+
+  if (codexAppServerMcpStatus && isCodexZoteroMcpToolsEnabled()) {
+    renderCodexMcpStatus(t("Checking Zotero MCP setup…"));
+    void readCodexNativeMcpSetupStatus({ codexPath: "" })
+      .then((status) => {
+        renderCodexMcpStatus(
+          status.connected === true
+            ? t(`Zotero MCP connected with ${status.toolNames.length} tools.`)
+            : status.configured
+              ? t("Zotero MCP configured. Use setup if tools do not appear.")
+              : t("Zotero MCP tools enabled but not configured yet."),
+          status.connected === true ? "green" : "var(--fill-secondary, #888)",
+        );
+      })
+      .catch((error) => {
+        renderCodexMcpStatus(
+          `${t("Could not read Codex MCP status: ")}${
+            error instanceof Error ? error.message : String(error)
+          }`,
+          "red",
+        );
+      });
   }
 
   if (agentBackendModeSelect) {

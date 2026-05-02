@@ -36,6 +36,16 @@ const CODEX_MESSAGES_INDEX = "llm_for_zotero_codex_messages_conversation_idx";
 const CODEX_CONVERSATIONS_TABLE = "llm_for_zotero_codex_conversations";
 const CODEX_CONVERSATIONS_KIND_INDEX =
   "llm_for_zotero_codex_conversations_kind_idx";
+const CODEX_CONVERSATION_ACTIVITY_TIMESTAMP_SQL = `MAX(
+  COALESCE(c.updated_at, 0),
+  COALESCE(
+    (SELECT MAX(m.timestamp)
+     FROM ${CODEX_MESSAGES_TABLE} m
+     WHERE m.conversation_key = c.conversation_key),
+    0
+  ),
+  COALESCE(c.created_at, 0)
+)`;
 
 function normalizeConversationKey(conversationKey: number): number | null {
   if (!Number.isFinite(conversationKey)) return null;
@@ -74,6 +84,24 @@ function normalizeCatalogTimestamp(value: unknown): number {
   const parsed = Number(value);
   if (!Number.isFinite(parsed) || parsed <= 0) return Date.now();
   return Math.floor(parsed);
+}
+
+async function touchCodexConversationActivity(
+  conversationKey: number,
+  timestamp?: number,
+): Promise<void> {
+  const normalizedKey = normalizeConversationKey(conversationKey);
+  if (!normalizedKey) return;
+  const normalizedTimestamp = normalizeCatalogTimestamp(timestamp);
+  await Zotero.DB.queryAsync(
+    `UPDATE ${CODEX_CONVERSATIONS_TABLE}
+     SET updated_at = CASE
+       WHEN COALESCE(updated_at, 0) > ? THEN updated_at
+       ELSE ?
+     END
+     WHERE conversation_key = ?`,
+    [normalizedTimestamp, normalizedTimestamp, normalizedKey],
+  );
 }
 
 function remapLegacyConversationKey(
@@ -358,6 +386,9 @@ export async function appendCodexMessage(
         (entry) => entry && typeof entry.id === "string" && entry.id.trim(),
       )
     : [];
+  const messageTimestamp = Number.isFinite(message.timestamp)
+    ? Math.floor(message.timestamp)
+    : Date.now();
 
   await Zotero.DB.queryAsync(
     `INSERT INTO ${CODEX_MESSAGES_TABLE}
@@ -367,7 +398,7 @@ export async function appendCodexMessage(
       normalizedKey,
       message.role,
       message.text || "",
-      Number.isFinite(message.timestamp) ? Math.floor(message.timestamp) : Date.now(),
+      messageTimestamp,
       message.runMode || null,
       message.agentRunId || null,
       selectedTexts[0] || message.selectedText || null,
@@ -400,6 +431,7 @@ export async function appendCodexMessage(
         : null,
     ],
   );
+  await touchCodexConversationActivity(normalizedKey, messageTimestamp);
 }
 
 export async function loadCodexConversation(
@@ -720,6 +752,9 @@ export async function updateLatestCodexUserMessage(
     message.selectedTextNoteContexts,
     selectedTexts.length,
   );
+  const messageTimestamp = Number.isFinite(message.timestamp)
+    ? Math.floor(message.timestamp)
+    : Date.now();
   await Zotero.DB.queryAsync(
     `UPDATE ${CODEX_MESSAGES_TABLE}
      SET text = ?,
@@ -745,7 +780,7 @@ export async function updateLatestCodexUserMessage(
      )`,
     [
       message.text || "",
-      Number.isFinite(message.timestamp) ? Math.floor(message.timestamp) : Date.now(),
+      messageTimestamp,
       message.runMode || null,
       message.agentRunId || null,
       selectedTexts[0] || null,
@@ -769,6 +804,7 @@ export async function updateLatestCodexUserMessage(
       normalizedKey,
     ],
   );
+  await touchCodexConversationActivity(normalizedKey, messageTimestamp);
 }
 
 export async function updateLatestCodexAssistantMessage(
@@ -793,6 +829,9 @@ export async function updateLatestCodexAssistantMessage(
 ): Promise<void> {
   const normalizedKey = normalizeConversationKey(conversationKey);
   if (!normalizedKey) return;
+  const messageTimestamp = Number.isFinite(message.timestamp)
+    ? Math.floor(message.timestamp)
+    : Date.now();
   await Zotero.DB.queryAsync(
     `UPDATE ${CODEX_MESSAGES_TABLE}
      SET text = ?,
@@ -818,7 +857,7 @@ export async function updateLatestCodexAssistantMessage(
      )`,
     [
       message.text || "",
-      Number.isFinite(message.timestamp) ? Math.floor(message.timestamp) : Date.now(),
+      messageTimestamp,
       message.runMode || null,
       message.agentRunId || null,
       message.modelName || null,
@@ -838,6 +877,7 @@ export async function updateLatestCodexAssistantMessage(
       normalizedKey,
     ],
   );
+  await touchCodexConversationActivity(normalizedKey, messageTimestamp);
 }
 
 type CodexConversationRow = {
@@ -927,7 +967,7 @@ export async function getCodexConversationSummary(
             c.kind AS kind,
             c.paper_item_id AS paperItemID,
             c.created_at AS createdAt,
-            c.updated_at AS updatedAt,
+            ${CODEX_CONVERSATION_ACTIVITY_TIMESTAMP_SQL} AS updatedAt,
             c.title AS title,
             c.provider_session_id AS providerSessionId,
             c.scoped_conversation_key AS scopedConversationKey,
@@ -1028,7 +1068,7 @@ async function listCodexConversations(params: {
               c.kind AS kind,
               c.paper_item_id AS paperItemID,
               c.created_at AS createdAt,
-              c.updated_at AS updatedAt,
+              ${CODEX_CONVERSATION_ACTIVITY_TIMESTAMP_SQL} AS updatedAt,
               c.title AS title,
               c.provider_session_id AS providerSessionId,
               c.scoped_conversation_key AS scopedConversationKey,
@@ -1049,14 +1089,14 @@ async function listCodexConversations(params: {
        WHERE c.library_id = ?
          AND c.kind = 'paper'
          AND c.paper_item_id = ?
-       ORDER BY c.updated_at DESC, c.conversation_key DESC
+       ORDER BY updatedAt DESC, c.conversation_key DESC
        LIMIT ?`
     : `SELECT c.conversation_key AS conversationKey,
               c.library_id AS libraryID,
               c.kind AS kind,
               c.paper_item_id AS paperItemID,
               c.created_at AS createdAt,
-              c.updated_at AS updatedAt,
+              ${CODEX_CONVERSATION_ACTIVITY_TIMESTAMP_SQL} AS updatedAt,
               c.title AS title,
               c.provider_session_id AS providerSessionId,
               c.scoped_conversation_key AS scopedConversationKey,
@@ -1076,7 +1116,7 @@ async function listCodexConversations(params: {
        FROM ${CODEX_CONVERSATIONS_TABLE} c
        WHERE c.library_id = ?
          AND c.kind = 'global'
-       ORDER BY c.updated_at DESC, c.conversation_key DESC
+       ORDER BY updatedAt DESC, c.conversation_key DESC
        LIMIT ?`;
   const rows = (await Zotero.DB.queryAsync(
     sql,
@@ -1118,7 +1158,7 @@ export async function listAllCodexPaperConversationsByLibrary(
             c.kind AS kind,
             c.paper_item_id AS paperItemID,
             c.created_at AS createdAt,
-            c.updated_at AS updatedAt,
+            ${CODEX_CONVERSATION_ACTIVITY_TIMESTAMP_SQL} AS updatedAt,
             c.title AS title,
             c.provider_session_id AS providerSessionId,
             c.scoped_conversation_key AS scopedConversationKey,
@@ -1145,7 +1185,7 @@ export async function listAllCodexPaperConversationsByLibrary(
             AND m.role = 'user'),
          0
        ) > 0
-     ORDER BY c.updated_at DESC, c.conversation_key DESC
+     ORDER BY updatedAt DESC, c.conversation_key DESC
      LIMIT ?`,
     [normalizedLibraryID, normalizedLimit],
   )) as CodexConversationRow[] | undefined;

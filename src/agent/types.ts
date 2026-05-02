@@ -282,6 +282,12 @@ export type AgentEvent =
   | { type: "message_delta"; text: string }
   | { type: "message_rollback"; length: number; text: string }
   | {
+      type: "codex_progress";
+      itemId: string;
+      text: string;
+      status?: "running" | "completed";
+    }
+  | {
       type: "usage";
       inputTokens: number;
       outputTokens: number;

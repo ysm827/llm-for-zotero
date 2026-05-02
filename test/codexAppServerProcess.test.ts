@@ -849,6 +849,90 @@ describe("codexAppServerProcess", function () {
     assert.deepEqual(chunks, ["I'm reading.", "Final answer."]);
   });
 
+  it("routes item-scoped agent message deltas separately when requested", async function () {
+    const proc = createProcess();
+    const chunks: string[] = [];
+    const itemDeltas: Array<{ itemId?: string; delta: string }> = [];
+
+    setTimeout(() => {
+      void (
+        proc as unknown as {
+          handleMessage: (msg: Record<string, unknown>) => void;
+        }
+      ).handleMessage({
+        method: "item/agentMessage/delta",
+        params: {
+          turnId: "turn-items",
+          itemId: "msg-progress",
+          delta: "I'm reading.",
+        },
+      });
+    }, 5);
+    setTimeout(() => {
+      void (
+        proc as unknown as {
+          handleMessage: (msg: Record<string, unknown>) => void;
+        }
+      ).handleMessage({
+        method: "item/agentMessage/delta",
+        params: {
+          turnId: "turn-items",
+          itemId: "msg-final",
+          delta: "Final answer.",
+        },
+      });
+    }, 10);
+    setTimeout(() => {
+      void (
+        proc as unknown as {
+          handleMessage: (msg: Record<string, unknown>) => void;
+        }
+      ).handleMessage({
+        method: "item/completed",
+        params: {
+          turnId: "turn-items",
+          item: {
+            id: "msg-final",
+            type: "agent_message",
+            content: "Final answer.",
+          },
+        },
+      });
+    }, 15);
+    setTimeout(() => {
+      void (
+        proc as unknown as {
+          handleMessage: (msg: Record<string, unknown>) => void;
+        }
+      ).handleMessage({
+        method: "turn/completed",
+        params: {
+          turnId: "turn-items",
+          status: "completed",
+        },
+      });
+    }, 20);
+
+    const result = await waitForCodexAppServerTurnCompletion({
+      proc,
+      turnId: "turn-items",
+      onTextDelta: async (delta) => {
+        chunks.push(delta);
+      },
+      onAgentMessageDelta: async (event) => {
+        itemDeltas.push(event);
+      },
+      timeoutMs: 50,
+    });
+
+    assert.equal(result, "Final answer.");
+    assert.deepEqual(chunks, []);
+    assert.deepEqual(itemDeltas, [
+      { itemId: "msg-progress", delta: "I'm reading." },
+      { itemId: "msg-final", delta: "Final answer." },
+    ]);
+  });
+
   it("emits token usage updates for the active turn", async function () {
     const proc = createProcess();
     const usage: Array<{

@@ -204,6 +204,7 @@ import {
   clearConversationSummary,
 } from "./conversationSummaryCache";
 import type {
+  AgentEvent,
   AgentRunEventRecord,
   AgentRuntimeRequest,
 } from "../../agent/types";
@@ -419,6 +420,34 @@ function resolveAutoLoadedPaperContextForItem(
   }
   const contextSource = resolveContextSourceItem(item);
   return resolvePaperContextRefFromAttachment(contextSource.contextItem);
+}
+
+function resolveLibraryDisplayName(libraryID: number): string | undefined {
+  if (!Number.isFinite(libraryID) || libraryID <= 0) return undefined;
+  const libraries = (Zotero as unknown as {
+    Libraries?: {
+      getName?: (libraryID: number) => string;
+      get?: (libraryID: number) => { name?: string } | null | undefined;
+      userLibraryID?: number;
+    };
+  }).Libraries;
+  try {
+    const directName = libraries?.getName?.(libraryID);
+    if (typeof directName === "string" && directName.trim()) {
+      return sanitizeText(directName);
+    }
+  } catch (_error) {
+    void _error;
+  }
+  try {
+    const library = libraries?.get?.(libraryID);
+    if (typeof library?.name === "string" && library.name.trim()) {
+      return sanitizeText(library.name);
+    }
+  } catch (_error) {
+    void _error;
+  }
+  return libraries?.userLibraryID === libraryID ? "My Library" : undefined;
 }
 
 function buildActiveNoteContextBlock(
@@ -1782,11 +1811,26 @@ function resolveCodexNativeConversationScope(params: {
     kind === "paper"
       ? Math.floor(Number(baseItem?.id || params.item.id || 0)) || undefined
       : undefined;
+  const paperContext =
+    kind === "paper"
+      ? resolveAutoLoadedPaperContextForItem(params.item) ||
+        resolvePaperContextRefFromItem(baseItem || params.item)
+      : null;
+  const paperTitle =
+    sanitizeText(
+      paperContext?.title ||
+        String(baseItem?.getField?.("title") || params.item.getField?.("title") || ""),
+    ) || undefined;
   return {
     conversationKey: params.conversationKey,
     libraryID,
     kind,
     paperItemID,
+    activeItemId: paperItemID,
+    activeContextItemId: paperContext?.contextItemId,
+    libraryName: resolveLibraryDisplayName(libraryID),
+    paperTitle,
+    paperContext: paperContext || undefined,
     title: sanitizeText(params.title || "").slice(0, 64) || undefined,
   };
 }
@@ -2169,6 +2213,225 @@ function finalizeCancelledAssistantMessage(
   message.streaming = false;
   message.webchatRunState = undefined;
   message.webchatCompletionReason = null;
+}
+
+type CodexNativeTraceItemEvent = {
+  id?: string;
+  type?: string;
+  role?: string;
+  summary?: string;
+  details?: string;
+};
+
+type CodexNativeTraceDeltaEvent = {
+  itemId?: string;
+  delta: string;
+};
+
+function isCodexNativeAgentMessageItem(
+  event: CodexNativeTraceItemEvent,
+): boolean {
+  const itemType = (event.type || "").replace(/[-_\s]+/g, "").toLowerCase();
+  const role = (event.role || "").replace(/[-_\s]+/g, "").toLowerCase();
+  return (
+    itemType === "agentmessage" ||
+    itemType === "assistantmessage" ||
+    (itemType === "message" && (role === "assistant" || role === "agent"))
+  );
+}
+
+function humanizeCodexNativeItemType(type: string | undefined): string {
+  return sanitizeText(type || "")
+    .replace(/[-_]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim()
+    .toLowerCase();
+}
+
+function compactCodexNativeTraceLine(text: string, maxLength = 260): string {
+  const clean = sanitizeText(text).replace(/\s+/g, " ").trim();
+  if (clean.length <= maxLength) return clean;
+  return `${clean.slice(0, Math.max(0, maxLength - 3)).trimEnd()}...`;
+}
+
+function normalizeCodexNativeTraceCompare(text: string): string {
+  return sanitizeText(text).replace(/\s+/g, " ").trim();
+}
+
+function createCodexNativeActivityTraceController(
+  assistantMessage: Message,
+  queueRefresh: () => void,
+) {
+  const runId =
+    assistantMessage.agentRunId?.trim() ||
+    `codex-native-${Math.floor(assistantMessage.timestamp || Date.now())}`;
+  const events: AgentRunEventRecord[] = [];
+  const progressEventIndexes = new Map<string, number>();
+  let seq = 0;
+  let lastAgentMessageItemId = "";
+
+  const createEvent = (payload: AgentEvent): AgentRunEventRecord => ({
+    runId,
+    seq: ++seq,
+    eventType: payload.type,
+    payload,
+    createdAt: Date.now(),
+  });
+
+  const rebuildProgressIndexes = () => {
+    progressEventIndexes.clear();
+    events.forEach((entry, index) => {
+      if (entry.payload.type === "codex_progress") {
+        progressEventIndexes.set(entry.payload.itemId, index);
+      }
+    });
+  };
+
+  const sync = () => {
+    assistantMessage.pendingAgentTraceEvents = events.length
+      ? events.map((entry, index) => ({
+          ...entry,
+          seq: index + 1,
+          payload: { ...entry.payload } as AgentEvent,
+        }))
+      : undefined;
+    queueRefresh();
+  };
+
+  const removeEventAt = (index: number) => {
+    if (index < 0 || index >= events.length) return false;
+    events.splice(index, 1);
+    rebuildProgressIndexes();
+    return true;
+  };
+
+  const upsertProgressText = (
+    itemId: string,
+    text: string,
+    mode: "replace" | "append",
+    status: "running" | "completed",
+  ): boolean => {
+    const cleanItemId = sanitizeText(itemId).trim();
+    const cleanText = sanitizeText(text);
+    if (!cleanItemId || !cleanText) return false;
+    const existingIndex = progressEventIndexes.get(cleanItemId);
+    if (existingIndex !== undefined) {
+      const existing = events[existingIndex];
+      if (existing?.payload.type !== "codex_progress") return false;
+      const nextText =
+        mode === "append"
+          ? `${existing.payload.text || ""}${cleanText}`
+          : cleanText;
+      events[existingIndex] = {
+        ...existing,
+        payload: {
+          type: "codex_progress",
+          itemId: cleanItemId,
+          text: nextText,
+          status,
+        },
+        createdAt: Date.now(),
+      };
+      return true;
+    }
+    progressEventIndexes.set(cleanItemId, events.length);
+    events.push(
+      createEvent({
+        type: "codex_progress",
+        itemId: cleanItemId,
+        text: cleanText,
+        status,
+      }),
+    );
+    return true;
+  };
+
+  const appendStatus = (text: string): boolean => {
+    const clean = compactCodexNativeTraceLine(text);
+    if (!clean) return false;
+    const previous = events[events.length - 1];
+    if (
+      previous?.payload.type === "status" &&
+      previous.payload.text === clean
+    ) {
+      return false;
+    }
+    events.push(createEvent({ type: "status", text: clean }));
+    return true;
+  };
+
+  const appendItemStatus = (
+    event: CodexNativeTraceItemEvent,
+    phase: "started" | "completed",
+  ): void => {
+    if (isCodexNativeAgentMessageItem(event)) return;
+    const itemType = humanizeCodexNativeItemType(event.type);
+    if (!itemType || itemType === "reasoning") return;
+    const summary =
+      phase === "completed"
+        ? compactCodexNativeTraceLine(event.summary || event.details || "")
+        : "";
+    const text = summary || `Codex ${itemType} ${phase}`;
+    if (appendStatus(text)) sync();
+  };
+
+  const appendAgentMessageDelta = (
+    event: CodexNativeTraceDeltaEvent,
+  ): boolean => {
+    const itemId = sanitizeText(event.itemId || "").trim();
+    if (!itemId) return false;
+    const changed = upsertProgressText(itemId, event.delta, "append", "running");
+    if (changed) sync();
+    return true;
+  };
+
+  const noteAgentMessageCompleted = (event: CodexNativeTraceItemEvent): void => {
+    if (!isCodexNativeAgentMessageItem(event)) return;
+    const itemId = sanitizeText(event.id || "").trim();
+    if (!itemId) return;
+    lastAgentMessageItemId = itemId;
+    const completedText = event.details || event.summary || "";
+    if (completedText && !progressEventIndexes.has(itemId)) {
+      if (upsertProgressText(itemId, completedText, "replace", "completed")) {
+        sync();
+      }
+    }
+  };
+
+  const finish = (finalText: string): void => {
+    let changed = false;
+    if (lastAgentMessageItemId) {
+      const finalIndex = progressEventIndexes.get(lastAgentMessageItemId);
+      if (finalIndex !== undefined) {
+        changed = removeEventAt(finalIndex) || changed;
+      }
+    }
+    const normalizedFinal = normalizeCodexNativeTraceCompare(finalText);
+    if (normalizedFinal) {
+      for (let index = events.length - 1; index >= 0; index -= 1) {
+        const entry = events[index];
+        if (
+          entry?.payload.type === "codex_progress" &&
+          normalizeCodexNativeTraceCompare(entry.payload.text) === normalizedFinal
+        ) {
+          changed = removeEventAt(index) || changed;
+        }
+      }
+    }
+    const alreadyFinal = events.some((entry) => entry.payload.type === "final");
+    if (!alreadyFinal) {
+      events.push(createEvent({ type: "final", text: finalText }));
+      changed = true;
+    }
+    if (changed) sync();
+  };
+
+  return {
+    appendAgentMessageDelta,
+    appendItemStatus,
+    finish,
+    noteAgentMessageCompleted,
+  };
 }
 
 function applyWebChatAnswerSnapshot(
@@ -2839,8 +3102,8 @@ export async function retryLatestAssistantResponse(
   assistantMessage.reasoningSummary = undefined;
   assistantMessage.reasoningDetails = undefined;
   assistantMessage.reasoningOpen = isReasoningExpandedByDefault();
-  assistantMessage.runMode = "chat";
   assistantMessage.agentRunId = undefined;
+  assistantMessage.pendingAgentTraceEvents = undefined;
   assistantMessage.streaming = true;
   const effectiveRequestConfig = resolveEffectiveRequestConfig({
     item,
@@ -2854,6 +3117,16 @@ export async function retryLatestAssistantResponse(
     reasoning,
     advanced,
   });
+  const effectiveConversationSystem = resolveEffectiveConversationSystem({
+    item,
+    authMode: effectiveRequestConfig.authMode,
+    providerProtocol: effectiveRequestConfig.providerProtocol,
+    modelProviderLabel: effectiveRequestConfig.modelProviderLabel,
+  });
+  const isCodexNativeTurn =
+    effectiveConversationSystem === "codex" &&
+    effectiveRequestConfig.authMode === "codex_app_server";
+  assistantMessage.runMode = isCodexNativeTurn ? "agent" : "chat";
   assistantMessage.modelName = effectiveRequestConfig.model;
   assistantMessage.modelEntryId = effectiveRequestConfig.modelEntryId;
   assistantMessage.modelProviderLabel =
@@ -3005,6 +3278,12 @@ export async function retryLatestAssistantResponse(
     }
 
     const queueRefresh = createQueuedRefresh(refreshChatSafely);
+    const codexActivityTrace = isCodexNativeTurn
+      ? createCodexNativeActivityTraceController(
+          assistantMessage,
+          queueRefresh,
+        )
+      : null;
     if (getCancelledRequestId(conversationKey) >= thisRequestId) {
       getAbortController(conversationKey)?.abort();
       await finalizeCancelledAssistant();
@@ -3092,15 +3371,6 @@ export async function retryLatestAssistantResponse(
         );
       }
     };
-    const effectiveConversationSystem = resolveEffectiveConversationSystem({
-      item,
-      authMode: effectiveRequestConfig.authMode,
-      providerProtocol: effectiveRequestConfig.providerProtocol,
-      modelProviderLabel: effectiveRequestConfig.modelProviderLabel,
-    });
-    const isCodexNativeTurn =
-      effectiveConversationSystem === "codex" &&
-      effectiveRequestConfig.authMode === "codex_app_server";
     if (isCodexNativeTurn) {
       await clearCodexConversationSessionMetadata(conversationKey).catch(
         (error) => {
@@ -3128,19 +3398,41 @@ export async function retryLatestAssistantResponse(
             signal: getAbortController(conversationKey)?.signal,
             codexPath: effectiveRequestConfig.apiBase,
             onDelta: handleDelta,
+            onAgentMessageDelta: (event) => {
+              if (!codexActivityTrace?.appendAgentMessageDelta(event)) {
+                handleDelta(event.delta);
+              }
+            },
             onReasoning: handleReasoning,
             onUsage: handleUsage,
             onItemStarted: (event) => {
+              codexActivityTrace?.appendItemStatus(event, "started");
               const itemType = sanitizeText(event.type || "");
-              if (itemType && itemType !== "message") {
+              if (itemType && !isCodexNativeAgentMessageItem(event)) {
                 setStatusSafely(`Codex: ${itemType} started`, "sending");
               }
             },
             onItemCompleted: (event) => {
+              codexActivityTrace?.noteAgentMessageCompleted(event);
+              codexActivityTrace?.appendItemStatus(event, "completed");
               const itemType = sanitizeText(event.type || "");
-              if (itemType && itemType !== "message") {
+              if (itemType && !isCodexNativeAgentMessageItem(event)) {
                 setStatusSafely(`Codex: ${itemType} completed`, "sending");
               }
+            },
+            onMcpSetupWarning: (message) => {
+              setStatusSafely(message, "error");
+            },
+            onApprovalRequest: () => {
+              setStatusSafely(
+                "Codex requested approval, but native Codex approvals are not enabled in Zotero yet.",
+                "error",
+              );
+              return {
+                approved: false,
+                error:
+                  "Zotero has not enabled native Codex app-server approval UI yet.",
+              };
             },
           })
         ).text
@@ -3164,6 +3456,7 @@ export async function retryLatestAssistantResponse(
 
     assistantMessage.text =
       sanitizeText(answer) || streamedAnswer || "No response.";
+    codexActivityTrace?.finish(assistantMessage.text);
     assistantMessage.timestamp = Date.now();
     assistantMessage.modelName = effectiveRequestConfig.model;
     assistantMessage.modelEntryId = effectiveRequestConfig.modelEntryId;
@@ -3913,6 +4206,9 @@ export async function sendQuestion(opts: import("./types").SendQuestionOptions) 
     reasoning,
     advanced,
   });
+  const isCodexNativeTurn =
+    effectiveConversationSystem === "codex" &&
+    effectiveRequestConfig.authMode === "codex_app_server";
   const requestFileAttachments = normalizeModelFileAttachments(attachments, {
     authMode: effectiveRequestConfig.authMode,
     runtimeMode: effectiveRuntimeMode,
@@ -4034,7 +4330,7 @@ export async function sendQuestion(opts: import("./types").SendQuestionOptions) 
   const assistantMessage: Message = {
     ...optimisticAssistantMessage,
     timestamp: optimisticAssistantMessage.timestamp,
-    runMode: effectiveRuntimeMode,
+    runMode: isCodexNativeTurn ? "agent" : effectiveRuntimeMode,
     agentRunId: agentRunId || undefined,
     modelName: effectiveRequestConfig.model,
     modelEntryId: effectiveRequestConfig.modelEntryId,
@@ -4263,6 +4559,12 @@ export async function sendQuestion(opts: import("./types").SendQuestionOptions) 
     }
 
     const queueRefresh = createQueuedRefresh(refreshChatSafely);
+    const codexActivityTrace = isCodexNativeTurn
+      ? createCodexNativeActivityTraceController(
+          assistantMessage,
+          queueRefresh,
+        )
+      : null;
 
     if (getCancelledRequestId(conversationKey) >= thisRequestId) {
       getAbortController(conversationKey)?.abort();
@@ -4346,9 +4648,6 @@ export async function sendQuestion(opts: import("./types").SendQuestionOptions) 
         );
       }
     };
-    const isCodexNativeTurn =
-      effectiveConversationSystem === "codex" &&
-      effectiveRequestConfig.authMode === "codex_app_server";
     const answer = isCodexNativeTurn
       ? (
           await runCodexAppServerNativeTurn({
@@ -4366,19 +4665,41 @@ export async function sendQuestion(opts: import("./types").SendQuestionOptions) 
             signal: getAbortController(conversationKey)?.signal,
             codexPath: effectiveRequestConfig.apiBase,
             onDelta: handleDelta,
+            onAgentMessageDelta: (event) => {
+              if (!codexActivityTrace?.appendAgentMessageDelta(event)) {
+                handleDelta(event.delta);
+              }
+            },
             onReasoning: handleReasoning,
             onUsage: handleUsage,
             onItemStarted: (event) => {
+              codexActivityTrace?.appendItemStatus(event, "started");
               const itemType = sanitizeText(event.type || "");
-              if (itemType && itemType !== "message") {
+              if (itemType && !isCodexNativeAgentMessageItem(event)) {
                 setStatusSafely(`Codex: ${itemType} started`, "sending");
               }
             },
             onItemCompleted: (event) => {
+              codexActivityTrace?.noteAgentMessageCompleted(event);
+              codexActivityTrace?.appendItemStatus(event, "completed");
               const itemType = sanitizeText(event.type || "");
-              if (itemType && itemType !== "message") {
+              if (itemType && !isCodexNativeAgentMessageItem(event)) {
                 setStatusSafely(`Codex: ${itemType} completed`, "sending");
               }
+            },
+            onMcpSetupWarning: (message) => {
+              setStatusSafely(message, "error");
+            },
+            onApprovalRequest: () => {
+              setStatusSafely(
+                "Codex requested approval, but native Codex approvals are not enabled in Zotero yet.",
+                "error",
+              );
+              return {
+                approved: false,
+                error:
+                  "Zotero has not enabled native Codex app-server approval UI yet.",
+              };
             },
           })
         ).text
@@ -4402,7 +4723,8 @@ export async function sendQuestion(opts: import("./types").SendQuestionOptions) 
 
     assistantMessage.text =
       sanitizeText(answer) || assistantMessage.text || "No response.";
-    assistantMessage.runMode = effectiveRuntimeMode;
+    codexActivityTrace?.finish(assistantMessage.text);
+    assistantMessage.runMode = isCodexNativeTurn ? "agent" : effectiveRuntimeMode;
     assistantMessage.agentRunId = agentRunId || assistantMessage.agentRunId;
     assistantMessage.compactMarker = /^\/compact(?:\s|$)/i.test(question.trim());
     if (assistantMessage.compactMarker && !assistantMessage.text.trim()) {

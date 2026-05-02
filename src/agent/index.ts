@@ -57,7 +57,6 @@ export async function initAgentSubsystem(): Promise<AgentRuntime> {
 
   _actionRegistry = createBuiltInActionRegistry();
   registerMcpServer({
-    actionRegistry: _actionRegistry,
     toolRegistry: _toolRegistry,
     zoteroGateway: _zoteroGateway!,
   });

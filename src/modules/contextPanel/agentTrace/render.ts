@@ -2707,6 +2707,17 @@ export function buildAgentTraceDisplayItems(
         }
         break;
       }
+      case "codex_progress": {
+        const progressText = readAgentTraceText(entry.payload.text);
+        if (progressText) {
+          items.push({
+            type: "message",
+            tone: "neutral",
+            text: progressText,
+          });
+        }
+        break;
+      }
       case "message_rollback": {
         announcedWriting = false;
         break;

@@ -96,10 +96,52 @@ describe("Codex app-server native client", function () {
                     );
                     continue;
                   }
+                  if (message.method === "config/value/write") {
+                    stdout.push(
+                      `${JSON.stringify({ id: message.id, result: {} })}\n`,
+                    );
+                    continue;
+                  }
+                  if (message.method === "config/mcpServer/reload") {
+                    stdout.push(
+                      `${JSON.stringify({ id: message.id, result: {} })}\n`,
+                    );
+                    continue;
+                  }
+                  if (message.method === "config/read") {
+                    stdout.push(
+                      `${JSON.stringify({ id: message.id, result: { mcp_servers: { llm_for_zotero: { url: "http://127.0.0.1:23119/llm-for-zotero/mcp" } } } })}\n`,
+                    );
+                    continue;
+                  }
+                  if (message.method === "mcpServerStatus/list") {
+                    stdout.push(
+                      `${JSON.stringify({ id: message.id, result: { servers: [{ name: "llm_for_zotero", status: "ready", tools: [{ name: "query_library" }] }] } })}\n`,
+                    );
+                    continue;
+                  }
+                  if (message.method === "skills/list") {
+                    stdout.push(
+                      `${JSON.stringify({ id: message.id, result: { skills: [] } })}\n`,
+                    );
+                    continue;
+                  }
+                  if (message.method === "plugin/list") {
+                    stdout.push(
+                      `${JSON.stringify({ id: message.id, result: { plugins: [] } })}\n`,
+                    );
+                    continue;
+                  }
                   if (message.method === "thread/start") {
                     threadStartParams = message.params || null;
                     stdout.push(
                       `${JSON.stringify({ id: message.id, result: { thread: { id: "thread-native-1" } } })}\n`,
+                    );
+                    continue;
+                  }
+                  if (message.method === "thread/name/set") {
+                    stdout.push(
+                      `${JSON.stringify({ id: message.id, result: {} })}\n`,
                     );
                     continue;
                   }
@@ -162,11 +204,15 @@ describe("Codex app-server native client", function () {
     assert.equal(persistedThreadId, "thread-native-1");
     assert.includeMembers(methods, [
       "initialize",
+      "config/value/write",
+      "config/mcpServer/reload",
       "thread/start",
+      "thread/name/set",
       "thread/inject_items",
       "turn/start",
     ]);
     assert.equal(threadStartParams?.ephemeral, false);
+    assert.equal(threadStartParams?.persistExtendedHistory, true);
     assert.equal(threadStartParams?.serviceName, "llm_for_zotero");
     assert.notProperty(threadStartParams || {}, "dynamicTools");
     assert.isUndefined(threadStartParams?.developerInstructions);
@@ -187,6 +233,12 @@ describe("Codex app-server native client", function () {
       (part) => part.type === "text",
     );
     assert.include(String(textInput?.text || ""), "Zotero context for this turn");
+    assert.include(
+      String(textInput?.text || ""),
+      "Zotero environment for this turn",
+    );
+    assert.include(String(textInput?.text || ""), "Chat scope: library chat");
+    assert.include(String(textInput?.text || ""), "Zotero MCP tools: available");
     assert.include(String(textInput?.text || ""), "Important paper context.");
     assert.include(String(textInput?.text || ""), "Latest question.");
   });
@@ -234,6 +286,42 @@ describe("Codex app-server native client", function () {
                   if (message.method === "initialize") {
                     stdout.push(
                       `${JSON.stringify({ id: message.id, result: {} })}\n`,
+                    );
+                    continue;
+                  }
+                  if (message.method === "config/value/write") {
+                    stdout.push(
+                      `${JSON.stringify({ id: message.id, result: {} })}\n`,
+                    );
+                    continue;
+                  }
+                  if (message.method === "config/mcpServer/reload") {
+                    stdout.push(
+                      `${JSON.stringify({ id: message.id, result: {} })}\n`,
+                    );
+                    continue;
+                  }
+                  if (message.method === "config/read") {
+                    stdout.push(
+                      `${JSON.stringify({ id: message.id, result: { mcp_servers: { llm_for_zotero: { url: "http://127.0.0.1:23119/llm-for-zotero/mcp" } } } })}\n`,
+                    );
+                    continue;
+                  }
+                  if (message.method === "mcpServerStatus/list") {
+                    stdout.push(
+                      `${JSON.stringify({ id: message.id, result: { servers: [{ name: "llm_for_zotero", status: "ready", tools: [{ name: "query_library" }] }] } })}\n`,
+                    );
+                    continue;
+                  }
+                  if (message.method === "skills/list") {
+                    stdout.push(
+                      `${JSON.stringify({ id: message.id, result: { skills: [] } })}\n`,
+                    );
+                    continue;
+                  }
+                  if (message.method === "plugin/list") {
+                    stdout.push(
+                      `${JSON.stringify({ id: message.id, result: { plugins: [] } })}\n`,
                     );
                     continue;
                   }
@@ -302,15 +390,23 @@ describe("Codex app-server native client", function () {
     assert.deepEqual(resumeParams, {
       threadId: "thread-native-1",
       model: "gpt-5.4",
+      persistExtendedHistory: true,
       serviceName: "llm_for_zotero",
     });
-    assert.includeMembers(methods, ["initialize", "thread/resume", "turn/start"]);
+    assert.includeMembers(methods, [
+      "initialize",
+      "config/value/write",
+      "config/mcpServer/reload",
+      "thread/resume",
+      "turn/start",
+    ]);
     assert.notInclude(methods, "thread/start");
     assert.isFalse(injectCalled);
     const textInput = (turnInput as Array<Record<string, unknown>>).find(
       (part) => part.type === "text",
     );
     const text = String(textInput?.text || "");
+    assert.include(text, "Zotero environment for this turn");
     assert.include(text, "Fresh context.");
     assert.include(text, "Follow-up question.");
     assert.notInclude(text, "Earlier question.");

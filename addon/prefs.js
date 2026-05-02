@@ -28,6 +28,7 @@ pref("codexAppServerModel", "gpt-5.4");
 pref("codexAppServerReasoning", "auto");
 pref("codexAppServerPath", "");
 pref("codexAppServerConversationModeMap", "");
+pref("codexAppServerZoteroMcpToolsEnabled", true);
 pref("codexAppServerGlobalConversationMap", "");
 pref("codexAppServerPaperConversationMap", "");
 pref("codexAppServerLastAllocatedConversationKeyMap", "");

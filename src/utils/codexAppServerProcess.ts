@@ -52,6 +52,11 @@ export type CodexAppServerItemEvent = {
   details?: string;
 };
 
+export type CodexAppServerAgentMessageDeltaEvent = {
+  itemId?: string;
+  delta: string;
+};
+
 export type CodexAppServerInjectItemsSupport =
   | "unknown"
   | "supported"
@@ -810,6 +815,9 @@ export function waitForCodexAppServerTurnCompletion(params: {
   onTextDelta?: (delta: string) => void | Promise<void>;
   onReasoning?: (event: ReasoningEvent) => void | Promise<void>;
   onUsage?: (usage: UsageStats) => void | Promise<void>;
+  onAgentMessageDelta?: (
+    event: CodexAppServerAgentMessageDeltaEvent,
+  ) => void | Promise<void>;
   onItemStarted?: (event: CodexAppServerItemEvent) => void | Promise<void>;
   onItemCompleted?: (event: CodexAppServerItemEvent) => void | Promise<void>;
   onTurnCompleted?: (event: {
@@ -828,6 +836,7 @@ export function waitForCodexAppServerTurnCompletion(params: {
     onTextDelta,
     onReasoning,
     onUsage,
+    onAgentMessageDelta,
     onItemStarted,
     onItemCompleted,
     onTurnCompleted,
@@ -1023,6 +1032,14 @@ export function waitForCodexAppServerTurnCompletion(params: {
             itemId,
             `${messageTextByItemId.get(itemId) || ""}${delta}`,
           );
+          if (onAgentMessageDelta) {
+            Promise.resolve(onAgentMessageDelta({ itemId, delta })).catch(
+              () => {
+                // Ignore downstream consumer errors so the transport can finish cleanly.
+              },
+            );
+            return;
+          }
         } else {
           lastMessageItemId = "";
         }

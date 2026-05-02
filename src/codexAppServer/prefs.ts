@@ -132,6 +132,21 @@ export function setCodexBinaryPathPref(path: string): void {
   setPref("codexAppServerPath", String(path || "").trim());
 }
 
+export function isCodexZoteroMcpToolsEnabled(): boolean {
+  const value = getZoteroPrefs()?.get?.(prefKey("codexAppServerZoteroMcpToolsEnabled"), true);
+  if (typeof value === "boolean") return value;
+  if (typeof value === "string") {
+    const normalized = value.trim().toLowerCase();
+    if (normalized === "true") return true;
+    if (normalized === "false") return false;
+  }
+  return true;
+}
+
+export function setCodexZoteroMcpToolsEnabled(enabled: boolean): void {
+  setPref("codexAppServerZoteroMcpToolsEnabled", Boolean(enabled));
+}
+
 export function getLastUsedCodexConversationMode(
   libraryID: number,
 ): "global" | "paper" | null {

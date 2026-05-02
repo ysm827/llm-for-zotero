@@ -6,7 +6,8 @@ import type {
   TextContent,
   UsageStats,
 } from "../shared/llm";
-import type { CodexConversationKind } from "../shared/types";
+import type { CodexConversationKind, PaperContextRef } from "../shared/types";
+import { setActiveZoteroMcpScope } from "../agent/mcp/server";
 import {
   buildLegacyCodexAppServerChatInput,
   prepareCodexAppServerChatTurn,
@@ -19,6 +20,7 @@ import {
   resolveCodexAppServerReasoningParams,
   resolveCodexAppServerTurnInputWithFallback,
   waitForCodexAppServerTurnCompletion,
+  type CodexAppServerAgentMessageDeltaEvent,
   type CodexAppServerItemEvent,
   type CodexAppServerProcess,
 } from "../utils/codexAppServerProcess";
@@ -26,6 +28,8 @@ import {
   getCodexConversationSummary,
   upsertCodexConversationSummary,
 } from "./store";
+import { isCodexZoteroMcpToolsEnabled } from "./prefs";
+import { ensureCodexZoteroMcpConfig } from "./mcpSetup";
 
 export const CODEX_APP_SERVER_NATIVE_PROCESS_KEY = "codex_app_server_native";
 const CODEX_APP_SERVER_SERVICE_NAME = "llm_for_zotero";
@@ -35,6 +39,11 @@ export type CodexNativeConversationScope = {
   libraryID: number;
   kind: CodexConversationKind;
   paperItemID?: number;
+  activeItemId?: number;
+  activeContextItemId?: number;
+  libraryName?: string;
+  paperTitle?: string;
+  paperContext?: PaperContextRef;
   title?: string;
 };
 
@@ -49,10 +58,22 @@ export type CodexNativeTurnResult = {
   resumed: boolean;
 };
 
+export type CodexNativeApprovalRequest = {
+  method: string;
+  params: unknown;
+};
+
 type NativeThreadResolution = {
   threadId: string;
   resumed: boolean;
 };
+
+const CODEX_APP_SERVER_APPROVAL_REQUEST_METHODS = [
+  "tool/requestUserInput",
+  "approval/request",
+  "approval/requested",
+  "turn/approval/request",
+];
 
 function normalizeNonEmptyString(value: unknown): string {
   return typeof value === "string" && value.trim() ? value.trim() : "";
@@ -66,6 +87,104 @@ function extractSystemText(messages: ChatMessage[]): string {
     )
     .filter(Boolean)
     .join("\n\n");
+}
+
+function extractLatestUserText(messages: ChatMessage[]): string {
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    const message = messages[index];
+    if (message?.role !== "user") continue;
+    if (typeof message.content === "string") return message.content.trim();
+    return message.content
+      .filter((part): part is TextContent => part.type === "text")
+      .map((part) => part.text || "")
+      .join("\n")
+      .trim();
+  }
+  return "";
+}
+
+function formatScopeLine(label: string, value: unknown): string | null {
+  if (value === undefined || value === null || value === "") return null;
+  return `- ${label}: ${value}`;
+}
+
+function formatPaperContextLine(
+  paperContext: PaperContextRef | undefined,
+): string | null {
+  if (!paperContext) return null;
+  const pieces = [
+    `itemId=${paperContext.itemId}`,
+    `contextItemId=${paperContext.contextItemId}`,
+  ];
+  if (paperContext.title) pieces.push(`title="${paperContext.title}"`);
+  if (paperContext.firstCreator) pieces.push(`firstCreator="${paperContext.firstCreator}"`);
+  if (paperContext.year) pieces.push(`year="${paperContext.year}"`);
+  if (paperContext.attachmentTitle) {
+    pieces.push(`attachmentTitle="${paperContext.attachmentTitle}"`);
+  }
+  return `- Active paper context: ${pieces.join(", ")}`;
+}
+
+function buildZoteroEnvironmentManifest(params: {
+  scope: CodexNativeConversationScope;
+  mcpEnabled: boolean;
+  mcpReady: boolean;
+  mcpWarning?: string;
+}): string {
+  const { scope } = params;
+  const lines = [
+    "Zotero environment for this turn:",
+    formatScopeLine(
+      "Chat scope",
+      scope.kind === "paper" ? "paper chat" : "library chat",
+    ),
+    formatScopeLine(
+      "Active library",
+      scope.libraryName
+        ? `${scope.libraryID} (${scope.libraryName})`
+        : scope.libraryID,
+    ),
+  ].filter((line): line is string => Boolean(line));
+
+  if (scope.kind === "paper") {
+    lines.push(
+      ...[
+        formatScopeLine("Active paper item ID", scope.paperItemID),
+        formatScopeLine("Active item ID", scope.activeItemId),
+        formatScopeLine("Active context item ID", scope.activeContextItemId),
+        formatScopeLine("Active paper title", scope.paperTitle),
+        formatPaperContextLine(scope.paperContext),
+      ].filter((line): line is string => Boolean(line)),
+    );
+  }
+
+  if (!params.mcpEnabled) {
+    lines.push(
+      "- Zotero MCP tools: disabled for this turn. Do not claim access to Zotero library or PDF tools unless another tool source is available.",
+    );
+    return lines.join("\n");
+  }
+
+  if (!params.mcpReady) {
+    lines.push(
+      `- Zotero MCP tools: unavailable for this turn.${params.mcpWarning ? ` ${params.mcpWarning}` : ""}`,
+    );
+    return lines.join("\n");
+  }
+
+  lines.push(
+    "- Zotero MCP tools: available. Use them to inspect Zotero data instead of assuming library or paper content is preloaded.",
+  );
+  if (scope.kind === "paper") {
+    lines.push(
+      "- Paper workflow: use read_library for metadata/notes/attachments, search_paper for targeted evidence, and read_paper/read_attachment/view_pdf_pages for deeper inspection. If a tool call omits IDs, it defaults to the active paper scope above.",
+    );
+  } else {
+    lines.push(
+      "- Library workflow: use query_library to discover/search/list items in the active library, then read_library and paper tools on selected item IDs before answering. Do not ask the user to paste the whole library.",
+    );
+  }
+  return lines.join("\n");
 }
 
 function prefixUserContentWithContext(
@@ -94,8 +213,15 @@ function prefixUserContentWithContext(
 function buildNativeMessages(params: {
   messages: ChatMessage[];
   includeVisibleHistory: boolean;
+  zoteroEnvironmentText?: string;
 }): ChatMessage[] {
-  const systemText = extractSystemText(params.messages);
+  const systemText = [
+    extractSystemText(params.messages),
+    params.zoteroEnvironmentText || "",
+  ]
+    .map((entry) => entry.trim())
+    .filter(Boolean)
+    .join("\n\n");
   const visibleMessages = params.messages.filter(
     (message) => message.role !== "system",
   );
@@ -170,6 +296,7 @@ async function startNativeThread(params: {
   const threadResult = await params.proc.sendRequest("thread/start", {
     model: params.model,
     ephemeral: false,
+    persistExtendedHistory: true,
     approvalPolicy: "never",
     serviceName: CODEX_APP_SERVER_SERVICE_NAME,
   });
@@ -188,6 +315,7 @@ async function resumeNativeThread(params: {
   const threadResult = await params.proc.sendRequest("thread/resume", {
     threadId: params.threadId,
     model: params.model,
+    persistExtendedHistory: true,
     serviceName: CODEX_APP_SERVER_SERVICE_NAME,
   });
   const threadId = extractCodexAppServerThreadId(threadResult);
@@ -236,6 +364,46 @@ async function resolveNativeThread(params: {
     hooks: params.hooks,
   });
   return { threadId, resumed: false };
+}
+
+async function setNativeThreadName(params: {
+  proc: CodexAppServerProcess;
+  threadId: string;
+  name?: string;
+}): Promise<void> {
+  const name = normalizeNonEmptyString(params.name).slice(0, 120);
+  if (!name) return;
+  try {
+    await params.proc.sendRequest("thread/name/set", {
+      threadId: params.threadId,
+      name,
+    });
+  } catch (error) {
+    ztoolkit.log("Codex app-server native: failed to sync thread title", error);
+  }
+}
+
+function registerNativeApprovalRequestHandlers(params: {
+  proc: CodexAppServerProcess;
+  onApprovalRequest?: (
+    request: CodexNativeApprovalRequest,
+  ) => unknown | Promise<unknown>;
+}): () => void {
+  const disposers = CODEX_APP_SERVER_APPROVAL_REQUEST_METHODS.map((method) =>
+    params.proc.onRequest(method, async (rawParams) => {
+      if (params.onApprovalRequest) {
+        return params.onApprovalRequest({ method, params: rawParams });
+      }
+      return {
+        approved: false,
+        error:
+          "Zotero has not enabled native Codex app-server approval UI yet.",
+      };
+    }),
+  );
+  return () => {
+    for (const dispose of disposers) dispose();
+  };
 }
 
 export async function listCodexAppServerModels(params: {
@@ -328,11 +496,18 @@ export async function runCodexAppServerNativeTurn(params: {
   processKey?: string;
   hooks?: CodexNativeStoreHooks;
   onDelta?: (delta: string) => void;
+  onAgentMessageDelta?: (
+    event: CodexAppServerAgentMessageDeltaEvent,
+  ) => void;
   onReasoning?: (event: ReasoningEvent) => void;
   onUsage?: (usage: UsageStats) => void;
   onItemStarted?: (event: CodexAppServerItemEvent) => void;
   onItemCompleted?: (event: CodexAppServerItemEvent) => void;
   onTurnCompleted?: (event: { turnId: string; status?: string }) => void;
+  onMcpSetupWarning?: (message: string) => void;
+  onApprovalRequest?: (
+    request: CodexNativeApprovalRequest,
+  ) => unknown | Promise<unknown>;
 }): Promise<CodexNativeTurnResult> {
   const codexPath = resolveCodexAppServerBinaryPath(params.codexPath);
   const processKey = params.processKey || CODEX_APP_SERVER_NATIVE_PROCESS_KEY;
@@ -340,60 +515,112 @@ export async function runCodexAppServerNativeTurn(params: {
     codexPath,
   });
   return proc.runTurnExclusive(async () => {
-    const reasoningParams = resolveCodexAppServerReasoningParams(
-      params.reasoning,
-      params.model,
-    );
-    const thread = await resolveNativeThread({
+    const unregisterApprovalHandlers = registerNativeApprovalRequestHandlers({
       proc,
-      scope: params.scope,
-      model: params.model,
-      effort: reasoningParams.effort,
-      hooks: params.hooks,
+      onApprovalRequest: params.onApprovalRequest,
     });
-    const nativeMessages = buildNativeMessages({
-      messages: params.messages,
-      includeVisibleHistory: !thread.resumed,
-    });
-    const preparedTurn = await prepareCodexAppServerChatTurn(nativeMessages);
-    const input = await resolveCodexAppServerTurnInputWithFallback({
-      proc,
-      threadId: thread.threadId,
-      historyItemsToInject: thread.resumed ? [] : preparedTurn.historyItemsToInject,
-      turnInput: preparedTurn.turnInput,
-      legacyInputFactory: () => buildLegacyCodexAppServerChatInput(nativeMessages),
-      logContext: "native",
-    });
-    const turnResult = await proc.sendRequest("turn/start", {
-      threadId: thread.threadId,
-      input,
-      model: params.model,
-      approvalPolicy: "never",
-      ...reasoningParams,
-    });
-    const turnId = extractCodexAppServerTurnId(turnResult);
-    if (!turnId) {
-      throw new Error("Codex app-server did not return a turn ID");
+    const mcpEnabled = isCodexZoteroMcpToolsEnabled();
+    let mcpReady = false;
+    let mcpWarning = "";
+    if (mcpEnabled) {
+      try {
+        await ensureCodexZoteroMcpConfig({
+          proc,
+          codexPath,
+          processKey,
+        });
+        mcpReady = true;
+      } catch (error) {
+        mcpWarning = `Zotero MCP setup failed: ${
+          error instanceof Error ? error.message : String(error)
+        }`;
+        params.onMcpSetupWarning?.(mcpWarning);
+        ztoolkit.log(
+          "Codex app-server native: failed to configure Zotero MCP tools",
+          error,
+        );
+      }
     }
-    const text = await waitForCodexAppServerTurnCompletion({
-      proc,
-      threadId: thread.threadId,
-      turnId,
-      onTextDelta: params.onDelta,
-      onReasoning: params.onReasoning,
-      onUsage: params.onUsage,
-      onItemStarted: params.onItemStarted,
-      onItemCompleted: params.onItemCompleted,
-      onTurnCompleted: params.onTurnCompleted,
-      signal: params.signal,
-      interruptOnAbort: true,
-      cacheKey: processKey,
-      processOptions: { codexPath },
-    });
-    return {
-      text,
-      threadId: thread.threadId,
-      resumed: thread.resumed,
-    };
+    const latestUserText = extractLatestUserText(params.messages);
+    const clearMcpScope = mcpReady
+      ? setActiveZoteroMcpScope({
+          ...params.scope,
+          userText: latestUserText,
+        })
+      : () => undefined;
+    try {
+      const reasoningParams = resolveCodexAppServerReasoningParams(
+        params.reasoning,
+        params.model,
+      );
+      const thread = await resolveNativeThread({
+        proc,
+        scope: params.scope,
+        model: params.model,
+        effort: reasoningParams.effort,
+        hooks: params.hooks,
+      });
+      if (!thread.resumed) {
+        await setNativeThreadName({
+          proc,
+          threadId: thread.threadId,
+          name: params.scope.title,
+        });
+      }
+      const nativeMessages = buildNativeMessages({
+        messages: params.messages,
+        includeVisibleHistory: !thread.resumed,
+        zoteroEnvironmentText: buildZoteroEnvironmentManifest({
+          scope: params.scope,
+          mcpEnabled,
+          mcpReady,
+          mcpWarning,
+        }),
+      });
+      const preparedTurn = await prepareCodexAppServerChatTurn(nativeMessages);
+      const input = await resolveCodexAppServerTurnInputWithFallback({
+        proc,
+        threadId: thread.threadId,
+        historyItemsToInject: thread.resumed ? [] : preparedTurn.historyItemsToInject,
+        turnInput: preparedTurn.turnInput,
+        legacyInputFactory: () => buildLegacyCodexAppServerChatInput(nativeMessages),
+        logContext: "native",
+      });
+      const turnResult = await proc.sendRequest("turn/start", {
+        threadId: thread.threadId,
+        input,
+        model: params.model,
+        approvalPolicy: "never",
+        ...reasoningParams,
+      });
+      const turnId = extractCodexAppServerTurnId(turnResult);
+      if (!turnId) {
+        throw new Error("Codex app-server did not return a turn ID");
+      }
+      const text = await waitForCodexAppServerTurnCompletion({
+        proc,
+        threadId: thread.threadId,
+        turnId,
+        onTextDelta: params.onDelta,
+        onAgentMessageDelta: params.onAgentMessageDelta,
+        onReasoning: params.onReasoning,
+        onUsage: params.onUsage,
+        onItemStarted: params.onItemStarted,
+        onItemCompleted: params.onItemCompleted,
+        onTurnCompleted: params.onTurnCompleted,
+        signal: params.signal,
+        interruptOnAbort: true,
+        cacheKey: processKey,
+        processOptions: { codexPath },
+      });
+      return {
+        text,
+        threadId: thread.threadId,
+        resumed: thread.resumed,
+      };
+    } finally {
+      clearMcpScope();
+      unregisterApprovalHandlers();
+    }
   });
 }
