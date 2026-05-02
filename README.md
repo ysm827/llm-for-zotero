@@ -441,6 +441,8 @@ There are two Codex-backed paths in the plugin. New users should choose **Codex 
 - **Codex App Server (Recommended)** - Spawns the local `codex app-server` CLI and talks to it over stdio. This is the official way to use Codex in third-party apps, and it is the preferred setup for new users. It is configured from the **Agent** tab and appears as a dedicated **Codex** button in the chat header.
 - **Codex Auth (Legacy)** - Uses the ChatGPT/Codex Responses backend directly. Existing users can keep using it in the next release, but new users should choose `Codex App Server`. This legacy mode is planned for deprecation in a future release after app-server validation.
 
+Codex App Server threads created from Zotero are regular app-server threads bound to the active Zotero profile and library. The Codex Mac app may not show these conversations unless it requests `sourceKinds: ["appServer"]` when listing threads; Zotero verifies persistence through app-server history APIs and does not impersonate VS Code metadata to force visibility.
+
 _Special thanks to [@jianghao-zhang](https://github.com/jianghao-zhang) and [@boltma](https://github.com/boltma) for contributing the Codex App Server integration._
 
 ### Step-by-step setup

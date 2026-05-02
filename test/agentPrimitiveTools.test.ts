@@ -99,18 +99,27 @@ describe("primitive agent tools", function () {
     const tool = createQueryLibraryTool({
       resolveLibraryID: () => 1,
       searchAllLibraryItems: async () =>
-        [
-          {
-            itemId: 99,
-            itemType: "journalArticle",
-            title: "Example Paper",
-            firstCreator: "Alice Example",
-            year: "2021",
-            attachments: [{ contextItemId: 501, title: "PDF" }],
-            tags: ["review"],
-            collectionIds: [11],
-          },
-        ] as any,
+        ({
+          items: [
+            {
+              itemId: 99,
+              itemType: "journalArticle",
+              title: "Example Paper",
+              firstCreator: "Alice Example",
+              year: "2021",
+              attachments: [
+                {
+                  contextItemId: 501,
+                  title: "PDF",
+                  contentType: "application/pdf",
+                },
+              ],
+              tags: ["review"],
+              collectionIds: [11],
+            },
+          ],
+          totalCount: 3,
+        }) as any,
       getPaperTargetsByItemIds: () => [
         {
           itemId: 99,
@@ -167,11 +176,16 @@ describe("primitive agent tools", function () {
     const first = (result as { results: Array<Record<string, unknown>> }).results[0];
     assert.equal(first.itemId, 99);
     assert.equal((first.metadata as { title?: string }).title, "Example Paper");
-    assert.deepEqual(first.attachments, [{ contextItemId: 501, title: "PDF" }]);
+    assert.deepEqual(first.attachments, [
+      { contextItemId: 501, title: "PDF", contentType: "application/pdf" },
+    ]);
     assert.deepEqual(first.tags, ["review"]);
     assert.deepEqual(first.collections, [
       { collectionId: 11, name: "Biology", libraryID: 1, path: "Biology" },
     ]);
+    assert.equal((result as { totalCount: number }).totalCount, 3);
+    assert.equal((result as { returnedCount: number }).returnedCount, 1);
+    assert.equal((result as { limited: boolean }).limited, true);
   });
 
   it("query_library related mode resolves the active paper from reader context", async function () {

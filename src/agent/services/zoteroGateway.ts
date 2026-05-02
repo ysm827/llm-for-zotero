@@ -550,22 +550,54 @@ async function getAllLibraryItems(libraryID: number): Promise<Zotero.Item[]> {
 
 function buildItemTargets(
   items: Zotero.Item[],
-  options?: { itemType?: string; limit?: number },
+  options?: { itemType?: string; hasPdf?: boolean },
 ): LibraryItemTarget[] {
-  const normalizedLimit =
-    Number.isFinite(options?.limit) && (options?.limit as number) > 0
-      ? Math.floor(options!.limit as number)
-      : undefined;
   const typeFilter = options?.itemType?.trim().toLowerCase();
   const results: LibraryItemTarget[] = [];
   for (const item of items) {
-    if (normalizedLimit && results.length >= normalizedLimit) break;
     const target = buildItemTargetFromItem(item);
     if (!target) continue;
     if (typeFilter && target.itemType.toLowerCase() !== typeFilter) continue;
+    if (!libraryItemTargetMatchesFilters(target, options)) continue;
     results.push(target);
   }
   return results;
+}
+
+function normalizeResultLimit(limit: unknown): number | undefined {
+  return Number.isFinite(limit) && Number(limit) > 0
+    ? Math.max(1, Math.floor(Number(limit)))
+    : undefined;
+}
+
+function limitItemTargets(
+  items: LibraryItemTarget[],
+  limit: unknown,
+): LibraryItemTarget[] {
+  const normalizedLimit = normalizeResultLimit(limit);
+  return normalizedLimit && items.length > normalizedLimit
+    ? items.slice(0, normalizedLimit)
+    : items;
+}
+
+function libraryItemTargetHasPdf(target: LibraryItemTarget): boolean {
+  return target.attachments.some((attachment) => {
+    const contentType = normalizeText(attachment.contentType).toLowerCase();
+    const title = normalizeText(attachment.title).toLowerCase();
+    return (
+      contentType === "application/pdf" ||
+      title.endsWith(".pdf") ||
+      title === "pdf"
+    );
+  });
+}
+
+function libraryItemTargetMatchesFilters(
+  target: LibraryItemTarget,
+  filters?: { hasPdf?: boolean },
+): boolean {
+  if (filters?.hasPdf === undefined) return true;
+  return libraryItemTargetHasPdf(target) === filters.hasPdf;
 }
 
 // ── Zotero.Search-backed listing helpers ──────────────────────────────────────
@@ -573,6 +605,7 @@ function buildItemTargets(
 export type AgentLibraryFilters = {
   collectionId?: number;
   unfiled?: boolean;
+  hasPdf?: boolean;
   itemType?: string;
   author?: string;
   yearFrom?: number;
@@ -1195,8 +1228,11 @@ export class ZoteroGateway {
     const libraryID = Number.isFinite(params.libraryID) ? Math.floor(params.libraryID) : 0;
     if (!libraryID) throw new Error("No active library available for listing items");
     const rawItems = await getAllLibraryItems(libraryID);
-    const items = buildItemTargets(rawItems, { itemType: params.itemType, limit: params.limit });
-    return { items, totalCount: items.length };
+    const allItems = buildItemTargets(rawItems, { itemType: params.itemType });
+    return {
+      items: limitItemTargets(allItems, params.limit),
+      totalCount: allItems.length,
+    };
   }
 
   async listCollectionItemTargets(params: {
@@ -1214,8 +1250,12 @@ export class ZoteroGateway {
       const ids = getCollectionIDs(item);
       return ids.includes(params.collectionId);
     });
-    const items = buildItemTargets(inCollection, { itemType: params.itemType, limit: params.limit });
-    return { collection, items, totalCount: items.length };
+    const allItems = buildItemTargets(inCollection, { itemType: params.itemType });
+    return {
+      collection,
+      items: limitItemTargets(allItems, params.limit),
+      totalCount: allItems.length,
+    };
   }
 
   async listUnfiledItemTargets(params: {
@@ -1227,8 +1267,11 @@ export class ZoteroGateway {
     if (!libraryID) throw new Error("No active library available");
     const rawItems = await getAllLibraryItems(libraryID);
     const unfiled = rawItems.filter((item) => getCollectionIDs(item).length === 0);
-    const items = buildItemTargets(unfiled, { itemType: params.itemType, limit: params.limit });
-    return { items, totalCount: items.length };
+    const allItems = buildItemTargets(unfiled, { itemType: params.itemType });
+    return {
+      items: limitItemTargets(allItems, params.limit),
+      totalCount: allItems.length,
+    };
   }
 
   async listUntaggedItemTargets(params: {
@@ -1240,8 +1283,11 @@ export class ZoteroGateway {
     if (!libraryID) throw new Error("No active library available");
     const rawItems = await getAllLibraryItems(libraryID);
     const untagged = rawItems.filter((item) => getItemTags(item).length === 0);
-    const items = buildItemTargets(untagged, { itemType: params.itemType, limit: params.limit });
-    return { items, totalCount: items.length };
+    const allItems = buildItemTargets(untagged, { itemType: params.itemType });
+    return {
+      items: limitItemTargets(allItems, params.limit),
+      totalCount: allItems.length,
+    };
   }
 
   async listItemsByFilters(params: {
@@ -1251,25 +1297,33 @@ export class ZoteroGateway {
   }): Promise<{ items: LibraryItemTarget[]; totalCount: number }> {
     const libraryID = Number.isFinite(params.libraryID) ? Math.floor(params.libraryID) : 0;
     if (!libraryID) throw new Error("No active library available");
-    const normalizedLimit = Number.isFinite(params.limit) ? Math.max(1, Math.floor(params.limit as number)) : undefined;
+    const normalizedLimit = normalizeResultLimit(params.limit);
     try {
       const search = buildAgentLibrarySearch(libraryID, params.filters || {});
       const rawIds: number[] = await search.search();
       // Drop child items (child notes, annotations, attachments)
       const topIds: number[] = [];
+      const seen = new Set<number>();
       for (const id of rawIds) {
         const item = Zotero.Items.get(id);
-        if (item && !item.parentID && !item.isAnnotation?.()) topIds.push(id);
+        if (item && !item.parentID && !item.isAnnotation?.() && !seen.has(id)) {
+          seen.add(id);
+          topIds.push(id);
+        }
       }
-      const limited = normalizedLimit ? topIds.slice(0, normalizedLimit) : topIds;
       const items: LibraryItemTarget[] = [];
-      for (const id of limited) {
+      for (const id of topIds) {
         const raw = this.getItem(id);
         if (!raw) continue;
         const target = buildItemTargetFromItem(raw);
-        if (target) items.push(target);
+        if (target && libraryItemTargetMatchesFilters(target, params.filters)) {
+          items.push(target);
+        }
       }
-      return { items, totalCount: topIds.length };
+      return {
+        items: normalizedLimit ? items.slice(0, normalizedLimit) : items,
+        totalCount: items.length,
+      };
     } catch (_error) {
       void _error;
       return this._listItemsByFiltersInMemory(params);
@@ -1309,8 +1363,14 @@ export class ZoteroGateway {
         return tags.some(t => t.tag === tagName);
       });
     }
-    const items = buildItemTargets(filtered, { itemType: filters.itemType, limit: params.limit });
-    return { items, totalCount: items.length };
+    const items = buildItemTargets(filtered, {
+      itemType: filters.itemType,
+      hasPdf: filters.hasPdf,
+    });
+    return {
+      items: limitItemTargets(items, params.limit),
+      totalCount: items.length,
+    };
   }
 
   async listStandaloneNotes(params: {
@@ -1321,14 +1381,15 @@ export class ZoteroGateway {
     if (!libraryID) throw new Error("No active library available");
     const rawItems = await getAllLibraryItems(libraryID);
     const standaloneNotes: LibraryItemTarget[] = [];
-    const normalizedLimit = Number.isFinite(params.limit) ? Math.max(1, Math.floor(params.limit as number)) : undefined;
     for (const item of rawItems) {
-      if (normalizedLimit && standaloneNotes.length >= normalizedLimit) break;
       if (!(item as any).isNote?.() || item.parentID) continue;
       const target = buildItemTargetFromItem(item);
       if (target) standaloneNotes.push(target);
     }
-    return { notes: standaloneNotes, totalCount: standaloneNotes.length };
+    return {
+      notes: limitItemTargets(standaloneNotes, params.limit),
+      totalCount: standaloneNotes.length,
+    };
   }
 
   getStandaloneNoteContent(params: { noteId: number }): PaperNoteRecord | null {
@@ -1390,12 +1451,12 @@ export class ZoteroGateway {
     query: string;
     filters?: AgentLibraryFilters;
     limit?: number;
-  }): Promise<LibraryItemTarget[]> {
+  }): Promise<{ items: LibraryItemTarget[]; totalCount: number }> {
     const libraryID = Number.isFinite(params.libraryID) ? Math.floor(params.libraryID) : 0;
-    if (!libraryID || !params.query?.trim()) return [];
-    const normalizedLimit = Number.isFinite(params.limit)
-      ? Math.max(1, Math.floor(params.limit as number))
-      : 50;
+    if (!libraryID || !params.query?.trim()) {
+      return { items: [], totalCount: 0 };
+    }
+    const normalizedLimit = normalizeResultLimit(params.limit) || 50;
     try {
       const search = params.filters
         ? buildAgentLibrarySearch(libraryID, params.filters)
@@ -1416,16 +1477,23 @@ export class ZoteroGateway {
       }
       const targets: LibraryItemTarget[] = [];
       for (const itemId of resolvedIds) {
-        if (targets.length >= normalizedLimit) break;
         const item = this.getItem(itemId);
         if (!item) continue;
         const target = buildItemTargetFromItem(item);
-        if (target) targets.push(target);
+        if (target && libraryItemTargetMatchesFilters(target, params.filters)) {
+          targets.push(target);
+        }
       }
-      return targets;
+      return {
+        items:
+          normalizedLimit && targets.length > normalizedLimit
+            ? targets.slice(0, normalizedLimit)
+            : targets,
+        totalCount: targets.length,
+      };
     } catch (_error) {
       void _error;
-      return [];
+      return { items: [], totalCount: 0 };
     }
   }
 

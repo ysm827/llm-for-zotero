@@ -7,7 +7,12 @@ import type {
   UsageStats,
 } from "../shared/llm";
 import type { CodexConversationKind, PaperContextRef } from "../shared/types";
-import { setActiveZoteroMcpScope } from "../agent/mcp/server";
+import {
+  ZOTERO_MCP_SAFE_READ_TOOL_NAMES,
+  ZOTERO_MCP_SERVER_NAME,
+  registerScopedZoteroMcpScope,
+  setActiveZoteroMcpScope,
+} from "../agent/mcp/server";
 import {
   buildLegacyCodexAppServerChatInput,
   prepareCodexAppServerChatTurn,
@@ -16,6 +21,7 @@ import {
   extractCodexAppServerThreadId,
   extractCodexAppServerTurnId,
   getOrCreateCodexAppServerProcess,
+  isCodexAppServerThreadStartInstructionsUnsupportedError,
   resolveCodexAppServerBinaryPath,
   resolveCodexAppServerReasoningParams,
   resolveCodexAppServerTurnInputWithFallback,
@@ -29,12 +35,20 @@ import {
   upsertCodexConversationSummary,
 } from "./store";
 import { isCodexZoteroMcpToolsEnabled } from "./prefs";
-import { ensureCodexZoteroMcpConfig } from "./mcpSetup";
+import { getCodexProfileSignature } from "./constants";
+import {
+  assertRequiredCodexZoteroMcpToolsReady,
+  buildCodexZoteroMcpThreadConfig,
+  preflightCodexZoteroMcpServer,
+  readCodexNativeMcpSetupStatus,
+  type CodexNativeMcpSetupStatus,
+} from "./mcpSetup";
 
 export const CODEX_APP_SERVER_NATIVE_PROCESS_KEY = "codex_app_server_native";
 const CODEX_APP_SERVER_SERVICE_NAME = "llm_for_zotero";
 
 export type CodexNativeConversationScope = {
+  profileSignature?: string;
   conversationKey: number;
   libraryID: number;
   kind: CodexConversationKind;
@@ -56,6 +70,7 @@ export type CodexNativeTurnResult = {
   text: string;
   threadId: string;
   resumed: boolean;
+  diagnostics?: CodexNativeDiagnostics;
 };
 
 export type CodexNativeApprovalRequest = {
@@ -63,9 +78,28 @@ export type CodexNativeApprovalRequest = {
   params: unknown;
 };
 
+export type CodexNativeApprovalDecision = {
+  approved: boolean;
+  error?: string;
+};
+
 type NativeThreadResolution = {
   threadId: string;
   resumed: boolean;
+  developerInstructionsAccepted: boolean;
+  threadSource?: string;
+};
+
+export type CodexNativeDiagnostics = {
+  threadId: string;
+  threadSource?: string;
+  profileSignature: string;
+  libraryID: number;
+  libraryName?: string;
+  mcpServerName?: string;
+  mcpReady: boolean;
+  mcpToolNames: string[];
+  historyVerified?: boolean;
 };
 
 const CODEX_APP_SERVER_APPROVAL_REQUEST_METHODS = [
@@ -75,8 +109,64 @@ const CODEX_APP_SERVER_APPROVAL_REQUEST_METHODS = [
   "turn/approval/request",
 ];
 
+const UNSAFE_ZOTERO_MCP_APPROVAL_MARKERS = [
+  "zotero_confirm_action",
+  "apply_tags",
+  "edit_current_note",
+  "file_io",
+  "import_identifiers",
+  "manage_attachments",
+  "merge_items",
+  "move_to_collection",
+  "run_command",
+  "trash_items",
+  "update_metadata",
+];
+
 function normalizeNonEmptyString(value: unknown): string {
   return typeof value === "string" && value.trim() ? value.trim() : "";
+}
+
+function serializeApprovalPayload(value: unknown): string {
+  try {
+    return JSON.stringify(value).toLowerCase();
+  } catch {
+    return String(value || "").toLowerCase();
+  }
+}
+
+export function resolveSafeCodexNativeApprovalRequest(
+  request: CodexNativeApprovalRequest,
+): CodexNativeApprovalDecision | null {
+  if (request.method !== "tool/requestUserInput") return null;
+  const serialized = serializeApprovalPayload(request.params);
+  const isZoteroMcpRequest =
+    serialized.includes(ZOTERO_MCP_SERVER_NAME) ||
+    serialized.includes("llm-for-zotero") ||
+    serialized.includes("zotero mcp");
+  if (!isZoteroMcpRequest) return null;
+
+  const mentionsSafeReadTool = ZOTERO_MCP_SAFE_READ_TOOL_NAMES.some((name) =>
+    serialized.includes(name),
+  );
+  if (!mentionsSafeReadTool) return null;
+
+  const mentionsUnsafeTool = UNSAFE_ZOTERO_MCP_APPROVAL_MARKERS.some((name) =>
+    serialized.includes(name),
+  );
+  if (mentionsUnsafeTool) return null;
+
+  return { approved: true };
+}
+
+function extractCodexAppServerThreadSource(result: unknown): string | undefined {
+  if (!result || typeof result !== "object") return undefined;
+  const source = (result as { thread?: unknown }).thread || result;
+  if (!source || typeof source !== "object") return undefined;
+  const raw = (source as { source?: unknown }).source;
+  if (typeof raw === "string" && raw.trim()) return raw.trim();
+  if (raw && typeof raw === "object") return JSON.stringify(raw);
+  return undefined;
 }
 
 function extractSystemText(messages: ChatMessage[]): string {
@@ -174,6 +264,8 @@ function buildZoteroEnvironmentManifest(params: {
 
   lines.push(
     "- Zotero MCP tools: available. Use them to inspect Zotero data instead of assuming library or paper content is preloaded.",
+    "- Critical: use only Zotero MCP tools for Zotero library, profile, item, PDF, and note data. If Zotero MCP tools are unavailable or fail, report the setup error. Do not inspect local Zotero profile folders, zotero.sqlite, WAL files, backups, or other filesystem copies to answer Zotero-library questions.",
+    "- Shell and filesystem tools are disabled for Zotero-native chat because they can read the wrong Zotero profile.",
   );
   if (scope.kind === "paper") {
     lines.push(
@@ -214,6 +306,7 @@ function buildNativeMessages(params: {
   messages: ChatMessage[];
   includeVisibleHistory: boolean;
   zoteroEnvironmentText?: string;
+  prefixLatestUserWithContext?: boolean;
 }): ChatMessage[] {
   const systemText = [
     extractSystemText(params.messages),
@@ -246,6 +339,15 @@ function buildNativeMessages(params: {
     ? visibleMessages.slice(0, latestUserIndex)
     : [];
   const latestUser = visibleMessages[latestUserIndex]!;
+  if (!params.prefixLatestUserWithContext) {
+    return [
+      ...(systemText
+        ? [{ role: "system" as const, content: systemText }]
+        : []),
+      ...history,
+      latestUser,
+    ];
+  }
   return [
     ...history,
     {
@@ -292,37 +394,108 @@ async function persistProviderSessionId(params: {
 async function startNativeThread(params: {
   proc: CodexAppServerProcess;
   model: string;
-}): Promise<string> {
-  const threadResult = await params.proc.sendRequest("thread/start", {
+  developerInstructions?: string;
+  config?: Record<string, unknown>;
+}): Promise<{
+  threadId: string;
+  developerInstructionsAccepted: boolean;
+  threadSource?: string;
+}> {
+  const threadStartParams: Record<string, unknown> = {
     model: params.model,
     ephemeral: false,
     persistExtendedHistory: true,
     approvalPolicy: "never",
     serviceName: CODEX_APP_SERVER_SERVICE_NAME,
-  });
+    ...(params.config ? { config: params.config } : {}),
+    ...(params.developerInstructions
+      ? { developerInstructions: params.developerInstructions }
+      : {}),
+  };
+  let developerInstructionsAccepted = true;
+  let threadResult: unknown;
+  try {
+    threadResult = await params.proc.sendRequest("thread/start", threadStartParams);
+  } catch (error) {
+    if (
+      !params.developerInstructions ||
+      !isCodexAppServerThreadStartInstructionsUnsupportedError(error)
+    ) {
+      throw error;
+    }
+    const fallbackParams = { ...threadStartParams };
+    delete fallbackParams.developerInstructions;
+    developerInstructionsAccepted = false;
+    ztoolkit.log(
+      "Codex app-server native: thread/start developerInstructions unsupported; using visible context fallback",
+    );
+    threadResult = await params.proc.sendRequest("thread/start", fallbackParams);
+  }
   const threadId = extractCodexAppServerThreadId(threadResult);
   if (!threadId) {
     throw new Error("Codex app-server did not return a thread ID");
   }
-  return threadId;
+  return {
+    threadId,
+    developerInstructionsAccepted,
+    threadSource: extractCodexAppServerThreadSource(threadResult),
+  };
 }
 
 async function resumeNativeThread(params: {
   proc: CodexAppServerProcess;
   threadId: string;
   model: string;
-}): Promise<string> {
-  const threadResult = await params.proc.sendRequest("thread/resume", {
+  developerInstructions?: string;
+  config?: Record<string, unknown>;
+}): Promise<{
+  threadId: string;
+  developerInstructionsAccepted: boolean;
+  threadSource?: string;
+}> {
+  const threadResumeParams: Record<string, unknown> = {
     threadId: params.threadId,
     model: params.model,
     persistExtendedHistory: true,
-    serviceName: CODEX_APP_SERVER_SERVICE_NAME,
-  });
+    ...(params.config ? { config: params.config } : {}),
+    ...(params.developerInstructions
+      ? { developerInstructions: params.developerInstructions }
+      : {}),
+  };
+  let developerInstructionsAccepted = true;
+  let threadResult: unknown;
+  try {
+    threadResult = await params.proc.sendRequest(
+      "thread/resume",
+      threadResumeParams,
+    );
+  } catch (error) {
+    if (
+      !params.developerInstructions ||
+      !isCodexAppServerThreadStartInstructionsUnsupportedError(error)
+    ) {
+      throw error;
+    }
+    const fallbackParams = { ...threadResumeParams };
+    delete fallbackParams.developerInstructions;
+    developerInstructionsAccepted = false;
+    ztoolkit.log(
+      "Codex app-server native: thread/resume developerInstructions unsupported; using visible context fallback",
+    );
+    threadResult = await params.proc.sendRequest(
+      "thread/resume",
+      fallbackParams,
+    );
+  }
   const threadId = extractCodexAppServerThreadId(threadResult);
   if (!threadId) {
     throw new Error("Codex app-server did not return a thread ID");
   }
-  return threadId;
+  return {
+    threadId,
+    developerInstructionsAccepted,
+    threadSource: extractCodexAppServerThreadSource(threadResult),
+  };
 }
 
 async function resolveNativeThread(params: {
@@ -330,6 +503,8 @@ async function resolveNativeThread(params: {
   scope: CodexNativeConversationScope;
   model: string;
   effort?: string;
+  developerInstructions?: string;
+  config?: Record<string, unknown>;
   hooks?: CodexNativeStoreHooks;
 }): Promise<NativeThreadResolution> {
   const storedThreadId = await loadStoredProviderSessionId({
@@ -338,12 +513,14 @@ async function resolveNativeThread(params: {
   });
   if (storedThreadId) {
     try {
-      const resumedThreadId = await resumeNativeThread({
+      const resumedThread = await resumeNativeThread({
         proc: params.proc,
         threadId: storedThreadId,
         model: params.model,
+        developerInstructions: params.developerInstructions,
+        config: params.config,
       });
-      return { threadId: resumedThreadId, resumed: true };
+      return { ...resumedThread, resumed: true };
     } catch (error) {
       ztoolkit.log(
         "Codex app-server native: thread/resume failed; starting a new persistent thread",
@@ -352,18 +529,20 @@ async function resolveNativeThread(params: {
     }
   }
 
-  const threadId = await startNativeThread({
+  const thread = await startNativeThread({
     proc: params.proc,
     model: params.model,
+    developerInstructions: params.developerInstructions,
+    config: params.config,
   });
   await persistProviderSessionId({
     scope: params.scope,
-    threadId,
+    threadId: thread.threadId,
     model: params.model,
     effort: params.effort,
     hooks: params.hooks,
   });
-  return { threadId, resumed: false };
+  return { ...thread, resumed: false };
 }
 
 async function setNativeThreadName(params: {
@@ -394,6 +573,11 @@ function registerNativeApprovalRequestHandlers(params: {
       if (params.onApprovalRequest) {
         return params.onApprovalRequest({ method, params: rawParams });
       }
+      const safeDecision = resolveSafeCodexNativeApprovalRequest({
+        method,
+        params: rawParams,
+      });
+      if (safeDecision) return safeDecision;
       return {
         approved: false,
         error:
@@ -486,6 +670,47 @@ export async function compactCodexAppServerThread(params: {
   });
 }
 
+async function verifyCodexAppServerThreadHistory(params: {
+  proc: CodexAppServerProcess;
+  threadId: string;
+}): Promise<boolean> {
+  try {
+    await params.proc.sendRequest("thread/read", {
+      threadId: params.threadId,
+      includeTurns: true,
+    });
+    return true;
+  } catch (error) {
+    ztoolkit.log(
+      "Codex app-server native: thread/read verification failed",
+      error,
+    );
+    return false;
+  }
+}
+
+function buildNativeDiagnostics(params: {
+  thread: NativeThreadResolution;
+  profileSignature: string;
+  scope: CodexNativeConversationScope;
+  mcpServerName?: string;
+  mcpReady: boolean;
+  mcpStatus?: CodexNativeMcpSetupStatus;
+  historyVerified?: boolean;
+}): CodexNativeDiagnostics {
+  return {
+    threadId: params.thread.threadId,
+    threadSource: params.thread.threadSource,
+    profileSignature: params.profileSignature,
+    libraryID: params.scope.libraryID,
+    libraryName: params.scope.libraryName,
+    mcpServerName: params.mcpServerName,
+    mcpReady: params.mcpReady,
+    mcpToolNames: params.mcpStatus?.toolNames || [],
+    historyVerified: params.historyVerified,
+  };
+}
+
 export async function runCodexAppServerNativeTurn(params: {
   scope: CodexNativeConversationScope;
   model: string;
@@ -505,6 +730,7 @@ export async function runCodexAppServerNativeTurn(params: {
   onItemCompleted?: (event: CodexAppServerItemEvent) => void;
   onTurnCompleted?: (event: { turnId: string; status?: string }) => void;
   onMcpSetupWarning?: (message: string) => void;
+  onDiagnostics?: (diagnostics: CodexNativeDiagnostics) => void;
   onApprovalRequest?: (
     request: CodexNativeApprovalRequest,
   ) => unknown | Promise<unknown>;
@@ -520,31 +746,36 @@ export async function runCodexAppServerNativeTurn(params: {
       onApprovalRequest: params.onApprovalRequest,
     });
     const mcpEnabled = isCodexZoteroMcpToolsEnabled();
-    let mcpReady = false;
-    let mcpWarning = "";
-    if (mcpEnabled) {
-      try {
-        await ensureCodexZoteroMcpConfig({
-          proc,
-          codexPath,
-          processKey,
-        });
-        mcpReady = true;
-      } catch (error) {
-        mcpWarning = `Zotero MCP setup failed: ${
-          error instanceof Error ? error.message : String(error)
-        }`;
-        params.onMcpSetupWarning?.(mcpWarning);
-        ztoolkit.log(
-          "Codex app-server native: failed to configure Zotero MCP tools",
-          error,
-        );
-      }
-    }
+    const profileSignature =
+      normalizeNonEmptyString(params.scope.profileSignature) ||
+      getCodexProfileSignature();
     const latestUserText = extractLatestUserText(params.messages);
-    const clearMcpScope = mcpReady
+    const scopedMcp = mcpEnabled
+      ? registerScopedZoteroMcpScope({
+          ...params.scope,
+          profileSignature,
+          userText: latestUserText,
+        })
+      : null;
+    const mcpThreadConfig = scopedMcp
+      ? buildCodexZoteroMcpThreadConfig({
+          profileSignature,
+          scopeToken: scopedMcp.token,
+          required: true,
+        })
+      : null;
+    const threadConfig = mcpThreadConfig?.config || {
+      features: {
+        shell_tool: false,
+      },
+    };
+    let mcpReady = !mcpEnabled;
+    let mcpWarning = "";
+    let mcpStatus: CodexNativeMcpSetupStatus | undefined;
+    const clearMcpScope = mcpEnabled
       ? setActiveZoteroMcpScope({
           ...params.scope,
+          profileSignature,
           userText: latestUserText,
         })
       : () => undefined;
@@ -553,11 +784,48 @@ export async function runCodexAppServerNativeTurn(params: {
         params.reasoning,
         params.model,
       );
+      const optimisticMcpReady = mcpEnabled;
+      const plainNativeMessages = buildNativeMessages({
+        messages: params.messages,
+        includeVisibleHistory: true,
+        zoteroEnvironmentText: buildZoteroEnvironmentManifest({
+          scope: { ...params.scope, profileSignature },
+          mcpEnabled,
+          mcpReady: optimisticMcpReady,
+          mcpWarning,
+        }),
+      });
+      const plainPreparedTurn =
+        await prepareCodexAppServerChatTurn(plainNativeMessages);
+      if (mcpEnabled && mcpThreadConfig && scopedMcp) {
+        try {
+          mcpStatus = await preflightCodexZoteroMcpServer({
+            serverName: mcpThreadConfig.serverName,
+            scopeToken: scopedMcp.token,
+            required: true,
+          });
+          assertRequiredCodexZoteroMcpToolsReady(mcpStatus);
+          mcpReady = true;
+        } catch (error) {
+          mcpReady = false;
+          mcpWarning = `Zotero MCP setup failed: ${
+            error instanceof Error ? error.message : String(error)
+          }`;
+          params.onMcpSetupWarning?.(mcpWarning);
+          ztoolkit.log(
+            "Codex app-server native: Zotero MCP preflight failed",
+            error,
+          );
+          throw new Error(mcpWarning);
+        }
+      }
       const thread = await resolveNativeThread({
         proc,
-        scope: params.scope,
+        scope: { ...params.scope, profileSignature },
         model: params.model,
         effort: reasoningParams.effort,
+        developerInstructions: plainPreparedTurn.developerInstructions,
+        config: threadConfig,
         hooks: params.hooks,
       });
       if (!thread.resumed) {
@@ -567,17 +835,51 @@ export async function runCodexAppServerNativeTurn(params: {
           name: params.scope.title,
         });
       }
+      if (mcpEnabled && mcpThreadConfig) {
+        try {
+          const appServerMcpStatus = await readCodexNativeMcpSetupStatus({
+            proc,
+            serverName: mcpThreadConfig.serverName,
+          });
+          if (appServerMcpStatus.connected === true) {
+            mcpStatus = appServerMcpStatus;
+          } else {
+            ztoolkit.log(
+              "Codex app-server native: per-thread MCP passed preflight but is absent from mcpServerStatus/list",
+              appServerMcpStatus,
+            );
+          }
+        } catch (error) {
+          ztoolkit.log(
+            "Codex app-server native: MCP diagnostics status lookup failed",
+            error,
+          );
+        }
+      }
+      params.onDiagnostics?.(
+        buildNativeDiagnostics({
+          thread,
+          profileSignature,
+          scope: params.scope,
+          mcpServerName: mcpThreadConfig?.serverName,
+          mcpReady,
+          mcpStatus,
+        }),
+      );
       const nativeMessages = buildNativeMessages({
         messages: params.messages,
-        includeVisibleHistory: !thread.resumed,
+        includeVisibleHistory: true,
         zoteroEnvironmentText: buildZoteroEnvironmentManifest({
-          scope: params.scope,
+          scope: { ...params.scope, profileSignature },
           mcpEnabled,
           mcpReady,
           mcpWarning,
         }),
+        prefixLatestUserWithContext: !thread.developerInstructionsAccepted,
       });
-      const preparedTurn = await prepareCodexAppServerChatTurn(nativeMessages);
+      const preparedTurn = thread.developerInstructionsAccepted
+        ? plainPreparedTurn
+        : await prepareCodexAppServerChatTurn(nativeMessages);
       const input = await resolveCodexAppServerTurnInputWithFallback({
         proc,
         threadId: thread.threadId,
@@ -613,12 +915,28 @@ export async function runCodexAppServerNativeTurn(params: {
         cacheKey: processKey,
         processOptions: { codexPath },
       });
+      const historyVerified = await verifyCodexAppServerThreadHistory({
+        proc,
+        threadId: thread.threadId,
+      });
+      const diagnostics = buildNativeDiagnostics({
+        thread,
+        profileSignature,
+        scope: params.scope,
+        mcpServerName: mcpThreadConfig?.serverName,
+        mcpReady,
+        mcpStatus,
+        historyVerified,
+      });
+      params.onDiagnostics?.(diagnostics);
       return {
         text,
         threadId: thread.threadId,
         resumed: thread.resumed,
+        diagnostics,
       };
     } finally {
+      scopedMcp?.clear();
       clearMcpScope();
       unregisterApprovalHandlers();
     }

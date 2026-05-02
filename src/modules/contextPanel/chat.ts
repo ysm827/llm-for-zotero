@@ -35,15 +35,20 @@ import {
   updateLatestClaudeConversationUserMessage,
 } from "../../claudeCode/runtime";
 import { isClaudeConversationKey } from "../../claudeCode/constants";
-import { isCodexConversationKey } from "../../codexAppServer/constants";
+import {
+  getCodexProfileSignature,
+  isCodexConversationKey,
+} from "../../codexAppServer/constants";
 import {
   getCodexReasoningModePref,
   getCodexRuntimeModelPref,
   isCodexAppServerModeEnabled,
 } from "../../codexAppServer/prefs";
 import {
+  resolveSafeCodexNativeApprovalRequest,
   runCodexAppServerNativeTurn,
   type CodexNativeConversationScope,
+  type CodexNativeDiagnostics,
 } from "../../codexAppServer/nativeClient";
 import {
   callLLMStream,
@@ -1822,6 +1827,7 @@ function resolveCodexNativeConversationScope(params: {
         String(baseItem?.getField?.("title") || params.item.getField?.("title") || ""),
     ) || undefined;
   return {
+    profileSignature: getCodexProfileSignature(),
     conversationKey: params.conversationKey,
     libraryID,
     kind,
@@ -1833,6 +1839,28 @@ function resolveCodexNativeConversationScope(params: {
     paperContext: paperContext || undefined,
     title: sanitizeText(params.title || "").slice(0, 64) || undefined,
   };
+}
+
+function formatCodexNativeDiagnosticsStatus(
+  diagnostics: CodexNativeDiagnostics,
+): string {
+  const threadId = sanitizeText(diagnostics.threadId || "");
+  const threadShort = threadId ? threadId.slice(0, 10) : "unknown";
+  const source = sanitizeText(diagnostics.threadSource || "appServer");
+  const libraryName = sanitizeText(diagnostics.libraryName || "");
+  const libraryLabel = libraryName
+    ? `${diagnostics.libraryID} ${libraryName}`
+    : `${diagnostics.libraryID}`;
+  const mcpLabel = diagnostics.mcpServerName
+    ? `${sanitizeText(diagnostics.mcpServerName)} ${
+        diagnostics.mcpReady ? "ready" : "not ready"
+      }`
+    : "MCP disabled";
+  const historyLabel =
+    diagnostics.historyVerified === undefined
+      ? ""
+      : `, history ${diagnostics.historyVerified ? "verified" : "unverified"}`;
+  return `Codex app-server ${threadShort} (${source}), library ${libraryLabel}, ${mcpLabel}${historyLabel}`;
 }
 
 async function buildContextPlanForRequest(params: {
@@ -3423,7 +3451,21 @@ export async function retryLatestAssistantResponse(
             onMcpSetupWarning: (message) => {
               setStatusSafely(message, "error");
             },
-            onApprovalRequest: () => {
+            onDiagnostics: (diagnostics) => {
+              setStatusSafely(
+                formatCodexNativeDiagnosticsStatus(diagnostics),
+                "sending",
+              );
+            },
+            onApprovalRequest: (request) => {
+              const safeDecision = resolveSafeCodexNativeApprovalRequest(request);
+              if (safeDecision) {
+                setStatusSafely(
+                  "Codex approved Zotero read-only MCP access",
+                  "sending",
+                );
+                return safeDecision;
+              }
               setStatusSafely(
                 "Codex requested approval, but native Codex approvals are not enabled in Zotero yet.",
                 "error",
@@ -4690,7 +4732,21 @@ export async function sendQuestion(opts: import("./types").SendQuestionOptions) 
             onMcpSetupWarning: (message) => {
               setStatusSafely(message, "error");
             },
-            onApprovalRequest: () => {
+            onDiagnostics: (diagnostics) => {
+              setStatusSafely(
+                formatCodexNativeDiagnosticsStatus(diagnostics),
+                "sending",
+              );
+            },
+            onApprovalRequest: (request) => {
+              const safeDecision = resolveSafeCodexNativeApprovalRequest(request);
+              if (safeDecision) {
+                setStatusSafely(
+                  "Codex approved Zotero read-only MCP access",
+                  "sending",
+                );
+                return safeDecision;
+              }
               setStatusSafely(
                 "Codex requested approval, but native Codex approvals are not enabled in Zotero yet.",
                 "error",

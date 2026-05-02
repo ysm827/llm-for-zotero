@@ -1,5 +1,7 @@
 import { assert } from "chai";
 import {
+  assertRequiredCodexZoteroMcpToolsReady,
+  buildCodexZoteroMcpThreadConfig,
   installOrUpdateCodexZoteroMcpConfig,
   readCodexNativeMcpSetupStatus,
 } from "../src/codexAppServer/mcpSetup";
@@ -196,5 +198,52 @@ describe("Codex app-server MCP setup", function () {
     assert.equal(status.connected, true);
     assert.deepEqual(status.toolNames, ["query_library"]);
     assert.deepEqual(status.errors, []);
+  });
+
+  it("builds profile-scoped required MCP config for native threads", function () {
+    const scoped = buildCodexZoteroMcpThreadConfig({
+      profileSignature: "profile-dev one",
+      scopeToken: "scope-token-123",
+      required: true,
+    });
+    const otherScoped = buildCodexZoteroMcpThreadConfig({
+      profileSignature: "profile-main two",
+      scopeToken: "scope-token-456",
+      required: true,
+    });
+
+    assert.equal(scoped.serverName, "llm_for_zotero_profile_dev_one");
+    assert.equal(otherScoped.serverName, "llm_for_zotero_profile_main_two");
+    assert.notEqual(scoped.serverName, otherScoped.serverName);
+    assert.deepEqual(scoped.config.features, { shell_tool: false });
+    const servers = scoped.config.mcp_servers as Record<string, any>;
+    assert.containsAllKeys(servers, [scoped.serverName]);
+    assert.equal(
+      servers[scoped.serverName].url,
+      "http://127.0.0.1:24680/llm-for-zotero/mcp",
+    );
+    assert.equal(servers[scoped.serverName].required, true);
+    assert.equal(
+      servers[scoped.serverName].http_headers["X-LLM-For-Zotero-Scope"],
+      "scope-token-123",
+    );
+    assert.include(servers[scoped.serverName].enabled_tools, "query_library");
+    assert.include(servers[scoped.serverName].enabled_tools, "read_library");
+  });
+
+  it("rejects native turns when required Zotero MCP tools are missing", function () {
+    assert.throws(
+      () =>
+        assertRequiredCodexZoteroMcpToolsReady({
+          enabled: true,
+          serverName: "llm_for_zotero_profile_a",
+          serverUrl: "http://127.0.0.1:24680/llm-for-zotero/mcp",
+          configured: true,
+          connected: true,
+          toolNames: ["query_library"],
+          errors: [],
+        }),
+      /missing required tools: read_library/,
+    );
   });
 });

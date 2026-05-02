@@ -2,10 +2,12 @@ import { assert } from "chai";
 import {
   getOrCreateZoteroMcpBearerToken,
   getZoteroMcpServerUrl,
+  registerScopedZoteroMcpScope,
   registerMcpServer,
   setActiveZoteroMcpScope,
   unregisterMcpServer,
   ZOTERO_MCP_ENDPOINT_PATH,
+  ZOTERO_MCP_SCOPE_HEADER,
 } from "../src/agent/mcp/server";
 import { AgentToolRegistry } from "../src/agent/tools/registry";
 import type { AgentToolContext, AgentToolDefinition } from "../src/agent/types";
@@ -43,6 +45,7 @@ function createWriteTool(name: string): AgentToolDefinition<unknown, unknown> {
 async function invokeMcpEndpoint(params: {
   body: Record<string, unknown>;
   token?: string;
+  headers?: Record<string, string>;
 }): Promise<EndpointReply> {
   const EndpointClass = (
     globalThis.Zotero.Server.Endpoints as Record<string, any>
@@ -52,7 +55,10 @@ async function invokeMcpEndpoint(params: {
   return endpoint.init({
     method: "POST",
     data: params.body,
-    headers: params.token ? { Authorization: `Bearer ${params.token}` } : {},
+    headers: {
+      ...(params.token ? { Authorization: `Bearer ${params.token}` } : {}),
+      ...(params.headers || {}),
+    },
   });
 }
 
@@ -116,6 +122,7 @@ describe("Zotero MCP server", function () {
     assert.equal(authorized[0], 200);
     const payload = JSON.parse(authorized[2]);
     assert.equal(payload.result.serverInfo.name, "llm-for-zotero");
+    assert.equal(payload.result.protocolVersion, "2025-06-18");
   });
 
   it("lists only curated read tools plus the confirmation tool", async function () {
@@ -140,12 +147,45 @@ describe("Zotero MCP server", function () {
     const queryTool = payload.result.tools.find(
       (tool: { name: string }) => tool.name === "query_library",
     );
+    assert.deepEqual(queryTool.annotations, {
+      readOnlyHint: true,
+      openWorldHint: false,
+      destructiveHint: false,
+    });
     assert.equal(queryTool.inputSchema.properties.libraryID.type, "number");
     assert.equal(queryTool.inputSchema.properties.activeItemId.type, "number");
     assert.equal(
       queryTool.inputSchema.properties.activeContextItemId.type,
       "number",
     );
+    const confirmTool = payload.result.tools.find(
+      (tool: { name: string }) => tool.name === "zotero_confirm_action",
+    );
+    assert.deepEqual(confirmTool.annotations, {
+      readOnlyHint: false,
+      openWorldHint: false,
+      destructiveHint: false,
+    });
+  });
+
+  it("accepts the MCP initialized notification without a JSON-RPC response", async function () {
+    const registry = new AgentToolRegistry();
+    registry.register(createReadTool("query_library"));
+    registerMcpServer({
+      toolRegistry: registry,
+      zoteroGateway: {} as never,
+    });
+
+    const response = await invokeMcpEndpoint({
+      token: getOrCreateZoteroMcpBearerToken(),
+      body: {
+        jsonrpc: "2.0",
+        method: "notifications/initialized",
+      },
+    });
+
+    assert.equal(response[0], 202);
+    assert.equal(response[2], "");
   });
 
   it("executes curated read tools through the tool registry", async function () {
@@ -303,6 +343,76 @@ describe("Zotero MCP server", function () {
       });
     } finally {
       clearScope();
+    }
+  });
+
+  it("binds MCP tool context from the scoped header before the legacy active scope", async function () {
+    const registry = new AgentToolRegistry();
+    registry.register({
+      spec: {
+        name: "query_library",
+        description: "Query library",
+        inputSchema: { type: "object", additionalProperties: true },
+        mutability: "read",
+        requiresConfirmation: false,
+      },
+      validate: (args) => ({ ok: true, value: args ?? {} }),
+      execute: async (_input, context: AgentToolContext) => ({
+        request: {
+          conversationKey: context.request.conversationKey,
+          libraryID: context.request.libraryID,
+          activeItemId: context.request.activeItemId,
+        },
+      }),
+    });
+    registerMcpServer({
+      toolRegistry: registry,
+      zoteroGateway: {} as never,
+    });
+
+    const clearLegacyScope = setActiveZoteroMcpScope({
+      profileSignature: "profile-main",
+      conversationKey: 1,
+      libraryID: 999,
+      kind: "global",
+      activeItemId: 999,
+    });
+    const scoped = registerScopedZoteroMcpScope(
+      {
+        profileSignature: "profile-dev",
+        conversationKey: 456,
+        libraryID: 7,
+        kind: "global",
+        activeItemId: 77,
+        libraryName: "Development Library",
+      },
+      { token: "scoped-test-token" },
+    );
+    try {
+      const response = await invokeMcpEndpoint({
+        token: getOrCreateZoteroMcpBearerToken(),
+        headers: { [ZOTERO_MCP_SCOPE_HEADER]: scoped.token },
+        body: {
+          jsonrpc: "2.0",
+          id: 1,
+          method: "tools/call",
+          params: {
+            name: "query_library",
+            arguments: { entity: "items", mode: "list" },
+          },
+        },
+      });
+      const payload = JSON.parse(response[2]);
+      const content = JSON.parse(payload.result.content[0].text);
+      assert.equal(content.ok, true);
+      assert.deepEqual(content.result.request, {
+        conversationKey: 456,
+        libraryID: 7,
+        activeItemId: 77,
+      });
+    } finally {
+      scoped.clear();
+      clearLegacyScope();
     }
   });
 

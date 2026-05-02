@@ -24,19 +24,23 @@ import {
   type McpServerInfo,
   type McpToolCallParams,
   type McpToolCallResult,
+  type McpToolDefinition,
   type McpToolsListResult,
 } from "./protocol";
 
 export const ZOTERO_MCP_SERVER_NAME = "llm_for_zotero";
 export const ZOTERO_MCP_ENDPOINT_PATH = "/llm-for-zotero/mcp";
 export const ZOTERO_MCP_AUTH_HEADER = "Authorization";
+export const ZOTERO_MCP_SCOPE_HEADER = "X-LLM-For-Zotero-Scope";
 export const ZOTERO_MCP_TOKEN_PREF_KEY = `${config.prefsPrefix}.codexZoteroMcpBearerToken`;
 
 const SERVER_VERSION = "1.0.0";
+const MCP_PROTOCOL_VERSION = "2025-06-18";
 const DEFAULT_ZOTERO_HTTP_PORT = 23119;
 const PENDING_CONFIRMATION_TTL_MS = 10 * 60 * 1000;
+const SCOPED_MCP_SCOPE_TTL_MS = 2 * 60 * 60 * 1000;
 const CONFIRM_TOOL_NAME = "zotero_confirm_action";
-const CURATED_READ_TOOL_NAMES = new Set([
+export const ZOTERO_MCP_SAFE_READ_TOOL_NAMES = [
   "query_library",
   "read_library",
   "read_paper",
@@ -44,7 +48,18 @@ const CURATED_READ_TOOL_NAMES = new Set([
   "search_literature_online",
   "read_attachment",
   "view_pdf_pages",
-]);
+] as const;
+const CURATED_READ_TOOL_NAMES = new Set<string>(ZOTERO_MCP_SAFE_READ_TOOL_NAMES);
+const READ_ONLY_TOOL_ANNOTATIONS = {
+  readOnlyHint: true,
+  openWorldHint: false,
+  destructiveHint: false,
+} as const;
+const CONFIRM_TOOL_ANNOTATIONS = {
+  readOnlyHint: false,
+  openWorldHint: false,
+  destructiveHint: false,
+} as const;
 const MCP_SCOPE_ARG_NAMES = new Set([
   "libraryID",
   "libraryId",
@@ -55,6 +70,7 @@ const MCP_SCOPE_ARG_NAMES = new Set([
 ]);
 
 export type ZoteroMcpActiveScope = {
+  profileSignature?: string;
   conversationKey?: number;
   libraryID?: number;
   kind?: "global" | "paper";
@@ -78,12 +94,22 @@ type EndpointOptions = {
   headers?: Record<string, string>;
 };
 
+type McpHttpResponse = {
+  status: number;
+  contentType: string;
+  body: string;
+};
+
 type PendingMcpConfirmation = {
   createdAt: number;
   execution: Extract<PreparedToolExecution, { kind: "confirmation" }>;
 };
 
 const pendingConfirmations = new Map<string, PendingMcpConfirmation>();
+const scopedZoteroMcpScopes = new Map<
+  string,
+  { createdAt: number; expiresAt: number; scope: ZoteroMcpActiveScope }
+>();
 let activeZoteroMcpScope: ZoteroMcpActiveScope | null = null;
 
 function getZoteroPrefs(): {
@@ -156,12 +182,31 @@ export function getZoteroMcpAllowedToolNames(): string[] {
   return [...Array.from(CURATED_READ_TOOL_NAMES), CONFIRM_TOOL_NAME];
 }
 
-export function buildZoteroMcpConfigValue(): Record<string, unknown> {
+function normalizeServerNamePart(value: unknown): string {
+  const normalized = normalizeText(value, 128)
+    ?.replace(/[^a-zA-Z0-9_]+/g, "_")
+    .replace(/^_+|_+$/g, "")
+    .toLowerCase();
+  return normalized || "";
+}
+
+export function getZoteroMcpServerName(profileSignature?: string): string {
+  const suffix = normalizeServerNamePart(profileSignature);
+  return suffix ? `${ZOTERO_MCP_SERVER_NAME}_${suffix}` : ZOTERO_MCP_SERVER_NAME;
+}
+
+export function buildZoteroMcpConfigValue(params: {
+  scopeToken?: string;
+  required?: boolean;
+} = {}): Record<string, unknown> {
   const token = getOrCreateZoteroMcpBearerToken();
+  const scopeToken = normalizeText(params.scopeToken, 256);
   return {
     url: getZoteroMcpServerUrl(),
+    ...(params.required ? { required: true } : {}),
     http_headers: {
       [ZOTERO_MCP_AUTH_HEADER]: `Bearer ${token}`,
+      ...(scopeToken ? { [ZOTERO_MCP_SCOPE_HEADER]: scopeToken } : {}),
     },
     enabled_tools: getZoteroMcpAllowedToolNames(),
   };
@@ -211,6 +256,7 @@ function normalizeActiveScope(
     normalizePositiveInt(scope.activeContextItemId) ||
     paperContext?.contextItemId;
   return {
+    profileSignature: normalizeText(scope.profileSignature, 128),
     conversationKey: normalizePositiveInt(scope.conversationKey),
     libraryID: normalizePositiveInt(scope.libraryID),
     kind: scope.kind === "paper" ? "paper" : "global",
@@ -222,6 +268,36 @@ function normalizeActiveScope(
     title: normalizeText(scope.title),
     userText: normalizeText(scope.userText, 4000),
     paperContext,
+  };
+}
+
+function pruneExpiredScopedMcpScopes(): void {
+  const now = Date.now();
+  for (const [token, entry] of scopedZoteroMcpScopes) {
+    if (entry.expiresAt <= now) scopedZoteroMcpScopes.delete(token);
+  }
+}
+
+export function registerScopedZoteroMcpScope(
+  scope: ZoteroMcpActiveScope,
+  options: { ttlMs?: number; token?: string } = {},
+): { token: string; clear: () => void } {
+  pruneExpiredScopedMcpScopes();
+  const token = normalizeText(options.token, 256) || generateToken();
+  const ttlMs =
+    Number.isFinite(options.ttlMs) && Number(options.ttlMs) > 0
+      ? Math.floor(Number(options.ttlMs))
+      : SCOPED_MCP_SCOPE_TTL_MS;
+  scopedZoteroMcpScopes.set(token, {
+    createdAt: Date.now(),
+    expiresAt: Date.now() + ttlMs,
+    scope: normalizeActiveScope(scope),
+  });
+  return {
+    token,
+    clear: () => {
+      scopedZoteroMcpScopes.delete(token);
+    },
   };
 }
 
@@ -237,13 +313,6 @@ export function setActiveZoteroMcpScope(
 
 export function getActiveZoteroMcpScope(): ZoteroMcpActiveScope | null {
   return activeZoteroMcpScope ? { ...activeZoteroMcpScope } : null;
-}
-
-function resolveDefaultLibraryId(): number {
-  return (
-    (Zotero as unknown as { Libraries?: { userLibraryID?: number } }).Libraries
-      ?.userLibraryID || 1
-  );
 }
 
 function getHeader(
@@ -266,7 +335,7 @@ function isAuthorized(headers: Record<string, string> | undefined): boolean {
 
 async function handleInitialize(): Promise<McpServerInfo> {
   return {
-    protocolVersion: "2024-11-05",
+    protocolVersion: MCP_PROTOCOL_VERSION,
     serverInfo: {
       name: "llm-for-zotero",
       version: SERVER_VERSION,
@@ -280,8 +349,10 @@ async function handleInitialize(): Promise<McpServerInfo> {
 function createConfirmToolDefinition() {
   return {
     name: CONFIRM_TOOL_NAME,
+    title: "Confirm Zotero Action",
     description:
       "Execute or deny a Zotero MCP action that previously returned confirmation_required.",
+    annotations: CONFIRM_TOOL_ANNOTATIONS,
     inputSchema: {
       type: "object",
       required: ["requestId", "approved"],
@@ -305,7 +376,7 @@ function createConfirmToolDefinition() {
 }
 
 function handleToolsList(toolRegistry: AgentToolRegistry): McpToolsListResult {
-  const tools = toolRegistry
+  const tools: McpToolDefinition[] = toolRegistry
     .listTools()
     .filter(
       (tool) =>
@@ -313,8 +384,13 @@ function handleToolsList(toolRegistry: AgentToolRegistry): McpToolsListResult {
     )
     .map(({ name, description, inputSchema }) => ({
       name,
+      title: name
+        .split("_")
+        .map((part) => part.slice(0, 1).toUpperCase() + part.slice(1))
+        .join(" "),
       description: decorateMcpToolDescription(description),
       inputSchema: decorateMcpToolSchema(inputSchema),
+      annotations: READ_ONLY_TOOL_ANNOTATIONS,
     }));
   tools.push(createConfirmToolDefinition());
   return { tools };
@@ -324,6 +400,26 @@ function normalizeRecord(value: unknown): Record<string, unknown> {
   return value && typeof value === "object" && !Array.isArray(value)
     ? (value as Record<string, unknown>)
     : {};
+}
+
+function hasJsonRpcId(request: JsonRpcRequest): boolean {
+  return Object.prototype.hasOwnProperty.call(request, "id");
+}
+
+function makeJsonRpcHttpResponse(body: unknown): McpHttpResponse {
+  return {
+    status: 200,
+    contentType: "application/json",
+    body: typeof body === "string" ? body : JSON.stringify(body),
+  };
+}
+
+function makeJsonRpcNotificationResponse(): McpHttpResponse {
+  return {
+    status: 202,
+    contentType: "text/plain",
+    body: "",
+  };
 }
 
 function extractMcpScopeArgs(rawArgs: unknown): {
@@ -346,7 +442,7 @@ function extractMcpScopeArgs(rawArgs: unknown): {
 }
 
 function decorateMcpToolDescription(description: string): string {
-  return `${description}\n\nZotero MCP scope: omit libraryID, activeItemId, and activeContextItemId to use the current Codex Zotero chat scope. Use query_library to discover Zotero items, read_library for structured item state, search_paper for evidence retrieval, and read_paper/read_attachment/view_pdf_pages for deeper inspection.`;
+  return `${description}\n\nZotero MCP scope: omit libraryID, activeItemId, and activeContextItemId to use the current Codex Zotero chat scope. Use query_library to discover Zotero items, read_library for structured item state, search_paper for evidence retrieval, and read_paper/read_attachment/view_pdf_pages for deeper inspection. For counting questions, prefer query_library totalCount/returnedCount/limited metadata instead of hand-counting listed results.`;
 }
 
 function decorateMcpToolSchema(inputSchema: object): object {
@@ -394,9 +490,27 @@ function resolveScopePaperContext(
   };
 }
 
-function createToolContext(rawArgs: unknown): AgentToolContext {
+function resolveScopedMcpScope(
+  headers: Record<string, string> | undefined,
+): ZoteroMcpActiveScope | null {
+  const token = getHeader(headers, ZOTERO_MCP_SCOPE_HEADER).trim();
+  if (!token) return activeZoteroMcpScope;
+  pruneExpiredScopedMcpScopes();
+  const entry = scopedZoteroMcpScopes.get(token);
+  if (!entry) {
+    throw new Error(
+      "Zotero MCP scope token is invalid or expired. Start a new Codex turn from Zotero so tools bind to the current profile and library.",
+    );
+  }
+  return entry.scope;
+}
+
+function createToolContext(
+  rawArgs: unknown,
+  headers?: Record<string, string>,
+): AgentToolContext {
   const scopeArgs = extractMcpScopeArgs(rawArgs);
-  const scope = activeZoteroMcpScope;
+  const scope = resolveScopedMcpScope(headers);
   const activeItemId =
     scopeArgs.activeItemId ||
     scope?.activeItemId ||
@@ -424,8 +538,7 @@ function createToolContext(rawArgs: unknown): AgentToolContext {
       scope?.userText ||
       "",
     activeItemId,
-    libraryID:
-      scopeArgs.libraryID || scope?.libraryID || resolveDefaultLibraryId(),
+    libraryID: scopeArgs.libraryID || scope?.libraryID || 0,
     model: "codex-app-server",
     selectedPaperContexts: paperContext ? [paperContext] : undefined,
     fullTextPaperContexts: paperContext ? [paperContext] : undefined,
@@ -531,6 +644,7 @@ async function handleConfirmTool(rawArgs: unknown): Promise<McpToolCallResult> {
 async function handleToolsCall(
   params: McpToolCallParams,
   deps: McpServerDeps,
+  headers?: Record<string, string>,
 ): Promise<McpToolCallResult> {
   pruneExpiredConfirmations();
   const { name, arguments: rawArgs } = params;
@@ -562,7 +676,7 @@ async function handleToolsCall(
       name,
       arguments: extractMcpScopeArgs(rawArgs).toolArgs,
     },
-    createToolContext(rawArgs),
+    createToolContext(rawArgs, headers),
   );
 
   if (prepared.kind === "confirmation") {
@@ -574,7 +688,8 @@ async function handleToolsCall(
 async function handleRequest(
   body: string,
   deps: McpServerDeps,
-): Promise<string> {
+  headers?: Record<string, string>,
+): Promise<McpHttpResponse> {
   let request: JsonRpcRequest;
 
   try {
@@ -585,7 +700,7 @@ async function handleRequest(
       parsed.jsonrpc !== "2.0" ||
       typeof parsed.method !== "string"
     ) {
-      return JSON.stringify(
+      return makeJsonRpcHttpResponse(
         makeError(
           null,
           RPC_ERRORS.INVALID_REQUEST.code,
@@ -595,7 +710,7 @@ async function handleRequest(
     }
     request = parsed as JsonRpcRequest;
   } catch {
-    return JSON.stringify(
+    return makeJsonRpcHttpResponse(
       makeError(
         null,
         RPC_ERRORS.PARSE_ERROR.code,
@@ -605,16 +720,21 @@ async function handleRequest(
   }
 
   const { id, method, params } = request;
+  const isNotification = !hasJsonRpcId(request);
 
   try {
     if (method === MCP_METHODS.INITIALIZE) {
       const result = await handleInitialize();
-      return JSON.stringify(makeResult(id, result));
+      return makeJsonRpcHttpResponse(makeResult(id ?? null, result));
+    }
+
+    if (method === MCP_METHODS.INITIALIZED) {
+      return makeJsonRpcNotificationResponse();
     }
 
     if (method === MCP_METHODS.TOOLS_LIST) {
       const result = handleToolsList(deps.toolRegistry);
-      return JSON.stringify(makeResult(id, result));
+      return makeJsonRpcHttpResponse(makeResult(id ?? null, result));
     }
 
     if (method === MCP_METHODS.TOOLS_CALL) {
@@ -623,30 +743,46 @@ async function handleRequest(
         typeof params !== "object" ||
         typeof (params as McpToolCallParams).name !== "string"
       ) {
-        return JSON.stringify(
+        return makeJsonRpcHttpResponse(
           makeError(
-            id,
+            id ?? null,
             RPC_ERRORS.INVALID_PARAMS.code,
             "tools/call requires { name, arguments }",
           ),
         );
       }
-      const result = await handleToolsCall(params as McpToolCallParams, deps);
-      return JSON.stringify(makeResult(id, result));
+      const result = await handleToolsCall(
+        params as McpToolCallParams,
+        deps,
+        headers,
+      );
+      return makeJsonRpcHttpResponse(makeResult(id ?? null, result));
     }
 
-    return JSON.stringify(
+    if (isNotification) {
+      return makeJsonRpcNotificationResponse();
+    }
+
+    return makeJsonRpcHttpResponse(
       makeError(
-        id,
+        id ?? null,
         RPC_ERRORS.METHOD_NOT_FOUND.code,
         `Unknown method: ${method}`,
       ),
     );
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
-    return JSON.stringify(
+    if (isNotification) {
+      (
+        globalThis as typeof globalThis & {
+          ztoolkit?: { log?: (...args: unknown[]) => void };
+        }
+      ).ztoolkit?.log?.("Zotero MCP notification failed", method, error);
+      return makeJsonRpcNotificationResponse();
+    }
+    return makeJsonRpcHttpResponse(
       makeError(
-        id,
+        id ?? null,
         RPC_ERRORS.INTERNAL_ERROR.code,
         `Internal error: ${message}`,
       ),
@@ -680,8 +816,12 @@ export function registerMcpServer(deps: McpServerDeps): void {
           ? options.data
           : JSON.stringify(options.data);
 
-      const responseBody = await handleRequest(body, capturedDeps);
-      return [200, "application/json", responseBody];
+      const response = await handleRequest(
+        body,
+        capturedDeps,
+        options.headers,
+      );
+      return [response.status, response.contentType, response.body];
     };
   }
 
@@ -693,5 +833,6 @@ export function registerMcpServer(deps: McpServerDeps): void {
  */
 export function unregisterMcpServer(): void {
   pendingConfirmations.clear();
+  scopedZoteroMcpScopes.clear();
   delete Zotero.Server.Endpoints[ZOTERO_MCP_ENDPOINT_PATH];
 }
