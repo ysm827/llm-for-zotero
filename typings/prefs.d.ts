@@ -63,6 +63,7 @@ declare namespace _ZoteroTypes {
       "locale": string;
       "mineruAutoWatchCollections": string;
       "mineruGlobalAutoParse": boolean;
+      "mineruSyncEnabled": boolean;
       "mineruExcludePatterns": string;
     };
   }

@@ -1,6 +1,9 @@
 import { assert } from "chai";
 import { unzipSync } from "fflate";
-import { setMineruSyncEnabled } from "../src/utils/mineruConfig";
+import {
+  isMineruSyncEnabled,
+  setMineruSyncEnabled,
+} from "../src/utils/mineruConfig";
 import {
   getMineruItemDir,
   hasCachedMineruMd,
@@ -380,6 +383,13 @@ describe("mineruSync", function () {
       [...items.values()].filter((item) => item.id >= 9000).length,
       0,
     );
+  });
+
+  it("keeps MinerU sync disabled by default", function () {
+    const io = setupMemoryIO();
+    setupZotero(new Map<number, MockItem>(), io);
+
+    assert.isFalse(isMineruSyncEnabled());
   });
 
   it("publishes and cleans only plugin-owned MinerU package attachments", async function () {
