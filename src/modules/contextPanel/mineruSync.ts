@@ -11,6 +11,7 @@ import {
   writeMineruCacheFiles,
   type MineruCacheFile,
 } from "./mineruCache";
+import { pdfTextCache, pdfTextLoadingTasks } from "./state";
 
 export const MINERU_SYNC_PACKAGE_KIND = "llm-for-zotero/mineru-cache";
 export const MINERU_SYNC_PACKAGE_VERSION = 1;
@@ -1002,6 +1003,21 @@ async function writeLocalSyncState(params: {
   );
 }
 
+async function invalidateRestoredMineruCache(
+  attachmentId: number,
+): Promise<void> {
+  pdfTextCache.delete(attachmentId);
+  pdfTextLoadingTasks.delete(attachmentId);
+  import("./multiContextPlanner")
+    .then(({ clearRetrievalCandidateCache }) =>
+      clearRetrievalCandidateCache(attachmentId),
+    )
+    .catch(() => {});
+  import("./embeddingCache")
+    .then(({ clearEmbeddingCache }) => clearEmbeddingCache(attachmentId))
+    .catch(() => {});
+}
+
 function cloneMigrationResult(
   result: MineruSyncMigrationResult,
 ): MineruSyncMigrationResult {
@@ -1115,6 +1131,7 @@ export async function ensureMineruRuntimeCacheForAttachment(
       packageAttachmentId: selected.item.id,
       cacheContentHash: packageContentHash,
     });
+    await invalidateRestoredMineruCache(attachmentId);
     return {
       status: "restored",
       attachmentId,
@@ -1134,6 +1151,31 @@ export async function restoreSyncedMineruCacheForAttachment(
   sourceAttachment: Zotero.Item,
 ): Promise<MineruSyncRestoreResult> {
   return ensureMineruRuntimeCacheForAttachment(sourceAttachment);
+}
+
+export async function ensureMineruCacheDirForAttachment(
+  sourceAttachment: Zotero.Item | null | undefined,
+): Promise<string | undefined> {
+  if (!sourceAttachment || !isPdfAttachment(sourceAttachment)) return undefined;
+  const attachmentId = sourceAttachment.id;
+  try {
+    if (await hasCachedMineruMd(attachmentId)) {
+      return getMineruItemDir(attachmentId);
+    }
+
+    const restored =
+      await ensureMineruRuntimeCacheForAttachment(sourceAttachment);
+    if (
+      (restored.status === "restored" ||
+        restored.status === "already_cached") &&
+      (await hasCachedMineruMd(attachmentId))
+    ) {
+      return getMineruItemDir(attachmentId);
+    }
+  } catch {
+    /* fall back to existing non-MinerU paths */
+  }
+  return undefined;
 }
 
 export async function repairSyncedMineruCacheForAttachment(
@@ -1206,6 +1248,7 @@ export async function repairSyncedMineruCacheForAttachment(
       packageAttachmentId: selected.item.id,
       cacheContentHash: packageContentHash,
     });
+    await invalidateRestoredMineruCache(attachmentId);
     return {
       status: "restored",
       attachmentId,

@@ -80,7 +80,7 @@ import {
   formatPaperCountLabel,
 } from "./constants";
 import type { ConversationSystem } from "../../shared/types";
-import { hasCachedMineruMd, getMineruItemDir } from "./mineruCache";
+import { ensureMineruCacheDirForAttachment } from "./mineruSync";
 import type {
   Message,
   ChatRuntimeMode,
@@ -4690,9 +4690,9 @@ async function enrichPaperContextsWithMineruCache(
   for (const paper of papers) {
     let mineruCacheDir: string | undefined;
     try {
-      if (await hasCachedMineruMd(paper.contextItemId)) {
-        mineruCacheDir = getMineruItemDir(paper.contextItemId);
-      }
+      mineruCacheDir = await ensureMineruCacheDirForAttachment(
+        Zotero.Items.get(paper.contextItemId),
+      );
     } catch {
       /* ignore */
     }

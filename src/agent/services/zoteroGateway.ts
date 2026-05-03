@@ -21,6 +21,7 @@ import {
 } from "../../modules/contextPanel/contextResolution";
 import { resolvePaperContextRefFromAttachment } from "../../modules/contextPanel/paperAttribution";
 import { invalidateCachedContextText } from "../../modules/contextPanel/pdfContext";
+import { ensureMineruCacheDirForAttachment } from "../../modules/contextPanel/mineruSync";
 import type { AgentRuntimeRequest } from "../types";
 import type { PaperContextRef } from "../../shared/types";
 import {
@@ -754,12 +755,7 @@ export class ZoteroGateway {
         }
         // Check if MinerU has parsed this PDF
         try {
-          const { hasCachedMineruMd, getMineruItemDir } = await import(
-            "../../modules/contextPanel/mineruCache"
-          );
-          if (await hasCachedMineruMd(att.id)) {
-            mineruCacheDir = getMineruItemDir(att.id);
-          }
+          mineruCacheDir = await ensureMineruCacheDirForAttachment(att);
         } catch (err) { ztoolkit.log("LLM: MinerU cache check failed", err); }
       }
       results.push({

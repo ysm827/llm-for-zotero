@@ -2,12 +2,16 @@ import { assert } from "chai";
 import { unzipSync } from "fflate";
 import { setMineruSyncEnabled } from "../src/utils/mineruConfig";
 import {
+  getMineruItemDir,
+  hasCachedMineruMd,
   readCachedMineruMd,
   writeMineruCacheFiles,
 } from "../src/modules/contextPanel/mineruCache";
+import { pdfTextCache } from "../src/modules/contextPanel/state";
 import {
   buildMineruSyncPackageBytes,
   cleanSyncedMineruPackages,
+  ensureMineruCacheDirForAttachment,
   ensureMineruRuntimeCacheForAttachment,
   getMineruAvailabilityForAttachment,
   MINERU_SYNC_ATTACHMENT_TITLE_PREFIX,
@@ -17,6 +21,8 @@ import {
   restoreSyncedMineruCacheForAttachment,
   shouldIncludeMineruCachePackageEntry,
 } from "../src/modules/contextPanel/mineruSync";
+import { createReadLibraryTool } from "../src/agent/tools/read/readLibrary";
+import { ZoteroGateway } from "../src/agent/services/zoteroGateway";
 
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
@@ -152,6 +158,9 @@ function setupZotero(items: Map<number, MockItem>, io: MemoryIO): void {
       get: (id: number) => items.get(id) || null,
       getAll: async (libraryID: number) =>
         [...items.values()].filter((item) => item.libraryID === libraryID),
+    },
+    Fulltext: {
+      getIndexedState: async () => 3,
     },
     Attachments: {
       importFromFile: async (options: {
@@ -299,6 +308,7 @@ describe("mineruSync", function () {
     delete (globalThis as unknown as { IOUtils?: unknown }).IOUtils;
     delete (globalThis as unknown as { Zotero?: unknown }).Zotero;
     delete (globalThis as unknown as { ztoolkit?: unknown }).ztoolkit;
+    pdfTextCache.clear();
   });
 
   it("filters only unsafe entries and layout.json from sync packages", function () {
@@ -676,6 +686,217 @@ describe("mineruSync", function () {
       await readCachedMineruMd(pdf.id),
       "# Intro\n![Fig](images/fig1.png)\n# Results\ncontent",
     );
+  });
+
+  it("lazily restores a MinerU cache dir from a synced package and reuses the local cache", async function () {
+    const io = setupMemoryIO();
+    const items = new Map<number, MockItem>();
+    const parent = createParent();
+    const pdf = createAttachment({
+      id: 80,
+      key: "PDFLAZY",
+      parentID: parent.id,
+      contentType: "application/pdf",
+      filename: "lazy.pdf",
+    });
+    parent.attachmentIDs!.push(pdf.id);
+    items.set(parent.id, parent);
+    items.set(pdf.id, pdf);
+    setupZotero(items, io);
+    setMineruSyncEnabled(true);
+
+    await writeSampleCache(pdf.id);
+    const zipBytes = await buildMineruSyncPackageBytes(
+      pdf as unknown as Zotero.Item,
+    );
+    assert.exists(zipBytes);
+    await io.remove(`/tmp/zotero/llm-for-zotero-mineru/${pdf.id}`);
+
+    const packageItem = attachPackage({
+      io,
+      items,
+      parent,
+      id: 93,
+      key: "PKGLAZY",
+      sourceKey: "PDFLAZY",
+      bytes: zipBytes!,
+    });
+    const readPackagePath = packageItem.getFilePathAsync!.bind(packageItem);
+    let packageReads = 0;
+    packageItem.getFilePathAsync = async () => {
+      packageReads += 1;
+      return readPackagePath();
+    };
+    pdfTextCache.set(pdf.id, {
+      title: "Stale Zotero text",
+      chunks: ["stale"],
+      chunkMeta: [],
+      chunkStats: [],
+      docFreq: {},
+      avgChunkLength: 1,
+      fullLength: 5,
+      sourceType: "zotero-worker",
+    } as any);
+
+    const restoredDir = await ensureMineruCacheDirForAttachment(
+      pdf as unknown as Zotero.Item,
+    );
+    assert.equal(restoredDir, getMineruItemDir(pdf.id));
+    assert.equal(packageReads, 1);
+    assert.isTrue(await hasCachedMineruMd(pdf.id));
+    assert.isUndefined(pdfTextCache.get(pdf.id));
+
+    packageItem.getFilePathAsync = async () => {
+      throw new Error("Local cache should skip package reads");
+    };
+    const reusedDir = await ensureMineruCacheDirForAttachment(
+      pdf as unknown as Zotero.Item,
+    );
+    assert.equal(reusedDir, getMineruItemDir(pdf.id));
+  });
+
+  it("exposes mineruCacheDir from read_library after lazy restoring a synced package", async function () {
+    const io = setupMemoryIO();
+    const items = new Map<number, MockItem>();
+    const parent = createParent();
+    const pdf = createAttachment({
+      id: 81,
+      key: "PDFREADLIB",
+      parentID: parent.id,
+      contentType: "application/pdf",
+      filename: "read-library.pdf",
+    });
+    parent.attachmentIDs!.push(pdf.id);
+    items.set(parent.id, parent);
+    items.set(pdf.id, pdf);
+    setupZotero(items, io);
+    setMineruSyncEnabled(true);
+
+    await writeSampleCache(pdf.id);
+    const zipBytes = await buildMineruSyncPackageBytes(
+      pdf as unknown as Zotero.Item,
+    );
+    assert.exists(zipBytes);
+    await io.remove(`/tmp/zotero/llm-for-zotero-mineru/${pdf.id}`);
+    attachPackage({
+      io,
+      items,
+      parent,
+      id: 94,
+      key: "PKGREADLIB",
+      sourceKey: "PDFREADLIB",
+      bytes: zipBytes!,
+    });
+
+    const tool = createReadLibraryTool(new ZoteroGateway());
+    const validated = tool.validate({
+      itemIds: [parent.id],
+      sections: ["attachments"],
+    });
+    assert.isTrue(validated.ok);
+    if (!validated.ok) return;
+
+    const result = await tool.execute(validated.value, {
+      request: {
+        conversationKey: 1,
+        mode: "agent",
+        userText: "summarize",
+        activeItemId: parent.id,
+        libraryID: 1,
+      },
+      item: null,
+      currentAnswerText: "",
+      modelName: "gpt-5.5",
+    });
+    const entry = (result as { results: Record<string, any> }).results[
+      String(parent.id)
+    ];
+    const pdfAttachment = entry.attachments.find(
+      (attachment: { contextItemId: number }) =>
+        attachment.contextItemId === pdf.id,
+    );
+    assert.equal(pdfAttachment?.mineruCacheDir, getMineruItemDir(pdf.id));
+    assert.equal(
+      await readCachedMineruMd(pdf.id),
+      "# Intro\n![Fig](images/fig1.png)\n# Results\ncontent",
+    );
+  });
+
+  it("does not lazy restore when sync is disabled, package is invalid, or item is not a PDF", async function () {
+    const io = setupMemoryIO();
+    const items = new Map<number, MockItem>();
+    const parent = createParent();
+    const pdf = createAttachment({
+      id: 82,
+      key: "PDFFAILURES",
+      parentID: parent.id,
+      contentType: "application/pdf",
+      filename: "failures.pdf",
+    });
+    const nonPdf = createAttachment({
+      id: 83,
+      key: "NONPDF",
+      parentID: parent.id,
+      contentType: "text/plain",
+      filename: "note.txt",
+    });
+    parent.attachmentIDs!.push(pdf.id, nonPdf.id);
+    items.set(parent.id, parent);
+    items.set(pdf.id, pdf);
+    items.set(nonPdf.id, nonPdf);
+    setupZotero(items, io);
+
+    await writeSampleCache(pdf.id);
+    const zipBytes = await buildMineruSyncPackageBytes(
+      pdf as unknown as Zotero.Item,
+    );
+    assert.exists(zipBytes);
+    await io.remove(`/tmp/zotero/llm-for-zotero-mineru/${pdf.id}`);
+    attachPackage({
+      io,
+      items,
+      parent,
+      id: 95,
+      key: "PKGDISABLEDLZ",
+      sourceKey: "PDFFAILURES",
+      bytes: zipBytes!,
+    });
+
+    setMineruSyncEnabled(false);
+    assert.isUndefined(
+      await ensureMineruCacheDirForAttachment(pdf as unknown as Zotero.Item),
+    );
+    assert.isFalse(await hasCachedMineruMd(pdf.id));
+    assert.isUndefined(
+      await ensureMineruCacheDirForAttachment(nonPdf as unknown as Zotero.Item),
+    );
+
+    const invalidPdf = createAttachment({
+      id: 84,
+      key: "PDFINVALIDLZ",
+      parentID: parent.id,
+      contentType: "application/pdf",
+      filename: "invalid-lazy.pdf",
+    });
+    parent.attachmentIDs!.push(invalidPdf.id);
+    items.set(invalidPdf.id, invalidPdf);
+    attachPackage({
+      io,
+      items,
+      parent,
+      id: 96,
+      key: "PKGINVALIDLZ",
+      sourceKey: "PDFINVALIDLZ",
+      bytes: bytes("not a zip"),
+    });
+    setMineruSyncEnabled(true);
+
+    assert.isUndefined(
+      await ensureMineruCacheDirForAttachment(
+        invalidPdf as unknown as Zotero.Item,
+      ),
+    );
+    assert.isFalse(await hasCachedMineruMd(invalidPdf.id));
   });
 
   it("skips package reads when runtime cache already exists", async function () {
