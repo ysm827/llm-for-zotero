@@ -879,8 +879,8 @@ export async function hasSyncedMineruPackageForAttachment(
 ): Promise<boolean> {
   if (!isPdfAttachment(sourceAttachment)) return false;
   const candidates = await findPackageCandidatesForSource(sourceAttachment, {
-    loadBytes: false,
-    requireReadable: false,
+    loadBytes: true,
+    requireReadable: true,
   });
   return candidates.length > 0;
 }
@@ -897,9 +897,12 @@ export async function getMineruAvailabilityForAttachment(
       attachmentId,
     };
   }
+  const syncEnabled = isMineruSyncEnabled();
   const [localCached, syncedPackage] = await Promise.all([
     hasCachedMineruMd(attachmentId),
-    hasSyncedMineruPackageForAttachment(sourceAttachment),
+    syncEnabled
+      ? hasSyncedMineruPackageForAttachment(sourceAttachment)
+      : Promise.resolve(false),
   ]);
   return {
     status: localCached

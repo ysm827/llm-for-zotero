@@ -454,6 +454,7 @@ describe("mineruSync", function () {
     items.set(parent.id, parent);
     items.set(pdf.id, pdf);
     setupZotero(items, io);
+    setMineruSyncEnabled(true);
 
     assert.equal(
       (
@@ -505,6 +506,89 @@ describe("mineruSync", function () {
       ).status,
       "synced",
     );
+  });
+
+  it("does not report synced packages as available when sync is disabled", async function () {
+    const io = setupMemoryIO();
+    const items = new Map<number, MockItem>();
+    const parent = createParent();
+    const pdf = createAttachment({
+      id: 52,
+      key: "PDFDISABLED",
+      parentID: parent.id,
+      contentType: "application/pdf",
+      filename: "disabled-sync.pdf",
+    });
+    parent.attachmentIDs!.push(pdf.id);
+    items.set(parent.id, parent);
+    items.set(pdf.id, pdf);
+    setupZotero(items, io);
+
+    await writeSampleCache(pdf.id);
+    const zipBytes = await buildMineruSyncPackageBytes(
+      pdf as unknown as Zotero.Item,
+    );
+    assert.exists(zipBytes);
+    attachPackage({
+      io,
+      items,
+      parent,
+      id: 90,
+      key: "PKGDISABLED",
+      sourceKey: "PDFDISABLED",
+      bytes: zipBytes!,
+    });
+    setMineruSyncEnabled(false);
+
+    const localAvailability = await getMineruAvailabilityForAttachment(
+      pdf as unknown as Zotero.Item,
+    );
+    assert.equal(localAvailability.status, "local");
+    assert.isTrue(localAvailability.localCached);
+    assert.isFalse(localAvailability.syncedPackage);
+
+    await io.remove(`/tmp/zotero/llm-for-zotero-mineru/${pdf.id}`);
+    const syncedOnlyAvailability = await getMineruAvailabilityForAttachment(
+      pdf as unknown as Zotero.Item,
+    );
+    assert.equal(syncedOnlyAvailability.status, "missing");
+    assert.isFalse(syncedOnlyAvailability.localCached);
+    assert.isFalse(syncedOnlyAvailability.syncedPackage);
+  });
+
+  it("does not report unreadable title-matched packages as synced", async function () {
+    const io = setupMemoryIO();
+    const items = new Map<number, MockItem>();
+    const parent = createParent();
+    const pdf = createAttachment({
+      id: 53,
+      key: "PDFINVALID",
+      parentID: parent.id,
+      contentType: "application/pdf",
+      filename: "invalid-package.pdf",
+    });
+    parent.attachmentIDs!.push(pdf.id);
+    items.set(parent.id, parent);
+    items.set(pdf.id, pdf);
+    setupZotero(items, io);
+    setMineruSyncEnabled(true);
+
+    attachPackage({
+      io,
+      items,
+      parent,
+      id: 91,
+      key: "PKGINVALID",
+      sourceKey: "PDFINVALID",
+      bytes: bytes("not a zip"),
+    });
+
+    const availability = await getMineruAvailabilityForAttachment(
+      pdf as unknown as Zotero.Item,
+    );
+    assert.equal(availability.status, "missing");
+    assert.isFalse(availability.localCached);
+    assert.isFalse(availability.syncedPackage);
   });
 
   it("restores a missing local cache from a matching synced package", async function () {
