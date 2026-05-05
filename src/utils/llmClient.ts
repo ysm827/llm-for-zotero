@@ -86,6 +86,7 @@ import {
 } from "./providerTransport";
 import { parseDataUrl } from "../shared/dataUrl";
 import { readFileRefAsBase64 } from "../agent/model/shared";
+import { buildMultipartRequest } from "./multipart";
 import {
   extractCodexAppServerThreadId,
   extractCodexAppServerTurnId,
@@ -1131,93 +1132,28 @@ function isPurposeValidationError(status: number, bodyText: string): boolean {
   return /purpose/i.test(bodyText);
 }
 
-function getFormDataCtor(): typeof FormData | undefined {
-  const fromGlobal = (globalThis as { FormData?: typeof FormData }).FormData;
-  if (typeof fromGlobal === "function") return fromGlobal;
-  const fromToolkit = ztoolkit.getGlobal("FormData") as
-    | typeof FormData
-    | undefined;
-  return typeof fromToolkit === "function" ? fromToolkit : undefined;
-}
-
-function getBlobCtor(): typeof Blob | undefined {
-  const fromGlobal = (globalThis as { Blob?: typeof Blob }).Blob;
-  if (typeof fromGlobal === "function") return fromGlobal;
-  const fromToolkit = ztoolkit.getGlobal("Blob") as typeof Blob | undefined;
-  return typeof fromToolkit === "function" ? fromToolkit : undefined;
-}
-
-function toSafeMultipartToken(value: string): string {
-  return (value || "").replace(/[\r\n"]/g, "_").trim() || "attachment";
-}
-
-function concatBytes(parts: Uint8Array[]): Uint8Array {
-  const totalLength = parts.reduce((sum, part) => sum + part.byteLength, 0);
-  const out = new Uint8Array(totalLength);
-  let offset = 0;
-  for (const part of parts) {
-    out.set(part, offset);
-    offset += part.byteLength;
-  }
-  return out;
-}
-
-function buildManualMultipartBody(params: {
-  purpose: string;
-  fileName: string;
-  mimeType: string;
-  bytes: Uint8Array;
-}): { body: Uint8Array; contentType: string } {
-  const encoder = new TextEncoder();
-  const boundary = `----llmforzotero-${Date.now().toString(16)}-${Math.random().toString(16).slice(2)}`;
-  const safePurpose = toSafeMultipartToken(params.purpose);
-  const safeFileName = toSafeMultipartToken(params.fileName);
-  const safeMimeType = toSafeMultipartToken(params.mimeType);
-
-  const prefix = encoder.encode(
-    `--${boundary}\r\n` +
-      `Content-Disposition: form-data; name="purpose"\r\n\r\n` +
-      `${safePurpose}\r\n` +
-      `--${boundary}\r\n` +
-      `Content-Disposition: form-data; name="file"; filename="${safeFileName}"\r\n` +
-      `Content-Type: ${safeMimeType}\r\n\r\n`,
-  );
-  const suffix = encoder.encode(`\r\n--${boundary}--\r\n`);
-  return {
-    body: concatBytes([prefix, params.bytes, suffix]),
-    contentType: `multipart/form-data; boundary=${boundary}`,
-  };
-}
-
 function buildUploadRequest(params: {
   purpose: string;
   fileName: string;
   mimeType: string;
   bytes: Uint8Array;
 }): { body: BodyInit; contentType?: string; mode: "formdata" | "manual" } {
-  const FormDataCtor = getFormDataCtor();
-  const BlobCtor = getBlobCtor();
-  if (FormDataCtor && BlobCtor) {
-    const body = new FormDataCtor();
-    const blob = new BlobCtor([params.bytes], {
-      type: params.mimeType || "application/octet-stream",
-    });
-    body.append("purpose", params.purpose || "assistants");
-    body.append("file", blob, params.fileName || "attachment");
-    return { body, mode: "formdata" };
-  }
-
-  const manual = buildManualMultipartBody({
-    purpose: params.purpose,
-    fileName: params.fileName,
-    mimeType: params.mimeType,
-    bytes: params.bytes,
-  });
-  return {
-    body: manual.body,
-    contentType: manual.contentType,
-    mode: "manual",
-  };
+  return buildMultipartRequest(
+    [
+      { name: "purpose", value: params.purpose || "assistants" },
+      {
+        name: "file",
+        filename: params.fileName || "attachment",
+        contentType: params.mimeType || "application/octet-stream",
+        data: params.bytes,
+      },
+    ],
+    {
+      boundaryPrefix: "llmforzotero",
+      fallbackName: "attachment",
+      preferFormData: true,
+    },
+  );
 }
 
 async function uploadAttachmentForResponses(params: {

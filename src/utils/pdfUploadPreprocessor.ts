@@ -6,6 +6,11 @@
  * a separate file upload step before the PDF can be referenced in messages.
  */
 
+import {
+  buildManualMultipartBody,
+  type MultipartField,
+} from "./multipart";
+
 type UploadResult = {
   systemMessageContent: string;
   label: string;
@@ -36,51 +41,13 @@ export function detectPdfUploadProvider(apiBase: string): PdfUploadProvider {
   return null;
 }
 
-// ── Multipart form builder (Zotero-compatible) ──────────────────────────────
-
-/**
- * Build a multipart/form-data body manually since Zotero's FormData
- * may not work reliably with fetch for file uploads.
- */
-function buildMultipartBody(
-  fields: Array<{ name: string; value: string } | { name: string; filename: string; contentType: string; data: Uint8Array }>,
+function buildPdfUploadMultipartBody(
+  fields: MultipartField[],
 ): { contentType: string; body: Uint8Array } {
-  const boundary = `----FormBoundary${Date.now()}${Math.random().toString(36).slice(2)}`;
-  const encoder = new TextEncoder();
-  const parts: Uint8Array[] = [];
-
-  for (const field of fields) {
-    if ("data" in field) {
-      // File field
-      const safeName = (field.name || "").replace(/[\r\n"]/g, "_");
-      const safeFilename = (field.filename || "").replace(/[\r\n"]/g, "_");
-      const safeContentType = (field.contentType || "application/octet-stream").replace(/[\r\n"]/g, "_");
-      const header = `--${boundary}\r\nContent-Disposition: form-data; name="${safeName}"; filename="${safeFilename}"\r\nContent-Type: ${safeContentType}\r\n\r\n`;
-      parts.push(encoder.encode(header));
-      parts.push(field.data);
-      parts.push(encoder.encode("\r\n"));
-    } else {
-      // Text field
-      const part = `--${boundary}\r\nContent-Disposition: form-data; name="${field.name}"\r\n\r\n${field.value}\r\n`;
-      parts.push(encoder.encode(part));
-    }
-  }
-  parts.push(encoder.encode(`--${boundary}--\r\n`));
-
-  // Concatenate all parts
-  let totalLength = 0;
-  for (const p of parts) totalLength += p.length;
-  const body = new Uint8Array(totalLength);
-  let offset = 0;
-  for (const p of parts) {
-    body.set(p, offset);
-    offset += p.length;
-  }
-
-  return {
-    contentType: `multipart/form-data; boundary=${boundary}`,
-    body,
-  };
+  return buildManualMultipartBody(fields, {
+    boundaryPrefix: "FormBoundary",
+    fallbackName: "field",
+  });
 }
 
 // ── Qwen (DashScope) ────────────────────────────────────────────────────────
@@ -118,7 +85,7 @@ async function uploadPdfToQwen(
 
   ztoolkit.log("LLM: Qwen PDF upload starting", { base, fileName, size: pdfBytes.byteLength });
 
-  const { contentType, body } = buildMultipartBody([
+  const { contentType, body } = buildPdfUploadMultipartBody([
     { name: "file", filename: fileName, contentType: "application/pdf", data: pdfBytes },
     { name: "purpose", value: "file-extract" },
   ]);
@@ -163,7 +130,7 @@ async function uploadPdfToKimi(
 
   ztoolkit.log("LLM: Kimi PDF upload starting", { base, fileName, size: pdfBytes.byteLength });
 
-  const { contentType, body } = buildMultipartBody([
+  const { contentType, body } = buildPdfUploadMultipartBody([
     { name: "file", filename: fileName, contentType: "application/pdf", data: pdfBytes },
     { name: "purpose", value: "file-extract" },
   ]);

@@ -15,6 +15,7 @@ import {
   type MineruLocalBackend,
 } from "./mineruConfig";
 import { t } from "./i18n";
+import { buildMultipartRequest } from "./multipart";
 
 const MINERU_DIRECT_API_BASE = "https://mineru.net/api/v4";
 const MINERU_PROXY_API_BASE =
@@ -530,7 +531,7 @@ async function downloadAndExtractZip(
   zipUrl: string,
   report: (s: string) => void,
 ): Promise<MineruZipExtractionResult> {
-  report("Downloading results…");
+  report(t("Downloading results…"));
   const downloadResult = await httpGetBinary(zipUrl);
   if (!downloadResult.bytes) {
     return {
@@ -554,70 +555,6 @@ async function downloadAndExtractZip(
     ok: true,
     mdContent: extracted.mdContent,
     files: extracted.files,
-  };
-}
-
-function concatBytes(parts: Uint8Array[]): Uint8Array {
-  const totalLength = parts.reduce((sum, part) => sum + part.byteLength, 0);
-  const out = new Uint8Array(totalLength);
-  let offset = 0;
-  for (const part of parts) {
-    out.set(part, offset);
-    offset += part.byteLength;
-  }
-  return out;
-}
-
-function toSafeMultipartToken(value: string): string {
-  return (value || "").replace(/[\r\n"]/g, "_").trim() || "field";
-}
-
-function buildMultipartBody(
-  fields: Array<
-    | { name: string; value: string }
-    | {
-        name: string;
-        filename: string;
-        contentType: string;
-        data: Uint8Array;
-      }
-  >,
-): { body: Uint8Array; contentType: string } {
-  const encoder = new TextEncoder();
-  const boundary = `----MinerUBoundary${Date.now().toString(16)}${Math.random().toString(16).slice(2)}`;
-  const parts: Uint8Array[] = [];
-
-  for (const field of fields) {
-    const safeName = toSafeMultipartToken(field.name);
-    if ("data" in field) {
-      const safeFilename = toSafeMultipartToken(field.filename || "paper.pdf");
-      const safeContentType = toSafeMultipartToken(
-        field.contentType || "application/octet-stream",
-      );
-      parts.push(
-        encoder.encode(
-          `--${boundary}\r\n` +
-            `Content-Disposition: form-data; name="${safeName}"; filename="${safeFilename}"\r\n` +
-            `Content-Type: ${safeContentType}\r\n\r\n`,
-        ),
-      );
-      parts.push(field.data);
-      parts.push(encoder.encode("\r\n"));
-    } else {
-      parts.push(
-        encoder.encode(
-          `--${boundary}\r\n` +
-            `Content-Disposition: form-data; name="${safeName}"\r\n\r\n` +
-            `${field.value}\r\n`,
-        ),
-      );
-    }
-  }
-
-  parts.push(encoder.encode(`--${boundary}--\r\n`));
-  return {
-    body: concatBytes(parts),
-    contentType: `multipart/form-data; boundary=${boundary}`,
   };
 }
 
@@ -647,7 +584,38 @@ async function fetchWithTimeout(
 ): Promise<Response> {
   const AbortCtrl = getAbortControllerCtor();
   if (!AbortCtrl) {
-    return await getFetch()(url, init);
+    return await new Promise<Response>((resolve, reject) => {
+      let settled = false;
+      const cleanup = () => {
+        clearTimeout(timer);
+        signal?.removeEventListener("abort", onAbort);
+      };
+      const finishResolve = (value: Response) => {
+        if (settled) return;
+        settled = true;
+        cleanup();
+        resolve(value);
+      };
+      const finishReject = (error: unknown) => {
+        if (settled) return;
+        settled = true;
+        cleanup();
+        reject(error);
+      };
+      const onAbort = () => finishReject(new MineruCancelledError());
+      const timer = setTimeout(
+        () => finishReject(new Error(timeoutMessage)),
+        timeoutMs,
+      );
+
+      if (signal?.aborted) {
+        finishReject(new MineruCancelledError());
+        return;
+      }
+
+      signal?.addEventListener("abort", onAbort, { once: true });
+      getFetch()(url, init).then(finishResolve, finishReject);
+    });
   }
 
   const controller = new AbortCtrl();
@@ -678,24 +646,31 @@ function buildLocalFileParseBody(params: {
   fileName: string;
   pdfBytes: Uint8Array;
   backend: MineruLocalBackend;
-}): { body: Uint8Array; contentType: string } {
-  return buildMultipartBody([
+}): { body: BodyInit; contentType?: string; mode: "formdata" | "manual" } {
+  return buildMultipartRequest(
+    [
+      {
+        name: "files",
+        filename: params.fileName,
+        contentType: "application/pdf",
+        data: params.pdfBytes,
+      },
+      { name: "backend", value: toMineruApiBackend(params.backend) },
+      { name: "parse_method", value: "auto" },
+      { name: "formula_enable", value: "true" },
+      { name: "table_enable", value: "true" },
+      { name: "return_md", value: "true" },
+      { name: "return_content_list", value: "true" },
+      { name: "return_images", value: "true" },
+      { name: "response_format_zip", value: "true" },
+      { name: "return_original_file", value: "false" },
+    ],
     {
-      name: "files",
-      filename: params.fileName,
-      contentType: "application/pdf",
-      data: params.pdfBytes,
+      boundaryPrefix: "MinerUBoundary",
+      fallbackName: "field",
+      preferFormData: true,
     },
-    { name: "backend", value: toMineruApiBackend(params.backend) },
-    { name: "parse_method", value: "auto" },
-    { name: "formula_enable", value: "true" },
-    { name: "table_enable", value: "true" },
-    { name: "return_md", value: "true" },
-    { name: "return_content_list", value: "true" },
-    { name: "return_images", value: "true" },
-    { name: "response_format_zip", value: "true" },
-    { name: "return_original_file", value: "false" },
-  ]);
+  );
 }
 
 async function parsePdfViaLocalFileParse(
@@ -732,14 +707,14 @@ async function parsePdfViaLocalFileParse(
 
   let response: Response;
   try {
+    const headers: Record<string, string> = {};
+    if (contentType) headers["Content-Type"] = contentType;
     response = await raceAbort(
       fetchWithTimeout(
         url,
         {
           method: "POST",
-          headers: {
-            "Content-Type": contentType,
-          },
+          headers,
           body,
         },
         signal,
@@ -1180,10 +1155,10 @@ async function parsePdfViaUpload(
   signal?: AbortSignal,
 ): Promise<MinerUResult> {
   throwIfAborted(signal);
-  report("Reading PDF file…");
+  report(t("Reading PDF file…"));
   const pdfBytes = await readPdfBytes(pdfPath);
   if (!pdfBytes || !pdfBytes.length) {
-    report("PDF file is empty or unreadable");
+    report(t("PDF file is empty or unreadable"));
     return null;
   }
 
@@ -1192,7 +1167,7 @@ async function parsePdfViaUpload(
   const fileName = rawName.replace(/[^\x20-\x7E]/g, "_") || "paper.pdf";
   const sizeMB = (pdfBytes.length / (1024 * 1024)).toFixed(1);
   throwIfAborted(signal);
-  report(`Requesting upload URL… (${sizeMB} MB)`);
+  report(t("Requesting upload URL… (%s MB)").replace("%s", sizeMB));
 
   const batchResult = await httpJson(
     "POST",
@@ -1221,7 +1196,12 @@ async function parsePdfViaUpload(
     if (/rate.?limit|quota|exceeded|limit.*reached/i.test(respMsg)) {
       throw new MineruRateLimitError(`MinerU rate limit: ${respMsg}`);
     }
-    report(`Batch request failed: HTTP ${batchResult.status}`);
+    report(
+      t("Batch request failed: HTTP %s").replace(
+        "%s",
+        `${batchResult.status}`,
+      ),
+    );
     return null;
   }
 
@@ -1232,12 +1212,12 @@ async function parsePdfViaUpload(
   const fileUrls = batchData?.data?.file_urls;
 
   if (!batchId || !fileUrls?.length) {
-    report("Missing batch_id or file_urls in response");
+    report(t("Missing batch_id or file_urls in response"));
     return null;
   }
 
   throwIfAborted(signal);
-  report("Uploading PDF…");
+  report(t("Uploading PDF…"));
   // Do NOT send Content-Type — the presigned URL's signature may not include it,
   // and adding it would cause Alibaba OSS to return 403.
   // Race the entire upload chain against the abort signal so pause/stop
@@ -1255,16 +1235,20 @@ async function parsePdfViaUpload(
         return fileUrls[0].slice(0, 80);
       }
     })();
-    report(`Upload failed: HTTP ${uploadResult.status} to ${uploadHost}`);
+    report(
+      t("Upload failed: HTTP %s to %s")
+        .replace("%s", `${uploadResult.status}`)
+        .replace("%s", uploadHost),
+    );
     return null;
   }
 
-  report("Processing on server…");
+  report(t("Processing on server…"));
   const startTime = Date.now();
   while (Date.now() - startTime < POLL_TIMEOUT_MS) {
     await sleep(POLL_INTERVAL_MS, signal);
     const elapsed = Math.round((Date.now() - startTime) / 1000);
-    report(`Processing on server… (${elapsed}s)`);
+    report(t("Processing on server… (%ss)").replace("%s", `${elapsed}`));
 
     const pollResult = await httpJson(
       "GET",
@@ -1298,7 +1282,12 @@ async function parsePdfViaUpload(
         report,
       );
       if (extracted.ok) {
-        report(`Done (${extracted.files.length} files extracted)`);
+        report(
+          t("Done (%s files extracted)").replace(
+            "%s",
+            `${extracted.files.length}`,
+          ),
+        );
         return { mdContent: extracted.mdContent, files: extracted.files };
       }
       report(extracted.message);
@@ -1307,12 +1296,12 @@ async function parsePdfViaUpload(
     }
 
     if (extractResult.state === "failed") {
-      report("Extraction failed on server");
+      report(t("Extraction failed on server"));
       return null;
     }
   }
 
-  report("Timed out after 10 minutes");
+  report(t("Timed out after 10 minutes"));
   return null;
 }
 
