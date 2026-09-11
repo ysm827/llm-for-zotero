@@ -501,14 +501,17 @@ export type SendQuestionOptions = {
   forcedSkillIds?: string[];
   /** System messages injected by provider-side PDF upload (Qwen fileid://, Kimi extracted text). */
   pdfUploadSystemMessages?: string[];
-  /** [webchat] When true, attach the paper PDF to the ChatGPT query. */
+  /** [webchat] When true, attach the paper PDF to the provider query. */
   webchatSendPdf?: boolean;
   /** [webchat] Exact PDF chips active for the current upload, in UI order. */
   webchatPdfPaperContexts?: PaperContextRef[];
   /** [webchat] Ephemeral delivery outcome for send-state bookkeeping. */
   onWebChatSendOutcome?: (outcome: "success" | "failed" | "cancelled") => void;
-  /** [webchat] When true, send the prompt into a fresh ChatGPT conversation. */
+  /** [webchat] When true, send the prompt into a fresh provider conversation. */
   webchatForceNewChat?: boolean;
+  /** [webchat] Explicit persisted remote conversation binding for a follow-up. */
+  webchatExpectedChatUrl?: string;
+  webchatExpectedChatId?: string;
   skipAutoCompact?: boolean;
   /** One-shot planning or approved-plan execution context. */
   planContext?: import("../../agent/plans/types").PlanRuntimeContext;

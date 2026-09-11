@@ -1530,26 +1530,13 @@ export function openStandaloneChat(options?: {
               // Load the webchat conversation
               void (async () => {
                 const key = getConversationKey(activeItem);
-                const isDeepSeekSession =
-                  typeof session.chatUrl === "string" &&
-                  /chat\.deepseek\.com/i.test(session.chatUrl);
+                const { getWebChatTargetByUrl } =
+                  await import("../../webchat/types");
+                const sessionTarget = getWebChatTargetByUrl(session.chatUrl);
+                const isDeepSeekSession = sessionTarget?.id === "deepseek";
                 try {
-                  let loadModelName = "chatgpt.com";
-                  try {
-                    if (session.chatUrl) {
-                      const loadUrl = new URL(session.chatUrl);
-                      const { WEBCHAT_TARGETS: targets } =
-                        await import("../../webchat/types");
-                      const matched = targets.find(
-                        (wt) =>
-                          loadUrl.hostname === wt.modelName ||
-                          loadUrl.hostname === `www.${wt.modelName}`,
-                      );
-                      if (matched) loadModelName = matched.modelName;
-                    }
-                  } catch {
-                    /* default */
-                  }
+                  const loadModelName =
+                    sessionTarget?.modelName || "chatgpt.com";
 
                   webChatIsolatedConversationKeys.add(key);
                   loadedConversationKeys.add(key);
@@ -1582,6 +1569,8 @@ export function openStandaloneChat(options?: {
                     modelName?: string;
                     modelProviderLabel?: string;
                     reasoningDetails?: string;
+                    webchatChatUrl?: string;
+                    webchatChatId?: string;
                   }> = [];
 
                   if (result?.messages?.length) {
@@ -1596,6 +1585,12 @@ export function openStandaloneChat(options?: {
                         modelProviderLabel:
                           m.kind === "bot" ? "WebChat" : undefined,
                         reasoningDetails: m.thinking || undefined,
+                        webchatChatUrl:
+                          m.kind === "bot"
+                            ? session.chatUrl || undefined
+                            : undefined,
+                        webchatChatId:
+                          m.kind === "bot" ? session.id : undefined,
                       });
                     }
                   }
